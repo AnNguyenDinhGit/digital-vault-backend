@@ -8,3 +8,5 @@
 **/appsettings.Local.json
 *.user
 *.suo
+**/App_Data/
+.artifacts/

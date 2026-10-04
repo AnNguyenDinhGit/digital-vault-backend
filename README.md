@@ -1,79 +1,20 @@
-# LegacyVault backend
+﻿# LegacyVault backend
 
-Thiết lập ASP.NET Core Web API, target .NET 8, dùng SDK 9.0.315 đã cài.
-EF Core SQL Server và dotnet-ef cùng phiên bản 8.0.30.
+ASP.NET Core .NET 8, EF Core SQL Server 8.0.30. Giữ kiến trúc API → BLL → DAL.
 
-## Cấu trúc
+- API: controllers, cookie authentication, DI, rate limiting và HTTP error responses.
+- BLL: DTOs, phân quyền, upload, xác minh chữ ký, mã hóa AES-256-GCM, OTP và nghiệp vụ bàn giao.
+- DAL: entities database-first, DbContext, repositories và lưu file mã hóa.
+- Tests: bộ kiểm tra chạy độc lập, không cần SQL Server hoặc SMTP thật.
 
-```text
-LegacyVault.sln
-LegacyVault.API/                 Presentation, cấu hình DI và kết nối
-LegacyVault.BLL/DTOs/            Chờ DTO từ entities thực tế
-LegacyVault.DAL/Context/         LegacyVaultDbContext (khung chờ scaffold)
-LegacyVault.DAL/Entities/        Chờ entities từ database
-database/schema.sql             Script gốc, chưa chạy
-```
+Đã triển khai các API chủ sở hữu, người thi hành và người thụ hưởng theo ảnh `Screenshot 2026-10-04 133536.png`.
 
-References: API → BLL → DAL. API cũng tham chiếu DAL để đăng ký DbContext
-tại composition root. Chưa có controller, service, CRUD, authentication hoặc frontend.
-
-## Kết nối bảo mật
-
-Tên cấu hình: `ConnectionStrings:LegacyVault`.
-Đặt connection string thật bằng biến môi trường `ConnectionStrings__LegacyVault`
-hoặc .NET User Secrets của project API trong môi trường Development.
-UserSecretsId đã được khởi tạo; không lưu mật khẩu trong repository.
-
-Ví dụ cấu trúc connection string (các giá trị trong ngoặc là placeholder):
-
-```text
-Server=<server,port hoặc server\instance>;Database=<database>;Integrated Security=True;Encrypt=True;TrustServerCertificate=False;
-```
-
-Nếu dùng SQL authentication, lưu toàn bộ connection string gồm tài khoản và
-mật khẩu trong biến môi trường hoặc User Secrets. Không gửi mật khẩu qua chat.
-User Secrets dùng cho phát triển và không mã hóa dữ liệu trên đĩa.
-
-Ứng dụng không mở kết nối ở startup. DbContext được đăng ký với `UseSqlServer`;
-nếu resolve DbContext khi thiếu cấu hình, thông báo lỗi chỉ nêu tên cấu hình.
-Không bật sensitive data logging. Không có `EnsureCreated`, `Migrate` hoặc migrations.
-
-## Trạng thái và blocker
-
-Chưa kiểm tra kết nối: chưa có connection string cho database phát triển/test
-được cho phép truy cập. `database/schema.sql` chỉ tạo/cấu hình `DigitalVaultDB`,
-không có `CREATE TABLE`, PK, FK hoặc định nghĩa cột. Không chạy script này.
-
-Số bảng trong script: 0. Số bảng trên server: chưa xác định.
-Entities: 0. DTOs: 0. Chưa có mapping entity → DTO để kiểm chứng.
-DbContext hiện là placeholder, không đại diện cho schema thực tế.
-
-Đã chạy `dotnet build LegacyVault.sln`: cả ba project thành công,
-0 warnings, 0 errors. Đã xác minh `dotnet ef --version`: 8.0.30.
-Chưa mở kết nối SQL Server và chưa thực thi SQL; không thay đổi dữ liệu/schema.
-
-Cần server/instance và port nếu cần, tên database, phương thức xác thực,
-connection string được cấu hình bảo mật, và xác nhận đây là database phát triển/test.
-Tài khoản cần quyền kết nối và đọc metadata schema (ví dụ `VIEW DEFINITION`).
-Schema thực tế phải có bảng; có thể bổ sung script schema đầy đủ để đối chiếu.
-
-## Tiếp tục sau khi có kết nối được cho phép
-
-Kiểm tra kết nối bằng SqlClient, chỉ đọc metadata số bảng và schema; không ghi dữ liệu.
-Sau khi kết nối được xác minh, dùng Database First:
+Xem [tài liệu API và cấu hình](docs/API.md) để biết endpoint, multipart fields, định dạng chữ ký, OTP và giới hạn triển khai.
 
 ```powershell
-dotnet tool restore
-dotnet ef dbcontext scaffold "Name=ConnectionStrings:LegacyVault" Microsoft.EntityFrameworkCore.SqlServer --project LegacyVault.DAL --startup-project LegacyVault.API --context LegacyVaultDbContext --context-dir Context --output-dir Entities --namespace LegacyVault.DAL.Entities --context-namespace LegacyVault.DAL.Context --no-onconfiguring --force
 dotnet build LegacyVault.sln
+dotnet run --project LegacyVault.Tests
+dotnet run --project LegacyVault.API --launch-profile https
 ```
 
-`--force` thay khung DbContext hiện tại bằng code sinh từ database; khi đã có
-entities cần kiểm tra các file trước khi scaffold lại. Lệnh scaffold đọc schema,
-không tạo migration hoặc thay đổi database. Không truyền connection string thật
-trên command line; `Name=` đọc cấu hình qua startup project. Với User Secrets,
-đặt `ASPNETCORE_ENVIRONMENT=Development` và `DOTNET_ENVIRONMENT=Development`.
-
-Sau scaffold: đối chiếu bảng, PK/FK, navigation, kiểu cột, nullability và mappings.
-Tạo DTO chỉ từ các trường thực tế, bỏ password hashes và các trường nhạy cảm khác.
-Ghi bảng mapping entity → DTO rồi build lại. Chưa triển khai mapper hoặc services.
+Cần cấu hình ConnectionStrings:LegacyVault, Security:EncryptionKey, chứng thư signer và SMTP qua User Secrets hoặc biến môi trường. Không lưu secrets vào Git. API không tự tạo user, chạy migration hay sửa schema. Chưa kiểm tra kết nối database/SMTP thật; database/schema.sql không có CREATE TABLE và không được dùng để dựng schema.

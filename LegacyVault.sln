@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LegacyVault.BLL", "LegacyVa
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LegacyVault.DAL", "LegacyVault.DAL\LegacyVault.DAL.csproj", "{13C9017B-CF01-49C6-A26D-147865AD557E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LegacyVault.Tests", "LegacyVault.Tests\LegacyVault.Tests.csproj", "{19B87C12-1092-412A-AB61-CB67ABC4CD5A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -55,6 +57,18 @@ Global
 		{13C9017B-CF01-49C6-A26D-147865AD557E}.Release|x64.Build.0 = Release|Any CPU
 		{13C9017B-CF01-49C6-A26D-147865AD557E}.Release|x86.ActiveCfg = Release|Any CPU
 		{13C9017B-CF01-49C6-A26D-147865AD557E}.Release|x86.Build.0 = Release|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Debug|x64.Build.0 = Debug|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Debug|x86.Build.0 = Debug|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Release|x64.ActiveCfg = Release|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Release|x64.Build.0 = Release|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Release|x86.ActiveCfg = Release|Any CPU
+		{19B87C12-1092-412A-AB61-CB67ABC4CD5A}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
