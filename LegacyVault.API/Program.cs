@@ -1,8 +1,13 @@
 using LegacyVault.DAL.Context;
 using Microsoft.EntityFrameworkCore;
+using LegacyVault.BLL.Services;
+
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ...
+builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
+// ...
 // Reads environment variables and Development User Secrets.
 // Startup does not open a connection or modify the database.
 builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
@@ -15,6 +20,7 @@ builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
     }
     options.UseSqlServer(connectionString);
 });
+
 
 var app = builder.Build();
 app.UseHttpsRedirection();
