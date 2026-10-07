@@ -9,6 +9,7 @@ public interface IVaultRepository
     Task<User?> User(int id, CancellationToken ct);
     Task<User?> LoginUser(string email, CancellationToken ct);
     Task<User?> UserByEmail(string email, CancellationToken ct);
+    Task<List<User>> UsersByRole(string role, CancellationToken ct);
     Task<Role?> Role(string name, CancellationToken ct);
     Task Register(User user, string defaultRole, CancellationToken ct);
     Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct);
@@ -26,6 +27,13 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
     public Task<User?> User(int id, CancellationToken ct) => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.UserId == id, ct);
     public Task<User?> LoginUser(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).Include(x => x.Authentications).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
     public Task<User?> UserByEmail(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
+
+    public Task<List<User>> UsersByRole(string role, CancellationToken ct) =>
+    db.Users
+      .Include(x => x.Roles)
+      .Where(x => x.Status == "Active" && x.Roles.Any(r => r.RoleName == role))
+      .ToListAsync(ct);
+
     public Task<Role?> Role(string name, CancellationToken ct) => db.Roles.SingleOrDefaultAsync(x => x.RoleName == name, ct);
     public Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct) => db.DigitalVaults.AsNoTracking().Where(x => x.OwnerId == owner).OrderBy(x => x.VaultId).ToListAsync(ct);
     public Task<DigitalVault?> Vault(int id, CancellationToken ct) => db.DigitalVaults.SingleOrDefaultAsync(x => x.VaultId == id, ct);

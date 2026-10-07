@@ -74,13 +74,73 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         if (a is null || a.Vault.OwnerId != user) throw new WorkflowException(404, "Asset not found.");
         return a;
     }
+
+    private async Task<int> GetOrAssignRandomExecutor(DigitalVault vault, CancellationToken ct)
+    {
+        // Kiểm tra xem Vault đã có Executor (người dùng chọn hoặc hệ thống tự gán) chưa
+        var activeAssignment = vault.ExecutorAssignments
+            .FirstOrDefault(x => x.Status == "Active" || x.Status == "AutoAssigned");
+
+        if (activeAssignment is not null)
+            return activeAssignment.ExecutorId;
+
+        // Lấy danh sách Executor đang Active trên toàn hệ thống
+        var availableExecutors = await repository.UsersByRole(ExecutorRole, ct);
+        var activeExecutors = availableExecutors.Where(u => u.Status == "Active").ToList();
+
+        if (activeExecutors.Count == 0)
+            throw new WorkflowException(500, "No active executors available in the system.");
+
+        // Chọn ngẫu nhiên 1 Executor
+        var randomExecutor = activeExecutors[Random.Shared.Next(activeExecutors.Count)];
+
+        // Lưu thông tin phân công tự động vào DB
+        var autoAssignment = new ExecutorAssignment
+        {
+            VaultId = vault.VaultId,
+            ExecutorId = randomExecutor.UserId,
+            Status = "AutoAssigned",
+            AssignedAt = DateTime.UtcNow
+        };
+
+        repository.Add(autoAssignment);
+        await repository.Save(ct);
+
+        return randomExecutor.UserId;
+    }
     private async Task<HandoverRequest> Executed(int user, int request, CancellationToken ct)
     {
         await Role(user, ExecutorRole, ct);
         var r = await repository.Request(request, ct);
-        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && x.Status == "Active"))
+        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned")))
             throw new WorkflowException(404, "Handover request not found or executor assignment is inactive.");
         return r;
+    }
+
+    public async Task<HandoverDto> CreateHandoverRequest(int user, int vaultId, string requestType, CancellationToken ct)
+    {
+        var vault = await repository.Vault(vaultId, ct);
+        if (vault is null || vault.Status != "Active")
+            throw new WorkflowException(404, "Vault not found or inactive.");
+
+        // Tự động lấy Executor do Owner chọn, hoặc random gán Executor mới nếu Vault chưa có
+        var executorId = await GetOrAssignRandomExecutor(vault, ct);
+
+        var now = DateTime.UtcNow;
+        var request = new HandoverRequest
+        {
+            VaultId = vaultId,
+            ExecutorId = executorId,
+            RequestType = requestType,
+            Status = "Draft",
+            InitiatedAt = now
+        };
+
+        repository.Add(request);
+        Audit(user, "CreateHandoverRequest", "DigitalVault", vaultId, "Success");
+        await repository.Save(ct);
+
+        return Map(request);
     }
     public async Task<IReadOnlyList<AssetDto>> OwnerAssets(int user, CancellationToken ct)
     {
@@ -272,4 +332,5 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     }
     private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
     { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
+
 }
