@@ -1,5 +1,7 @@
 # LEGACYVAULT
 
+Đăng nhập Google khi chưa có frontend: [Google-login-Swagger.md](Google-login-Swagger.md). Bước chọn tài khoản mở trực tiếp trên trình duyệt; OTP và API nghiệp vụ test bằng Swagger.
+
 ## Hướng dẫn test API bằng Swagger
 
 Tài liệu dành cho người kiểm thử • Ngày 04/10/2026
@@ -83,7 +85,7 @@ Kỳ vọng: **201**, body có userId, fullName, email và roles. Sau đó gọi
 
 Ca lỗi: đăng ký email đã dùng (kể cả khác hoa/thường) trả **409**; mật khẩu dưới 12 ký tự, xác nhận không khớp, email sai hoặc gửi thêm trường role trả **400**. Endpoint dùng chung giới hạn 10 request/IP/phút với login; vượt giới hạn trả **429**. Swagger tự thêm header `X-Vault-Request: 1`.
 
-Google + OTP là luồng dự kiến cho giai đoạn sau, chưa có endpoint để test. Hiện đăng ký bằng email/mật khẩu tạo tài khoản ngay khi thành công, không yêu cầu OTP đăng ký. OTP beneficiary vẫn chỉ dùng để xác minh quyền truy cập tài sản thừa kế.
+Đã có Google + OTP; xem [Google-login-Swagger.md](Google-login-Swagger.md) để cấu hình và test. Đăng ký email/mật khẩu vẫn tạo tài khoản ngay, không yêu cầu OTP. OTP beneficiary được tách riêng để xác minh quyền truy cập tài sản thừa kế.
 
 ### Test đăng nhập và đăng xuất
 
@@ -323,7 +325,7 @@ Body lỗi nghiệp vụ thường có status và detail. Lỗi model validation
 | 403 sai role | RoleName phải khớp: Owner, Executor, Beneficiary, LegalVerifier; user phải Active. |
 | 400 chữ ký không hợp lệ | Kiểm tra bytes file không đổi, chữ ký binary RSA-SHA256, cert đúng userId, hạn cert, chain trust và khả năng kiểm tra revocation online. |
 | 503 khi gửi OTP/upload | Kiểm tra SMTP/TLS hoặc Security:EncryptionKey (base64 32 byte). |
-| Không nhận email OTP | Kiểm tra response trước; xem spam, email user, SMTP credentials/TLS và log. Lỗi SMTP thực tế có thể trả 500. |
+| Không nhận email OTP | Kiểm tra response, spam, email user và SMTP credentials/TLS. Lỗi gửi SMTP trả 503; lỗi cấu hình khác có thể trả 500. |
 | File cũ không đọc được | Storage mới yêu cầu envelope AES-GCM; dữ liệu file cũ cần chuyển đổi theo format cũ. Không đổi khóa AES khi đang có file đã lưu. |
 
 ### Mẫu ghi nhận một ca test

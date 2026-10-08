@@ -23,7 +23,8 @@ public sealed class SmtpOtpSender(MailOptions options) : IOtpSender
             throw new WorkflowException(503, "OTP email delivery is not configured.");
         using var client = new SmtpClient(options.Host, options.Port) { EnableSsl = true, Credentials = new NetworkCredential(options.Username, options.Password) };
         using var message = new MailMessage(options.From, email, "LegacyVault identity verification", $"Your code is {code}. It expires in 5 minutes. Do not share this code.");
-        //await client.SendMailAsync(message, ct);
+        try { await client.SendMailAsync(message, ct); }
+        catch (SmtpException) { throw new WorkflowException(503, "OTP email delivery failed. Please retry later."); }
     }
 }
 public sealed record OtpChallenge(string ChallengeId, DateTime ExpiresAt);

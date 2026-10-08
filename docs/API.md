@@ -1,5 +1,18 @@
 # LegacyVault API
 
+## Đăng nhập Google
+
+Google → OTP → đăng nhập theo email, giữ nguyên schema. Xem [cấu hình và test trên Swagger](Google-login-Swagger.md).
+
+| Method | Endpoint | Chức năng |
+| --- | --- | --- |
+| GET | `/api/auth/google/start` | Mở trực tiếp trên trình duyệt để chọn tài khoản Google |
+| GET | `/api/auth/google/oidc-callback` | Callback OIDC do middleware xử lý, không gọi thủ công |
+| GET | `/api/auth/google/callback` | Trang lấy challengeId để nhập OTP trên Swagger |
+| POST | `/api/auth/google/otp/verify` | Xác minh OTP, tạo/tìm User và cấp cookie |
+| POST | `/api/auth/google/otp/resend` | Gửi lại OTP và trả challengeId mới |
+
+
 Đã đọc `Screenshot 2026-10-04 133536.png`. Luồng code: controller API → service BLL → repository/storage DAL. Controller không truy vấn DbContext; DAL không quyết định nghiệp vụ. Entities và mapping database-first được giữ nguyên; cấu hình concurrency dùng partial DbContext.
 
 ## Chạy và cấu hình
@@ -47,7 +60,7 @@ Thành công trả **201** với userId, fullName, email và roles. User, Authen
 
 Đăng ký không tự login, tạo vault/tài sản/assignment hoặc xác minh email. Sau khi nhận 201, gọi `/api/auth/login` với email và mật khẩu vừa đăng ký. Tài khoản executor, pháp lý và admin được cấp email/mật khẩu và role riêng qua quy trình quản trị, không dùng đăng ký công khai. Hiện chưa có API cấp tài khoản nội bộ. Người thụ hưởng đăng ký bình thường với role Owner; khi được chủ sở hữu chọn bằng email, server cấp thêm Beneficiary và tạo assignment cho tài sản đó, giữ nguyên các role hiện có.
 
-Hướng mở rộng sau này (chưa triển khai): bấm nút Google → chọn tài khoản → gửi OTP tới email Google đã xác thực → nhập OTP hợp lệ → tạo tài khoản mới và đăng nhập. Không tạo tài khoản trước khi OTP được xác nhận; tài khoản mới vẫn nhận quyền mặc định do server gán. API hiện tại vẫn đăng ký bằng email/mật khẩu và chưa có đăng nhập Google hoặc OTP đăng ký; OTP beneficiary hiện chỉ dùng để mở quyền xem tài sản thừa kế.
+Đã có luồng Google → OTP → tạo/tìm tài khoản và đăng nhập theo email; xem [hướng dẫn Google](Google-login-Swagger.md). Đăng ký email/mật khẩu vẫn tạo tài khoản ngay, không yêu cầu OTP. OTP beneficiary được tách riêng và chỉ dùng để mở quyền xem tài sản thừa kế.
 
 ### Test bằng Swagger
 

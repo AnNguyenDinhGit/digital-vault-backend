@@ -73,4 +73,31 @@ public sealed class IdentityService(IVaultRepository repository)
             throw new WorkflowException(403, "Active beneficiary required.");
         return user.Email;
     }
+
+    public async Task<LoginDto> GoogleLogin(string verifiedEmail, string fullName, CancellationToken ct)
+    {
+        var email = verifiedEmail.Trim().ToLowerInvariant();
+        if (email.Length > 150 || !new EmailAddressAttribute().IsValid(email))
+            throw new WorkflowException(400, "Invalid Google email.");
+        var user = await repository.LoginUser(email, ct);
+        if (user is null)
+        {
+            var name = fullName.Trim();
+            if (string.IsNullOrEmpty(name)) name = email;
+            if (name.Length > 100) name = name[..100];
+            var now = DateTime.UtcNow;
+            user = new User { Email = email, FullName = name, Status = "Active", CreatedAt = now, UpdatedAt = now };
+            // Google-only accounts have no password record. User and Owner role are saved atomically.
+            try { await repository.Register(user, VaultService.OwnerRole, ct); }
+            catch (RepositoryDuplicateException)
+            {
+                // Another request registered this email; retry through a fresh request/context.
+                throw new WorkflowException(409, "Email was registered concurrently. Start Google sign-in again.");
+            }
+        }
+        if (user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow) ||
+            user.Roles.Any(x => x.RoleName is VaultService.AdminRole or VaultService.ExecutorRole or VaultService.VerifierRole))
+            throw new WorkflowException(403, "This account cannot use public Google sign-in.");
+        return new LoginDto(user.UserId, user.Roles.Select(x => x.RoleName).ToArray());
+    }
 }
