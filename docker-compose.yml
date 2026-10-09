@@ -1,0 +1,26 @@
+services:
+  api:
+    image: ${DOCKERHUB_USERNAME}/${IMAGE_NAME:-legacy-vault-api}:${IMAGE_TAG:-latest}
+    container_name: legacyvault-api
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__LegacyVault: ${DB_CONNECTION:?DB_CONNECTION chưa set trong github secret}
+      # Appsettings có cả "Mail" lẫn "MailOptions", nếu code chỉ bind một section thì xóa bớt section còn lại
+      Mail__Host: smtp.gmail.com
+      Mail__Port: 587
+      Mail__Username: ${MAIL_USERNAME}
+      Mail__Password: ${MAIL_PASSWORD}
+      Mail__From: ${MAIL_REPLY}
+      MailOptions__Host: smtp.gmail.com
+      MailOptions__Port: 587
+      MailOptions__Username: ${MAIL_USERNAME}
+      MailOptions__Password: ${MAIL_PASSWORD}
+      MailOptions__From: ${MAIL_REPLY}
+    networks: 
+      - vault-project 
+
+networks:
+   vault-project:
+      external: true
+

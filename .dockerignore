@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.git/
+.vs/
+*.user
+.env
+docs/
+database/
+*.png
+*.md

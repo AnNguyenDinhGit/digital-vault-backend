@@ -1,0 +1,53 @@
+name: Deploy Legacy Vault API (GitHub)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-legacyvault
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: legacy-vault-api
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, kitsura]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Deploy
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_REPLY: ${{ secrets.MAIL_REPLY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          docker compose -p legacyvault up -d --pull always
+          docker image prune -f
+
+      - name: Verify
+        run: |
+          sleep 5
+          test "$(docker inspect -f '{{.State.Running}}' legacyvault-api)" = "true"
