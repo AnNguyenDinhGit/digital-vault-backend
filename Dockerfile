@@ -5,7 +5,7 @@ FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 WORKDIR /src
 
 # Copy global.json + csproj trước để layer restore được cache
-COPY global.json ./
+# COPY global.json ./
 COPY LegacyVault.API/LegacyVault.API.csproj LegacyVault.API/
 COPY LegacyVault.BLL/LegacyVault.BLL.csproj LegacyVault.BLL/
 COPY LegacyVault.DAL/LegacyVault.DAL.csproj LegacyVault.DAL/
