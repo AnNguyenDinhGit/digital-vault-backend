@@ -69,6 +69,10 @@ dotnet run --project LegacyVault.Tests -- --database-audit
 
 Lệnh đọc cấu hình API/User Secrets/biến môi trường, in danh sách role, so sánh tên cột của 25 bảng và đọc CHECK constraints; không in connection string, password hash hoặc hồ sơ người dùng. API đang chạy có thể khóa DLL khi build: dừng bằng Ctrl+C rồi build/run lại, hoặc build với OutDir riêng để kiểm thử mà không dừng phiên hiện tại.
 
-## Hướng Google + OTP về sau
+## Google + OTP đã triển khai, giữ nguyên schema
 
-Scaffold hiện chưa có entity lưu external provider identity (provider + subject Google). Authentication.PasswordHash bắt buộc và gắn user. Luồng Google/OTP cần thiết kế lưu định danh ngoài và challenge đăng ký riêng; không tạo tài khoản trước khi OTP hợp lệ, không tự ghép tài khoản nội bộ chỉ dựa vào email và không tái sử dụng OTP beneficiary để đăng ký. Luồng đó chưa được triển khai trong thay đổi này.
+Scaffold chưa có entity lưu external provider identity. Theo lựa chọn giữ nguyên database, backend tìm User bằng email Google đã xác minh, sau đó yêu cầu OTP email trước khi tạo/tìm tài khoản và cấp cookie. Không lưu Google sub hoặc liên kết provider. Email thay đổi sẽ không tự liên kết với User cũ.
+
+User không bắt buộc có bản ghi Authentication: tài khoản Google mới không tạo mật khẩu giả; Authentication.PasswordHash vẫn bắt buộc cho bản ghi mật khẩu hiện có. Tạo User và gán Owner dùng transaction Register của DAL. Email đã tồn tại giữ nguyên role/mật khẩu; User không Active, đang khóa hoặc có Admin/Executor/LegalVerifier bị từ chối. OTP Google tách khỏi OTP beneficiary và lưu tạm trong bộ nhớ, không thêm bảng/cột hoặc sửa file scaffold.
+
+Build thành công, 154 kiểm tra đạt, bao gồm Google OIDC giả lập, OTP và cookie HTTPS. Xem [cấu hình và test Google](Google-login-Swagger.md).

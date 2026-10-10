@@ -71,6 +71,8 @@ Swagger tự gửi `X-Vault-Request: 1`. Client khác phải gửi header này c
 
 ## 5. Kiểm thử tự động
 
+Kết quả gần nhất: build thành công, **154 kiểm tra đạt**. Bao gồm token sai chữ ký/audience/nonce/hết hạn, email chưa xác minh, OTP sai/hết hạn/dùng lại, cookie trình duyệt, tài khoản mới/cũ và chặn role nhân viên.
+
 ```powershell
 dotnet build LegacyVault.sln
 dotnet run --project LegacyVault.Tests
