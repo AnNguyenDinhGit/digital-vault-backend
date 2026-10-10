@@ -23,5 +23,6 @@ WORKDIR /app
 COPY --from=build /app/publish .
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
+RUN mkdir -p /app/App_Data && chown $APP_UID /app/App_Data
 USER $APP_UID
 ENTRYPOINT ["dotnet", "LegacyVault.API.dll"]
