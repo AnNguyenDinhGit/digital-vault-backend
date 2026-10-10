@@ -19,8 +19,12 @@ services:
       MailOptions__From: ${MAIL_REPLY}
     networks: 
       - vault-project 
+    volumes:
+      - legacyvault-appdata:/app/App_Data
 
 networks:
    vault-project:
       external: true
 
+volumes:
+  legacyvault-appdata:
