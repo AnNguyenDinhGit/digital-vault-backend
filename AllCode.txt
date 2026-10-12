@@ -1,0 +1,3296 @@
+﻿=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.API\Program.cs ===
+using LegacyVault.DAL.Context;
+using Microsoft.EntityFrameworkCore;
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.OpenApi.Models;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "LegacyVault API",
+        Version = "v1",
+        Description = "First call POST /api/auth/login over HTTPS. The browser stores the session cookie and sends it on subsequent requests. Beneficiaries must verify OTP before accessing inherited assets. Upload endpoints accept multipart/form-data; signatures are detached RSA-SHA256 binary files."
+    });
+    options.OperationFilter<LegacyVault.API.Swagger.MutationHeaderFilter>();
+});
+var cookieKeys = builder.Services.AddDataProtection()
+    .SetApplicationName("LegacyVault")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "auth-keys")));
+if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
+builder.Services.AddScoped<IVaultRepository, VaultRepository>();
+builder.Services.AddScoped<VaultService>();
+builder.Services.AddScoped<IdentityService>();
+builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
+builder.Services.AddSingleton(builder.Configuration.GetSection("Mail").Get<MailOptions>() ?? new MailOptions());
+builder.Services.AddSingleton<DocumentProtection>();
+builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>();
+builder.Services.AddSingleton<OtpService>();
+builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
+{
+    options.Cookie.Name = "LegacyVault.Session";
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
+    options.SlidingExpiration = false;
+    options.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = 401; return Task.CompletedTask; };
+    options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
+});
+builder.Services.AddAuthorization();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = 429;
+    foreach (var policy in new[] { "login", "otp" })
+        options.AddPolicy(policy, ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+});
+
+// Reads environment variables and Development User Secrets.
+// Startup does not open a connection or modify the database.
+builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("LegacyVault");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new WorkflowException(503,
+            "Missing ConnectionStrings:LegacyVault. Configure User Secrets or ConnectionStrings__LegacyVault.");
+    }
+    options.UseSqlServer(connectionString);
+});
+
+var app = builder.Build();
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["Cache-Control"] = "no-store";
+    try
+    {
+        // A custom header prevents cross-site form submissions when using cookie authentication.
+        if (context.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(context.Request.Method) &&
+            !HttpMethods.IsHead(context.Request.Method) && !HttpMethods.IsOptions(context.Request.Method) &&
+            context.Request.Headers["X-Vault-Request"] != "1")
+            throw new WorkflowException(400, "Set X-Vault-Request: 1 on mutation requests.");
+        await next(context);
+    }
+    catch (WorkflowException ex)
+    {
+        context.Response.StatusCode = ex.StatusCode;
+        await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message });
+    }
+    catch (RepositoryConflictException)
+    {
+        context.Response.StatusCode = 409;
+        await context.Response.WriteAsJsonAsync(new { status = 409, detail = "The resource changed. Reload and retry." });
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException || !context.RequestAborted.IsCancellationRequested)
+    {
+        app.Logger.LogError(ex, "API operation failed");
+        context.Response.StatusCode = 500;
+        await context.Response.WriteAsJsonAsync(new { status = 500, detail = "The operation could not be completed." });
+    }
+});
+app.UseHttpsRedirection();
+
+// Báº­t Swagger cho má»i mÃ´i trÆ°á»ng (ká»ƒ cáº£ Production khi cháº¡y Docker)
+app.UseSwagger();
+app.UseSwaggerUI(options =>
+{
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "LegacyVault API v1");
+    options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; request.credentials = 'same-origin'; return request; }");
+});
+
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+app.MapControllers();
+app.Run();
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.API\Controllers\VaultControllers.cs ===
+using System.ComponentModel.DataAnnotations;
+using System.Security.Claims;
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+
+namespace LegacyVault.API.Controllers;
+
+public abstract class VaultController : ControllerBase
+{
+    protected int UserId => int.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : throw new WorkflowException(401, "Authentication required.");
+    protected string SessionId => User.FindFirstValue("vault_session") ?? throw new WorkflowException(401, "Login required.");
+    protected static async Task<UploadFile> ReadUpload(IFormFile file, CancellationToken ct)
+    {
+        if (file.Length is <= 0 or > 10 * 1024 * 1024) throw new WorkflowException(400, "File must be between 1 byte and 10 MB.");
+        using var buffer = new MemoryStream(); await file.CopyToAsync(buffer, ct);
+        return new UploadFile(Path.GetFileName(file.FileName), file.ContentType, buffer.ToArray());
+    }
+    protected static async Task<byte[]?> ReadSignature(IFormFile? file, CancellationToken ct)
+    {
+        if (file is null) return null;
+        if (file.Length is <= 0 or > 16384) throw new WorkflowException(400, "Invalid detached signature size.");
+        using var buffer = new MemoryStream(); await file.CopyToAsync(buffer, ct); return buffer.ToArray();
+    }
+    protected IActionResult ContentFile(DocumentContent doc)
+    {
+        Response.Headers["X-Signature-Valid"] = doc.SignatureValid ? "true" : "false";
+        Response.Headers["Cache-Control"] = "no-store";
+        Response.Headers["X-Content-Type-Options"] = "nosniff";
+        return File(doc.Content, doc.FileType, doc.FileName, enableRangeProcessing: false);
+    }
+}
+
+public sealed class OwnerUploadForm
+{
+    [Required] public IFormFile File { get; set; } = null!;
+    public IFormFile? Signature { get; set; }
+    public IFormFile? DeathCertificate { get; set; }
+    [Range(1, int.MaxValue)] public int BeneficiaryId { get; set; }
+    [Required] public bool? OwnerAlive { get; set; }
+}
+public sealed class CompletionForm
+{
+    [Required] public IFormFile File { get; set; } = null!;
+    [Required] public IFormFile Signature { get; set; } = null!;
+}
+public sealed class LegalForm
+{
+    [Range(1, int.MaxValue)] public int VerifierId { get; set; }
+    [StringLength(2000)] public string? Comment { get; set; }
+    [Required] public IFormFile Evidence { get; set; } = null!;
+}
+
+[ApiController, Authorize, Route("api/owner")]
+public sealed class OwnerController(VaultService service) : VaultController
+{
+    [HttpGet("vaults")] public Task<IReadOnlyList<VaultDto>> Vaults(CancellationToken ct) => service.OwnerVaults(UserId, ct);
+    [HttpGet("vaults/{vaultId:int}")] public Task<VaultDto> Vault(int vaultId, CancellationToken ct) => service.OwnerVault(UserId, vaultId, ct);
+    [HttpPost("vaults")]
+    [ProducesResponseType(typeof(VaultDto), StatusCodes.Status201Created)]
+    public async Task<ActionResult<VaultDto>> CreateVault(CreateVaultInput input, CancellationToken ct)
+    {
+        var vault = await service.CreateVault(UserId, input, ct);
+        return CreatedAtAction(nameof(Vault), new { vaultId = vault.VaultId }, vault);
+    }
+    [HttpPost("assets")]
+    [ProducesResponseType(typeof(AssetDto), StatusCodes.Status201Created)]
+    public async Task<ActionResult<AssetDto>> CreateAsset(CreateAssetInput input, CancellationToken ct)
+    {
+        var asset = await service.CreateAsset(UserId, input, ct);
+        return CreatedAtAction(nameof(Asset), new { assetId = asset.AssetId }, asset);
+    }
+    [HttpGet("assets")] public Task<IReadOnlyList<AssetDto>> Assets(CancellationToken ct) => service.OwnerAssets(UserId, ct);
+    [HttpGet("assets/{assetId:int}")] public Task<AssetDto> Asset(int assetId, CancellationToken ct) => service.OwnerAsset(UserId, assetId, ct);
+    [HttpGet("beneficiaries")] public Task<IReadOnlyList<BeneficiaryDto>> Beneficiaries([FromQuery] int? assetId, CancellationToken ct) => service.Beneficiaries(UserId, assetId, ct);
+    [HttpPost("assets/{assetId:int}/beneficiaries")]
+    [ProducesResponseType(typeof(BeneficiaryDto), StatusCodes.Status201Created)]
+    public async Task<ActionResult<BeneficiaryDto>> AssignBeneficiary(int assetId, AssignBeneficiaryInput input, CancellationToken ct) =>
+        StatusCode(StatusCodes.Status201Created, await service.AssignBeneficiary(UserId, assetId, input, ct));
+    [HttpPost("assets/{assetId:int}/documents"), RequestSizeLimit(22 * 1024 * 1024)]
+    public async Task<ActionResult<DocumentDto>> Upload(int assetId, [FromForm] OwnerUploadForm form, CancellationToken ct) =>
+        Ok(await service.UploadOwnerDocument(UserId, assetId, form.BeneficiaryId, form.OwnerAlive!.Value,
+            await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct),
+            form.DeathCertificate is null ? null : await ReadUpload(form.DeathCertificate, ct), ct));
+}
+
+[ApiController, Authorize, Route("api/executor/handovers")]
+public sealed class ExecutorController(VaultService service) : VaultController
+{
+    [HttpGet] public Task<IReadOnlyList<HandoverDto>> Requests(CancellationToken ct) => service.Requests(UserId, ct);
+    [HttpGet("{requestId:int}")] public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.Request(UserId, requestId, ct);
+    [HttpGet("{requestId:int}/documents/{documentId:int}/content")]
+    public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.RequestDocument(UserId, requestId, documentId, ct));
+    [HttpPost("{requestId:int}/complete"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<IActionResult> Complete(int requestId, [FromForm] CompletionForm form, CancellationToken ct)
+    {
+        await service.Complete(UserId, requestId, await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct); return NoContent();
+    }
+    [HttpPost("{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) =>
+        Ok(new { VerificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
+}
+
+[ApiController, Authorize, Route("api/beneficiary")]
+public sealed class BeneficiaryController(VaultService service, IdentityService identity, OtpService otp) : VaultController
+{
+    [HttpPost("otp/request"), EnableRateLimiting("otp")]
+    public async Task<OtpChallenge> RequestOtp(CancellationToken ct) => await otp.Request(UserId, SessionId, await identity.BeneficiaryEmail(UserId, ct), ct);
+    [HttpPost("otp/verify"), EnableRateLimiting("otp")]
+    public async Task<IActionResult> VerifyOtp(OtpInput input, CancellationToken ct)
+    {
+        await identity.BeneficiaryEmail(UserId, ct); otp.Verify(UserId, SessionId, input.ChallengeId, input.Code); return Ok(new { Verified = true, ValidForSeconds = 900 });
+    }
+    [HttpGet("assets")] public Task<IReadOnlyList<InheritanceDto>> Assets(CancellationToken ct) { otp.RequireVerified(SessionId); return service.Inherited(UserId, ct); }
+    [HttpGet("assets/{assetId:int}")] public Task<InheritanceDto> Asset(int assetId, CancellationToken ct) { otp.RequireVerified(SessionId); return service.InheritedAsset(UserId, assetId, ct); }
+    [HttpGet("assets/{assetId:int}/documents/{documentId:int}/content")]
+    public async Task<IActionResult> Document(int assetId, int documentId, CancellationToken ct)
+    { otp.RequireVerified(SessionId); return ContentFile(await service.InheritedDocument(UserId, assetId, documentId, ct)); }
+}
+public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId, [Required, RegularExpression("^[0-9]{6}$")] string Code);
+public sealed record LoginInput([Required, EmailAddress] string Email, [Required, StringLength(1024)] string Password);
+
+[ApiController, Route("api/auth")]
+public sealed class AuthController(IdentityService identity, OtpService otp) : VaultController
+{
+    [HttpPost("register"), EnableRateLimiting("login")]
+    [ProducesResponseType(typeof(RegistrationDto), StatusCodes.Status201Created)]
+    public async Task<ActionResult<RegistrationDto>> Register(RegisterInput input, CancellationToken ct)
+    {
+        var result = await identity.Register(input, ct);
+        return StatusCode(StatusCodes.Status201Created, result);
+    }
+    [HttpPost("login"), EnableRateLimiting("login")]
+    public async Task<IActionResult> Login(LoginInput input, CancellationToken ct)
+    {
+        var result = await identity.Login(input.Email, input.Password, ct);
+        var claims = new[] { new Claim(ClaimTypes.NameIdentifier, result.UserId.ToString()), new Claim("vault_session", Guid.NewGuid().ToString("N")) };
+        await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)));
+        return Ok(result);
+    }
+    [Authorize, HttpPost("logout")]
+    public async Task<IActionResult> Logout() { otp.Revoke(SessionId); await HttpContext.SignOutAsync(); return NoContent(); }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.API\Swagger\MutationHeaderFilter.cs ===
+using Microsoft.OpenApi.Any;
+using Microsoft.OpenApi.Models;
+using Swashbuckle.AspNetCore.SwaggerGen;
+
+namespace LegacyVault.API.Swagger;
+
+public sealed class MutationHeaderFilter : IOperationFilter
+{
+    public void Apply(OpenApiOperation operation, OperationFilterContext context)
+    {
+        if (context.ApiDescription.HttpMethod is "GET" or "HEAD" or "OPTIONS") return;
+        operation.Parameters ??= new List<OpenApiParameter>();
+        operation.Parameters.Add(new OpenApiParameter
+        {
+            Name = "X-Vault-Request",
+            In = ParameterLocation.Header,
+            Required = true,
+            Description = "Required mutation header. Swagger UI sets this automatically.",
+            Schema = new OpenApiSchema { Type = "string", Default = new OpenApiString("1"), Enum = new List<IOpenApiAny> { new OpenApiString("1") } }
+        });
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\AssetCreationDtos.cs ===
+using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
+
+namespace LegacyVault.BLL.DTOs;
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class CreateVaultInput
+{
+    [Required, StringLength(100)] public string Name { get; init; } = null!;
+    [StringLength(4000)] public string? Description { get; init; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class CreateAssetInput
+{
+    [Range(1, int.MaxValue)] public int VaultId { get; init; }
+    [Required, StringLength(100)] public string Name { get; init; } = null!;
+    // AssetType is varchar(50) in the scaffold; avoid lossy conversion of Unicode type names.
+    [Required, StringLength(50), RegularExpression(@"^[\x20-\x7E]+$")]
+    public string Type { get; init; } = null!;
+    [StringLength(4000)] public string? Description { get; init; }
+}
+
+public sealed record VaultDto(int VaultId, string Name, string? Description, string Status);
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\BeneficiarySelectionDto.cs ===
+using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
+
+namespace LegacyVault.BLL.DTOs;
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class AssignBeneficiaryInput
+{
+    [Required, EmailAddress, StringLength(150)] public string Email { get; init; } = null!;
+    [Range(typeof(decimal), "0.01", "100")] public decimal Allocation { get; init; } = 100m;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\RegistrationDtos.cs ===
+using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
+
+namespace LegacyVault.BLL.DTOs;
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class RegisterInput
+{
+    [Required, StringLength(100)] public string FullName { get; init; } = null!;
+    [Required, EmailAddress, StringLength(150)] public string Email { get; init; } = null!;
+    [Required, StringLength(1024, MinimumLength = 12)] public string Password { get; init; } = null!;
+    [Required, StringLength(1024)] public string ConfirmPassword { get; init; } = null!;
+    [StringLength(20)] public string? Phone { get; init; }
+    [StringLength(20)] public string? IdentityNumber { get; init; }
+}
+
+public sealed record RegistrationDto(int UserId, string FullName, string Email, string? Phone, string? IdentityNumber, string[] Roles);
+
+public sealed class UpdateProfileInput
+{
+    [StringLength(100)]
+    public string? FullName { get; init; }
+
+    [StringLength(20)]
+    public string? Phone { get; init; }
+
+    [StringLength(20)]
+    public string? IdentityNumber { get; init; }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\UploadDocumentInput.cs ===
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+using Microsoft.AspNetCore.Http;
+using System.ComponentModel.DataAnnotations;
+
+namespace LegacyVault.BLL.DTOs;
+
+public class UploadDocumentInput
+{
+    [Required]
+    public IFormFile File { get; set; } = null!;
+
+    [Required]
+    public int SignerId { get; set; }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\WorkflowDtos.cs ===
+namespace LegacyVault.BLL.DTOs;
+public sealed record AssetDto(int AssetId, string Name, string Type, string? Description, string Status, IReadOnlyList<DocumentDto> Documents);
+public sealed record DocumentDto(int DocumentId, string FileName, string FileType, bool IsEncrypted, bool? SignatureValid = null);
+public sealed record BeneficiaryDto(int AssetId, int BeneficiaryId, string FullName, decimal Allocation, string Status);
+public sealed record HandoverDto(int RequestId, int VaultId, string RequestType, string Status, DateTime InitiatedAt, IReadOnlyList<DocumentDto> Documents, IReadOnlyList<CaseDto> Cases);
+public sealed record CaseDto(int HandoverId, int AssetId, int BeneficiaryId, string Status);
+public sealed record InheritanceDto(int HandoverId, decimal Allocation, AssetDto Asset);
+public sealed record UploadFile(string FileName, string FileType, byte[] Content);
+public sealed record DocumentContent(string FileName, string FileType, byte[] Content, bool SignatureValid);
+public sealed record LoginDto(int UserId, string[] Roles);
+public sealed class WorkflowException(int statusCode, string message) : Exception(message)
+{
+    public int StatusCode { get; } = statusCode;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Security\DocumentProtection.cs ===
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text.Json;
+using LegacyVault.BLL.DTOs;
+namespace LegacyVault.BLL.Security;
+public sealed class SecurityOptions
+{
+    public string EncryptionKey { get; set; } = "";
+    public Dictionary<int, string> SignerCertificates { get; set; } = new();
+    public List<string> TrustedRootCertificates { get; set; } = new();
+}
+public sealed record ProtectedDocument(UploadFile File, int SignerId, byte[]? Signature);
+public sealed class DocumentProtection(SecurityOptions options)
+{
+    public bool Verify(byte[] content, byte[]? signature, int signer)
+    {
+        if (signature is null || !options.SignerCertificates.TryGetValue(signer, out var pem)) return false;
+        try
+        {
+            using var cert = X509Certificate2.CreateFromPem(pem);
+            if (DateTime.UtcNow < cert.NotBefore.ToUniversalTime() || DateTime.UtcNow > cert.NotAfter.ToUniversalTime()) return false;
+            using var rsa = cert.GetRSAPublicKey();
+            var usage = cert.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();
+            if (rsa is null || rsa.KeySize < 2048 || (usage is not null && !usage.KeyUsages.HasFlag(X509KeyUsageFlags.DigitalSignature))) return false;
+            using var chain = new X509Chain();
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.Online;
+            chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
+            var roots = new List<X509Certificate2>();
+            try
+            {
+                if (options.TrustedRootCertificates.Count > 0)
+                {
+                    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                    foreach (var rootPem in options.TrustedRootCertificates)
+                    {
+                        var root = X509Certificate2.CreateFromPem(rootPem); roots.Add(root);
+                        chain.ChainPolicy.CustomTrustStore.Add(root);
+                    }
+                }
+                return rsa is not null && chain.Build(cert) && rsa.VerifyData(content, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            }
+            finally { foreach (var root in roots) root.Dispose(); }
+        }
+        catch (CryptographicException) { return false; }
+    }
+    private byte[] Key()
+    {
+        try { var key = Convert.FromBase64String(options.EncryptionKey); if (key.Length == 32) return key; } catch (FormatException) { }
+        throw new WorkflowException(503, "Configure Security:EncryptionKey as a base64 32-byte secret.");
+    }
+    public byte[] Encrypt(ProtectedDocument document)
+    {
+        var plain = JsonSerializer.SerializeToUtf8Bytes(document);
+        var nonce = RandomNumberGenerator.GetBytes(12);
+        var tag = new byte[16]; var cipher = new byte[plain.Length];
+        using var aes = new AesGcm(Key(), 16);
+        aes.Encrypt(nonce, plain, cipher, tag);
+        return nonce.Concat(tag).Concat(cipher).ToArray();
+    }
+    public ProtectedDocument Decrypt(byte[] bytes)
+    {
+        if (bytes.Length < 28) throw new InvalidDataException("Invalid encrypted document.");
+        var plain = new byte[bytes.Length - 28];
+        using var aes = new AesGcm(Key(), 16);
+        aes.Decrypt(bytes.AsSpan(0, 12), bytes.AsSpan(28), bytes.AsSpan(12, 16), plain);
+        return JsonSerializer.Deserialize<ProtectedDocument>(plain) ?? throw new InvalidDataException();
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Security\OtpService.cs ===
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Mail;
+using System.Security.Cryptography;
+using System.Text;
+using LegacyVault.BLL.DTOs;
+namespace LegacyVault.BLL.Security;
+
+public sealed class MailOptions
+{
+    public string Host { get; set; } = "";
+    public int Port { get; set; } = 587;
+    public string Username { get; set; } = "";
+    public string Password { get; set; } = "";
+    public string From { get; set; } = "";
+}
+public interface IOtpSender { Task Send(string email, string code, CancellationToken ct); }
+public sealed class SmtpOtpSender(MailOptions options) : IOtpSender
+{
+    public async Task Send(string email, string code, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.Host) || string.IsNullOrWhiteSpace(options.From))
+            throw new WorkflowException(503, "OTP email delivery is not configured.");
+        using var client = new SmtpClient(options.Host, options.Port) { EnableSsl = true, Credentials = new NetworkCredential(options.Username, options.Password) };
+        using var message = new MailMessage(options.From, email, "LegacyVault identity verification", $"Your code is {code}. It expires in 5 minutes. Do not share this code.");
+        //await client.SendMailAsync(message, ct);
+    }
+}
+public sealed record OtpChallenge(string ChallengeId, DateTime ExpiresAt);
+public sealed class OtpService(IOtpSender sender)
+{
+    private sealed class State(int user, string session, byte[] hash, DateTime expires)
+    {
+        public int User { get; } = user;
+        public string Session { get; } = session;
+        public byte[] Hash { get; } = hash;
+        public DateTime Expires { get; } = expires;
+        public int Attempts { get; set; }
+    }
+    private readonly ConcurrentDictionary<string, State> challenges = new();
+    private readonly ConcurrentDictionary<int, DateTime> sent = new();
+    private readonly ConcurrentDictionary<string, DateTime> verified = new();
+    private readonly SemaphoreSlim sendLock = new(1, 1);
+    public async Task<OtpChallenge> Request(int user, string session, string email, CancellationToken ct)
+    {
+        await sendLock.WaitAsync(ct);
+        try
+        {
+            var now = DateTime.UtcNow;
+            foreach (var entry in challenges.Where(x => x.Value.Expires <= now).ToArray()) challenges.TryRemove(entry.Key, out _);
+            foreach (var entry in verified.Where(x => x.Value <= now).ToArray()) verified.TryRemove(entry.Key, out _);
+            foreach (var entry in sent.Where(x => x.Value <= now.AddMinutes(-1)).ToArray()) sent.TryRemove(entry.Key, out _);
+            if (sent.ContainsKey(user)) throw new WorkflowException(429, "Wait 60 seconds before requesting another OTP.");
+            var code = RandomNumberGenerator.GetInt32(1000000).ToString("D6");
+            var id = Guid.NewGuid().ToString("N"); var expires = now.AddMinutes(5);
+            await sender.Send(email, code, ct);
+            foreach (var entry in challenges.Where(x => x.Value.User == user).ToArray()) challenges.TryRemove(entry.Key, out _);
+            challenges[id] = new State(user, session, SHA256.HashData(Encoding.UTF8.GetBytes(id + code)), expires);
+            sent[user] = now; verified.TryRemove(session, out _);
+            return new OtpChallenge(id, expires);
+        }
+        finally { sendLock.Release(); }
+    }
+    public void Verify(int user, string session, string id, string code)
+    {
+        if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(code) || code.Length != 6 || !challenges.TryGetValue(id, out var state))
+            throw new WorkflowException(400, "Invalid or expired OTP.");
+        lock (state)
+        {
+            if (state.User != user || state.Session != session || state.Expires <= DateTime.UtcNow || state.Attempts >= 5)
+                throw new WorkflowException(400, "Invalid or expired OTP.");
+            state.Attempts++;
+            if (!CryptographicOperations.FixedTimeEquals(state.Hash, SHA256.HashData(Encoding.UTF8.GetBytes(id + code))))
+                throw new WorkflowException(400, "Invalid or expired OTP.");
+            if (!challenges.TryRemove(id, out _)) throw new WorkflowException(400, "OTP already consumed.");
+            verified[session] = DateTime.UtcNow.AddMinutes(15);
+        }
+    }
+    public void RequireVerified(string session)
+    {
+        if (!verified.TryGetValue(session, out var expires) || expires <= DateTime.UtcNow)
+            throw new WorkflowException(403, "Verify beneficiary identity using OTP first.");
+    }
+    public void Revoke(string session)
+    {
+        verified.TryRemove(session, out _);
+        foreach (var entry in challenges.Where(x => x.Value.Session == session).ToArray()) challenges.TryRemove(entry.Key, out _);
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\BeneficiaryService.cs ===
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Entities;
+using Microsoft.EntityFrameworkCore;
+
+namespace LegacyVault.BLL.Services;
+
+public class BeneficiaryService : IBeneficiaryService
+{
+    private readonly LegacyVaultDbContext _context;
+
+    public BeneficiaryService(LegacyVaultDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<IEnumerable<BeneficiaryReceipt>> GetNotificationsAsync(int beneficiaryId)
+    {
+        return await _context.BeneficiaryReceipts
+            .Where(r => r.BeneficiaryId == beneficiaryId)
+            .ToListAsync();
+    }
+
+    public async Task<IEnumerable<DigitalAsset>> GetInheritedAssetsAsync(int beneficiaryId, int vaultId)
+    {
+        var hasAccess = await _context.BeneficiaryReceipts
+            .AnyAsync(r => r.BeneficiaryId == beneficiaryId);
+
+        if (!hasAccess) return new List<DigitalAsset>();
+
+        return await _context.DigitalAssets
+            .Include(a => a.AssetDocuments)
+            .Where(a => a.VaultId == vaultId)
+            .ToListAsync();
+    }
+
+    public async Task<bool> ConfirmReceiptAndSignAsync(int receiptId, string signatureHash, string? note)
+    {
+        var receipt = await _context.BeneficiaryReceipts.FindAsync(receiptId);
+        if (receipt == null) return false;
+
+        receipt.Status = "Confirmed";
+        receipt.ConfirmationNote = note;
+        receipt.ConfirmedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> NotifyExecutorAsync(int receiptId, string message)
+    {
+        var receipt = await _context.BeneficiaryReceipts.FindAsync(receiptId);
+        if (receipt == null) return false;
+
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<AssetDocument?> GetDocumentForDownloadAsync(int documentId, int beneficiaryId)
+    {
+        return await _context.AssetDocuments
+            .FirstOrDefaultAsync(d => d.DocumentId == documentId);
+    }
+
+    public async Task<string?> DecryptAssetDataAsync(int assetId, string decryptKey)
+    {
+        var asset = await _context.DigitalAssets.FindAsync(assetId);
+        if (asset == null) return null;
+
+        // Trả về dữ liệu giải mã mẫu hoặc logic xử lý khóa
+        return "Decrypted Content Data";
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\IBeneficiaryService.cs ===
+using LegacyVault.DAL.Entities;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace LegacyVault.BLL.Services
+{
+    public interface IBeneficiaryService
+    {
+        Task<IEnumerable<BeneficiaryReceipt>> GetNotificationsAsync(int beneficiaryId);
+        Task<IEnumerable<DigitalAsset>> GetInheritedAssetsAsync(int beneficiaryId, int vaultId);
+        Task<bool> ConfirmReceiptAndSignAsync(int receiptId, string signatureHash, string? note);
+        Task<bool> NotifyExecutorAsync(int receiptId, string message);
+        Task<AssetDocument?> GetDocumentForDownloadAsync(int documentId, int beneficiaryId);
+        Task<string?> DecryptAssetDataAsync(int assetId, string decryptKey);
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\IdentityService.cs ===
+    using System.Security.Cryptography;
+using System.ComponentModel.DataAnnotations;
+using LegacyVault.BLL.DTOs;
+using LegacyVault.DAL.Entities;
+using LegacyVault.DAL.Repositories;
+
+namespace LegacyVault.BLL.Services;
+
+public sealed class IdentityService(IVaultRepository repository)
+{
+    public static string HashPassword(string password)
+    {
+        var salt = RandomNumberGenerator.GetBytes(16);
+        var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, 600000, HashAlgorithmName.SHA256, 32);
+        return $"PBKDF2-SHA256$600000${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
+    }
+
+    public async Task<RegistrationDto> Register(RegisterInput input, CancellationToken ct)
+    {
+        var errors = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), errors, true))
+            throw new WorkflowException(400, "Invalid registration input.");
+
+        var name = input.FullName.Trim();
+        var email = input.Email.Trim().ToLowerInvariant();
+
+        if (name.Length == 0 || !new EmailAddressAttribute().IsValid(email) || input.Password != input.ConfirmPassword)
+            throw new WorkflowException(400, "Full name/email is invalid or passwords do not match.");
+
+        if (await repository.LoginUser(email, ct) is not null)
+            throw new WorkflowException(409, "Email is already registered.");
+
+        // Public registration always creates an owner; privileged accounts are provisioned separately.
+        var now = DateTime.UtcNow;
+        var user = new User
+        {
+            FullName = name,
+            Email = email,
+            Phone = string.IsNullOrWhiteSpace(input.Phone) ? null : input.Phone.Trim(),
+            IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber) ? null : input.IdentityNumber.Trim(),
+            Status = "Active",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+
+        user.Authentications.Add(new Authentication { PasswordHash = HashPassword(input.Password), CreatedAt = now, UpdatedAt = now });
+
+        // DAL initializes the system-defined owner role if missing and saves the entire graph atomically.
+        try { await repository.Register(user, VaultService.OwnerRole, ct); }
+        catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Email is already registered."); }
+
+        return new RegistrationDto(user.UserId, user.FullName, user.Email, user.Phone, user.IdentityNumber, user.Roles.Select(x => x.RoleName).ToArray());
+    }
+
+    // Cáº­p nháº­t thÃ´ng tin Profile (Há» tÃªn, SÄT, CCCD)
+    public async Task<bool> UpdateProfile(int userId, UpdateProfileInput input, CancellationToken ct)
+    {
+        var errors = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), errors, true))
+            throw new WorkflowException(400, "Invalid profile update input.");
+
+        var user = await repository.User(userId, ct);
+        if (user is null || user.Status != "Active")
+            throw new WorkflowException(404, "User not found or inactive.");
+
+        if (!string.IsNullOrWhiteSpace(input.FullName))
+            user.FullName = input.FullName.Trim();
+
+        if (input.Phone != null)
+            user.Phone = string.IsNullOrWhiteSpace(input.Phone) ? null : input.Phone.Trim();
+
+        // Cáº­p nháº­t sá»‘ CCCD (IdentityNumber)
+        if (input.IdentityNumber != null)
+            user.IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber) ? null : input.IdentityNumber.Trim();
+
+        user.UpdatedAt = DateTime.UtcNow;
+
+        await repository.Save(ct);
+        return true;
+    }
+
+    // Password format: PBKDF2-SHA256$iterations$base64Salt$base64Hash.
+    public static bool VerifyPassword(string password, string encoded)
+    {
+        try
+        {
+            var parts = encoded.Split('$');
+            if (parts.Length != 4 || parts[0] != "PBKDF2-SHA256" || !int.TryParse(parts[1], out var iterations) || iterations is < 100000 or > 1000000) return false;
+            var salt = Convert.FromBase64String(parts[2]); var expected = Convert.FromBase64String(parts[3]);
+            if (salt.Length < 16 || expected.Length != 32) return false;
+            return CryptographicOperations.FixedTimeEquals(expected, Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32));
+        }
+        catch (FormatException) { return false; }
+    }
+
+    public async Task<LoginDto> Login(string email, string password, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(email) || email.Length > 150 || string.IsNullOrEmpty(password) || password.Length > 1024)
+            throw new WorkflowException(400, "Invalid login input.");
+
+        var user = await repository.LoginUser(email.Trim(), ct);
+        var auth = user?.Authentications.OrderByDescending(x => x.CreatedAt).FirstOrDefault();
+
+        if (user is null || user.Status != "Active" || auth is null || auth.LockedUntil > DateTime.UtcNow)
+            throw new WorkflowException(401, "Invalid credentials or account unavailable.");
+
+        if (!VerifyPassword(password, auth.PasswordHash))
+        {
+            auth.FailedLoginCount++;
+            if (auth.FailedLoginCount >= 5) { auth.LockedUntil = DateTime.UtcNow.AddMinutes(15); auth.FailedLoginCount = 0; }
+            auth.UpdatedAt = DateTime.UtcNow;
+            await repository.Save(ct);
+            throw new WorkflowException(401, "Invalid credentials or account unavailable.");
+        }
+
+        auth.FailedLoginCount = 0; auth.LastLoginAt = DateTime.UtcNow; auth.UpdatedAt = DateTime.UtcNow;
+        await repository.Save(ct);
+
+        return new LoginDto(user.UserId, user.Roles.Select(x => x.RoleName).ToArray());
+    }
+
+    public async Task<string> BeneficiaryEmail(int userId, CancellationToken ct)
+    {
+        var user = await repository.User(userId, ct);
+        if (user is null || user.Status != "Active" || !user.Roles.Any(x => x.RoleName == VaultService.BeneficiaryRole))
+            throw new WorkflowException(403, "Active beneficiary required.");
+        return user.Email;
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\LocalStorageService.cs ===
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace LegacyVault.BLL.Services;
+
+public interface IStorageService
+{
+    Task<string> UploadFileAsync(byte[] content, string fileName, string folder, CancellationToken ct);
+}
+
+public class LocalStorageService : IStorageService
+{
+    public async Task<string> UploadFileAsync(byte[] content, string fileName, string folder, CancellationToken ct)
+    {
+        var folderPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads", folder);
+        if (!Directory.Exists(folderPath)) Directory.CreateDirectory(folderPath);
+
+        var uniqueFileName = $"{Guid.NewGuid()}_{fileName}";
+        var filePath = Path.Combine(folderPath, uniqueFileName);
+
+        await File.WriteAllBytesAsync(filePath, content, ct);
+        return Path.Combine("uploads", folder, uniqueFileName);
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\VaultService.cs ===
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.DAL.Entities;
+using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
+using System.ComponentModel.DataAnnotations;
+
+namespace LegacyVault.BLL.Services;
+
+public sealed class VaultService(IVaultRepository repository, IDocumentStore store, DocumentProtection protection)
+{
+
+
+    public const string OwnerRole = "Owner";
+    public const string ExecutorRole = "Executor";
+    public const string BeneficiaryRole = "Beneficiary";
+    public const string VerifierRole = "LegalVerifier";
+    public const string AdminRole = "Admin";
+
+    private async Task<User> Role(int userId, string role, CancellationToken ct)
+    {
+        var user = await repository.User(userId, ct);
+        if (user is null || user.Status != "Active" || !user.Roles.Any(x => x.RoleName == role))
+            throw new WorkflowException(403, "The active user does not have the required role.");
+        return user;
+    }
+    private static AssetDto Map(DigitalAsset a) => new(a.AssetId, a.AssetName, a.AssetType, a.Description, a.Status,
+        a.AssetDocuments.Select(d => new DocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray());
+    private static VaultDto Map(DigitalVault v) => new(v.VaultId, v.VaultName, v.Description, v.Status);
+    private static void ValidateInput(object input)
+    {
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), new List<ValidationResult>(), true))
+            throw new WorkflowException(400, "Invalid request input.");
+    }
+    private async Task<DigitalVault> OwnedVault(int user, int vault, CancellationToken ct)
+    {
+        await Role(user, OwnerRole, ct);
+        var v = await repository.Vault(vault, ct);
+        if (v is null || v.OwnerId != user) throw new WorkflowException(404, "Vault not found.");
+        return v;
+    }
+    public async Task<IReadOnlyList<VaultDto>> OwnerVaults(int user, CancellationToken ct)
+    {
+        await Role(user, OwnerRole, ct);
+        return (await repository.OwnerVaults(user, ct)).Select(Map).ToArray();
+    }
+    public async Task<VaultDto> OwnerVault(int user, int vault, CancellationToken ct) => Map(await OwnedVault(user, vault, ct));
+    public async Task<VaultDto> CreateVault(int user, CreateVaultInput input, CancellationToken ct)
+    {
+        await Role(user, OwnerRole, ct);
+        ValidateInput(input);
+        var now = DateTime.UtcNow;
+        var vault = new DigitalVault { OwnerId = user, VaultName = input.Name.Trim(), Description = input.Description?.Trim(), Status = "Active", CreatedAt = now, UpdatedAt = now };
+        repository.Add(vault);
+        await repository.Save(ct);
+        return Map(vault);
+    }
+    public async Task<AssetDto> CreateAsset(int user, CreateAssetInput input, CancellationToken ct)
+    {
+        ValidateInput(input);
+        var vault = await OwnedVault(user, input.VaultId, ct);
+        if (vault.Status != "Active") throw new WorkflowException(409, "Vault is not active.");
+        var now = DateTime.UtcNow;
+        var asset = new DigitalAsset { VaultId = vault.VaultId, AssetName = input.Name.Trim(), AssetType = input.Type.Trim(), Description = input.Description?.Trim(), Status = "Active", CreatedAt = now, UpdatedAt = now };
+        repository.Add(asset);
+        await repository.Save(ct);
+        return Map(asset);
+    }
+    private static HandoverDto Map(HandoverRequest r) => new(r.RequestId, r.VaultId, r.RequestType, r.Status, r.InitiatedAt,
+        r.HandoverDocuments.Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray(),
+        r.HandoverCases.Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)).ToArray());
+    private async Task<DigitalAsset> Owned(int user, int asset, CancellationToken ct)
+    {
+        await Role(user, OwnerRole, ct);
+        var a = await repository.Asset(asset, ct);
+        if (a is null || a.Vault.OwnerId != user) throw new WorkflowException(404, "Asset not found.");
+        return a;
+    }
+
+    private async Task<int> GetOrAssignRandomExecutor(DigitalVault vault, CancellationToken ct)
+    {
+        // Kiá»ƒm tra xem Vault Ä‘Ã£ cÃ³ Executor (ngÆ°á»i dÃ¹ng chá»n hoáº·c há»‡ thá»‘ng tá»± gÃ¡n) chÆ°a
+        var activeAssignment = vault.ExecutorAssignments
+            .FirstOrDefault(x => x.Status == "Active" || x.Status == "AutoAssigned");
+
+        if (activeAssignment is not null)
+            return activeAssignment.ExecutorId;
+
+        // Láº¥y danh sÃ¡ch Executor Ä‘ang Active trÃªn toÃ n há»‡ thá»‘ng
+        var availableExecutors = await repository.UsersByRole(ExecutorRole, ct);
+        var activeExecutors = availableExecutors.Where(u => u.Status == "Active").ToList();
+
+        if (activeExecutors.Count == 0)
+            throw new WorkflowException(500, "No active executors available in the system.");
+
+        // Chá»n ngáº«u nhiÃªn 1 Executor
+        var randomExecutor = activeExecutors[Random.Shared.Next(activeExecutors.Count)];
+
+        // LÆ°u thÃ´ng tin phÃ¢n cÃ´ng tá»± Ä‘á»™ng vÃ o DB
+        var autoAssignment = new ExecutorAssignment
+        {
+            VaultId = vault.VaultId,
+            ExecutorId = randomExecutor.UserId,
+            Status = "AutoAssigned",
+            AssignedAt = DateTime.UtcNow
+        };
+
+        repository.Add(autoAssignment);
+        await repository.Save(ct);
+
+        return randomExecutor.UserId;
+    }
+    private async Task<HandoverRequest> Executed(int user, int request, CancellationToken ct)
+    {
+        await Role(user, ExecutorRole, ct);
+        var r = await repository.Request(request, ct);
+        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned")))
+            throw new WorkflowException(404, "Handover request not found or executor assignment is inactive.");
+        return r;
+    }
+
+    public async Task<HandoverDto> CreateHandoverRequest(int user, int vaultId, string requestType, CancellationToken ct)
+    {
+        var vault = await repository.Vault(vaultId, ct);
+        if (vault is null || vault.Status != "Active")
+            throw new WorkflowException(404, "Vault not found or inactive.");
+
+        // Tá»± Ä‘á»™ng láº¥y Executor do Owner chá»n, hoáº·c random gÃ¡n Executor má»›i náº¿u Vault chÆ°a cÃ³
+        var executorId = await GetOrAssignRandomExecutor(vault, ct);
+
+        var now = DateTime.UtcNow;
+        var request = new HandoverRequest
+        {
+            VaultId = vaultId,
+            ExecutorId = executorId,
+            RequestType = requestType,
+            Status = "Draft",
+            InitiatedAt = now
+        };
+
+        repository.Add(request);
+        Audit(user, "CreateHandoverRequest", "DigitalVault", vaultId, "Success");
+        await repository.Save(ct);
+
+        return Map(request);
+    }
+    public async Task<IReadOnlyList<AssetDto>> OwnerAssets(int user, CancellationToken ct)
+    {
+        await Role(user, OwnerRole, ct);
+        return (await repository.OwnerAssets(user, ct)).Select(Map).ToArray();
+    }
+    public async Task<AssetDto> OwnerAsset(int user, int asset, CancellationToken ct) => Map(await Owned(user, asset, ct));
+    public async Task<IReadOnlyList<BeneficiaryDto>> Beneficiaries(int user, int? asset, CancellationToken ct)
+    {
+        await Role(user, OwnerRole, ct);
+        var assets = asset.HasValue ? new List<DigitalAsset> { await Owned(user, asset.Value, ct) } : await repository.OwnerAssets(user, ct);
+        return assets.SelectMany(a => a.BeneficiaryAssignments.Select(b => new BeneficiaryDto(a.AssetId, b.BeneficiaryId, b.Beneficiary.FullName, b.Allocation, b.Status))).ToArray();
+    }
+    public async Task<BeneficiaryDto> AssignBeneficiary(int owner, int assetId, AssignBeneficiaryInput input, CancellationToken ct)
+    {
+        var asset = await Owned(owner, assetId, ct);
+        ValidateInput(input);
+        if (decimal.Round(input.Allocation, 2) != input.Allocation) throw new WorkflowException(400, "Allocation allows at most two decimal places.");
+        if (asset.Status != "Active" || asset.Vault.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
+        var recipient = await repository.UserByEmail(input.Email.Trim().ToLowerInvariant(), ct);
+        if (recipient is null || recipient.Status != "Active") throw new WorkflowException(404, "Active recipient account not found. Ask the recipient to register first.");
+        if (recipient.UserId == owner) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
+        if (asset.BeneficiaryAssignments.Any(x => x.BeneficiaryId == recipient.UserId && x.Status == "Active"))
+            throw new WorkflowException(409, "This user is already an active beneficiary of the asset.");
+        if (asset.BeneficiaryAssignments.Where(x => x.Status == "Active").Sum(x => x.Allocation) + input.Allocation > 100m)
+            throw new WorkflowException(409, "Total active beneficiary allocation cannot exceed 100 percent.");
+        var now = DateTime.UtcNow;
+        if (!recipient.Roles.Any(x => x.RoleName == BeneficiaryRole))
+        {
+            var role = await repository.Role(BeneficiaryRole, ct);
+            if (role is null) { role = new Role { RoleName = BeneficiaryRole }; repository.Add(role); }
+            recipient.Roles.Add(role);
+            recipient.UpdatedAt = now;
+        }
+        var assignment = new BeneficiaryAssignment { AssetId = assetId, BeneficiaryId = recipient.UserId, Allocation = input.Allocation,
+            Status = "Active", CreatedAt = now, UpdatedAt = now };
+        repository.Add(assignment);
+        // Updating the asset protects the allocation sum against concurrent assignments.
+        asset.UpdatedAt = now;
+        Audit(owner, "AssignBeneficiary", "DigitalAsset", assetId, "Success");
+        try { await repository.Save(ct); }
+        catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Beneficiary configuration changed. Reload and retry."); }
+        return new BeneficiaryDto(assetId, recipient.UserId, recipient.FullName, assignment.Allocation, assignment.Status);
+    }
+    private static void Validate(UploadFile file)
+    {
+        if (file.Content.Length is 0 or > 10 * 1024 * 1024 || string.IsNullOrWhiteSpace(file.FileName) || file.FileName.Length > 255)
+            throw new WorkflowException(400, "A document of 1 byte to 10 MB with a valid filename is required.");
+        if (file.FileType.Length > 50 || !new[] { "application/pdf", "image/png", "image/jpeg", "text/plain" }.Contains(file.FileType))
+            throw new WorkflowException(400, "Supported document types: PDF, PNG, JPEG and plain text.");
+        var bytes = file.Content;
+        var valid = file.FileType switch
+        {
+            "application/pdf" => bytes.AsSpan().StartsWith("%PDF-"u8),
+            "image/png" => bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+            "image/jpeg" => bytes.Length >= 3 && bytes[0] == 255 && bytes[1] == 216 && bytes[2] == 255,
+            _ => !bytes.Contains((byte)0)
+        };
+        if (!valid) throw new WorkflowException(400, "Document content does not match its declared type.");
+    }
+    private void RequireSignature(UploadFile file, byte[]? signature, int signer)
+    {
+        if (!protection.Verify(file.Content, signature, signer)) throw new WorkflowException(400, "Invalid signature, untrusted/expired certificate, or signer certificate not configured.");
+    }
+    private Task<string> Store(UploadFile file, int signer, byte[]? signature, CancellationToken ct) =>
+        store.Write(protection.Encrypt(new ProtectedDocument(file, signer, signature)), ct);
+
+    public async Task<DocumentDto> UploadOwnerDocument(int user, int assetId, int beneficiaryId, bool ownerAlive,
+        UploadFile file, byte[]? signature, UploadFile? deathCertificate, CancellationToken ct)
+    {
+        var asset = await Owned(user, assetId, ct);
+        if (asset.Vault.Status != "Active" || asset.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
+        if (beneficiaryId == user) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
+        await Role(beneficiaryId, BeneficiaryRole, ct);
+        Validate(file);
+        if (ownerAlive) RequireSignature(file, signature, user);
+        else
+        {
+            if (deathCertificate is null) throw new WorkflowException(400, "Death certificate is required when ownerAlive is false.");
+            Validate(deathCertificate);
+        }
+        // Existing allocations must remain valid; do not silently overwrite other beneficiaries.
+        var assignment = asset.BeneficiaryAssignments.SingleOrDefault(x => x.BeneficiaryId == beneficiaryId && x.Status == "Active");
+        if (assignment is null && asset.BeneficiaryAssignments.Any(x => x.Status == "Active"))
+            throw new WorkflowException(409, "Asset already has active beneficiaries; select an existing beneficiary.");
+        var stored = new List<string>();
+        try
+        {
+            var path = await Store(file, user, ownerAlive ? signature : null, ct); stored.Add(path);
+            var doc = new AssetDocument { AssetId = assetId, FileName = Path.GetFileName(file.FileName), FileType = file.FileType,
+                StoragePath = path, IsEncrypted = true, UploadedBy = user, Status = ownerAlive ? "Active" : "Pending_Legal", UploadedAt = DateTime.UtcNow };
+            repository.Add(doc);
+            if (deathCertificate is not null && !ownerAlive)
+            {
+                var deathPath = await Store(deathCertificate, user, null, ct); stored.Add(deathPath);
+                repository.Add(new AssetDocument { AssetId = assetId, FileName = Path.GetFileName(deathCertificate.FileName), FileType = deathCertificate.FileType,
+                    StoragePath = deathPath, IsEncrypted = true, UploadedBy = user, Status = "Pending_Legal", UploadedAt = DateTime.UtcNow });
+            }
+            if (assignment is null) repository.Add(new BeneficiaryAssignment { AssetId = assetId, BeneficiaryId = beneficiaryId, Allocation = 100,
+                Status = "Active", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            asset.UpdatedAt = DateTime.UtcNow;
+            Audit(user, "UploadAssetDocument", "DigitalAsset", assetId, ownerAlive ? "Alive_Signed" : "Pending_Legal");
+            await repository.Save(ct);
+            return new DocumentDto(doc.DocumentId, doc.FileName, doc.FileType, true);
+        }
+        catch { foreach (var path in stored) await store.Delete(path); throw; }
+    }
+    public async Task<IReadOnlyList<HandoverDto>> Requests(int user, CancellationToken ct)
+    {
+        await Role(user, ExecutorRole, ct);
+        return (await repository.Requests(user, ct)).Where(r => r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && x.Status == "Active")).Select(Map).ToArray();
+    }
+    public async Task<HandoverDto> Request(int user, int request, CancellationToken ct)
+    {
+        var r = await Executed(user, request, ct);
+        var documents = new List<DocumentDto>();
+        foreach (var d in r.HandoverDocuments)
+        {
+            var content = await Read(d.StoragePath, ct);
+            documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid));
+        }
+        return Map(r) with { Documents = documents };
+    }
+    public async Task<DocumentContent> RequestDocument(int user, int request, int document, CancellationToken ct)
+    {
+        var r = await Executed(user, request, ct);
+        var d = r.HandoverDocuments.SingleOrDefault(x => x.HandoverDocumentId == document) ?? throw new WorkflowException(404, "Document not found.");
+        return await Read(d.StoragePath, ct);
+    }
+    private async Task<DocumentContent> Read(string path, CancellationToken ct)
+    {
+        var doc = protection.Decrypt(await store.Read(path, ct));
+        return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, protection.Verify(doc.File.Content, doc.Signature, doc.SignerId));
+    }
+    public async Task Complete(int user, int request, UploadFile file, byte[] signature, CancellationToken ct)
+    {
+        var r = await Executed(user, request, ct);
+        if (r.Status != "Approved" && r.Status != "In_Progress") throw new WorkflowException(409, "Request must be approved or in progress.");
+        if (!r.LegalVerifications.Any(x => x.Status == "Approved") || r.HandoverCases.Count == 0)
+            throw new WorkflowException(409, "Approved legal verification and handover cases are required.");
+        Validate(file); RequireSignature(file, signature, user);
+        var path = await Store(file, user, signature, ct);
+        try
+        {
+            repository.Add(new HandoverDocument { RequestId = request, FileName = Path.GetFileName(file.FileName), FileType = file.FileType,
+                StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            r.Status = "Completed"; r.CompletedAt = DateTime.UtcNow;
+            foreach (var c in r.HandoverCases) { c.Status = "Completed"; c.CompletedAt = DateTime.UtcNow; }
+            Audit(user, "CompleteHandover", "HandoverRequest", request, "Success");
+            await repository.Save(ct);
+        }
+        catch { await store.Delete(path); throw; }
+    }
+    public async Task<int> RequestLegal(int user, int request, int verifier, string? comment, UploadFile file, CancellationToken ct)
+    {
+        var r = await Executed(user, request, ct);
+        if (r.Status != "Draft" && r.Status != "Rejected") throw new WorkflowException(409, "Only draft or rejected requests can be submitted.");
+        await Role(verifier, VerifierRole, ct);
+        if (verifier == user || verifier == r.Vault.OwnerId) throw new WorkflowException(400, "An independent legal verifier is required.");
+        if (comment?.Length > 2000) throw new WorkflowException(400, "Comment exceeds 2000 characters.");
+        Validate(file);
+        var path = await Store(file, user, null, ct);
+        try
+        {
+            var verification = new LegalVerification { RequestId = request, VerifierId = verifier, Comment = comment, Status = "Pending", SubmittedAt = DateTime.UtcNow };
+            repository.Add(verification);
+            repository.Add(new HandoverDocument { RequestId = request, FileName = Path.GetFileName(file.FileName), FileType = file.FileType,
+                StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            r.Status = "Pending_Legal"; r.SubmittedAt = DateTime.UtcNow;
+            Audit(user, "RequestLegalVerification", "HandoverRequest", request, "Success");
+            await repository.Save(ct);
+            return verification.VerificationId;
+        }
+        catch { await store.Delete(path); throw; }
+    }
+    public async Task<IReadOnlyList<InheritanceDto>> Inherited(int user, CancellationToken ct)
+    {
+        await Role(user, BeneficiaryRole, ct);
+        return (await repository.Inherited(user, ct)).Select(x => new InheritanceDto(x.HandoverId, x.Assignment.Allocation, Map(x.Assignment.Asset))).ToArray();
+    }
+    public async Task<InheritanceDto> InheritedAsset(int user, int asset, CancellationToken ct) =>
+        (await Inherited(user, ct)).FirstOrDefault(x => x.Asset.AssetId == asset) ?? throw new WorkflowException(404, "Inherited asset not found.");
+    public async Task<DocumentContent> InheritedDocument(int user, int asset, int document, CancellationToken ct)
+    {
+        await InheritedAsset(user, asset, ct);
+        var a = await repository.Asset(asset, ct) ?? throw new WorkflowException(404, "Asset not found.");
+        var d = a.AssetDocuments.SingleOrDefault(x => x.DocumentId == document && x.Status == "Active") ?? throw new WorkflowException(404, "Released document not found.");
+        return await Read(d.StoragePath, ct);
+    }
+    private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
+    { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
+
+    public async Task<DocumentDto> UploadDocumentAsync(
+        int user,
+        int assetId,
+        UploadDocumentInput input,
+        byte[]? signature,
+        CancellationToken ct)
+    {
+        if (input.File == null || input.File.Length == 0)
+            throw new WorkflowException(400, "File upload khÃ´ng há»£p lá»‡.");
+
+        // 1. Kiá»ƒm tra quyá»n sá»Ÿ há»¯u Asset & tráº¡ng thÃ¡i Vault
+        var asset = await Owned(user, assetId, ct);
+        if (asset.Vault.Status != "Active" || asset.Status != "Active")
+            throw new WorkflowException(409, "Vault or asset is not active.");
+
+        // 2. Chuyá»ƒn IFormFile sang byte[] vÃ  gom thÃ nh UploadFile
+        using var ms = new MemoryStream();
+        await input.File.CopyToAsync(ms, ct);
+        var fileBytes = ms.ToArray();
+
+        var uploadFile = new UploadFile(Path.GetFileName(input.File.FileName), input.File.ContentType, fileBytes);
+
+        // 3. Validate Ä‘á»‹nh dáº¡ng & dung lÆ°á»£ng file báº±ng hÃ m cÃ³ sáºµn trong service
+        Validate(uploadFile);
+
+        // 4. MÃ£ hÃ³a AesGcm qua DocumentProtection
+        var protectedDoc = new ProtectedDocument(uploadFile, input.SignerId, signature);
+        byte[] encryptedBytes = protection.Encrypt(protectedDoc);
+
+        // 5. Ghi file mÃ£ hÃ³a vÃ o DocumentStore
+        var documentStorageId = await store.Write(encryptedBytes, ct);
+
+        // 6. LÆ°u Metadata vÃ o DB (GÃ¡n Ä‘áº§y Ä‘á»§ AssetId, UploadedBy, Status)
+        var docEntity = new AssetDocument
+        {
+            AssetId = assetId,
+            FileName = uploadFile.FileName,
+            FileType = uploadFile.FileType,
+            StoragePath = documentStorageId,
+            IsEncrypted = true,
+            UploadedBy = user,
+            Status = "Active",
+            UploadedAt = DateTime.UtcNow
+        };
+
+        repository.Add(docEntity);
+        await repository.Save(ct);
+
+        return new DocumentDto(docEntity.DocumentId, docEntity.FileName, docEntity.FileType, docEntity.IsEncrypted);
+    }
+
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Context\LegacyVaultDbContext.cs ===
+using System;
+using System.Collections.Generic;
+using LegacyVault.DAL.Entities;
+using Microsoft.EntityFrameworkCore;
+
+namespace LegacyVault.DAL.Context;
+
+public partial class LegacyVaultDbContext : DbContext
+{
+    public LegacyVaultDbContext(DbContextOptions<LegacyVaultDbContext> options)
+        : base(options)
+    {
+    }
+
+    public virtual DbSet<AssetDocument> AssetDocuments { get; set; }
+
+    public virtual DbSet<AuditLog> AuditLogs { get; set; }
+
+    public virtual DbSet<Authentication> Authentications { get; set; }
+
+    public virtual DbSet<BeneficiaryAssignment> BeneficiaryAssignments { get; set; }
+
+    public virtual DbSet<BeneficiaryReceipt> BeneficiaryReceipts { get; set; }
+
+    public virtual DbSet<Conversation> Conversations { get; set; }
+
+    public virtual DbSet<DigitalAsset> DigitalAssets { get; set; }
+
+    public virtual DbSet<DigitalSignature> DigitalSignatures { get; set; }
+
+    public virtual DbSet<DigitalVault> DigitalVaults { get; set; }
+
+    public virtual DbSet<EncryptionKey> EncryptionKeys { get; set; }
+
+    public virtual DbSet<ExecutorAssignment> ExecutorAssignments { get; set; }
+
+    public virtual DbSet<HandoverCase> HandoverCases { get; set; }
+
+    public virtual DbSet<HandoverDocument> HandoverDocuments { get; set; }
+
+    public virtual DbSet<HandoverRequest> HandoverRequests { get; set; }
+
+    public virtual DbSet<LegalVerification> LegalVerifications { get; set; }
+
+    public virtual DbSet<Message> Messages { get; set; }
+
+    public virtual DbSet<Notification> Notifications { get; set; }
+
+    public virtual DbSet<PaymentTransaction> PaymentTransactions { get; set; }
+
+    public virtual DbSet<ProofOfLife> ProofOfLives { get; set; }
+
+    public virtual DbSet<Role> Roles { get; set; }
+
+    public virtual DbSet<SubscriptionPlan> SubscriptionPlans { get; set; }
+
+    public virtual DbSet<TwoFactorAuth> TwoFactorAuths { get; set; }
+
+    public virtual DbSet<User> Users { get; set; }
+
+    public virtual DbSet<UserSubscription> UserSubscriptions { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<AssetDocument>(entity =>
+        {
+            entity.HasKey(e => e.DocumentId);
+
+            entity.ToTable("ASSET_DOCUMENTS");
+
+            entity.Property(e => e.FileName).HasMaxLength(255);
+            entity.Property(e => e.FileType)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+            entity.Property(e => e.IsEncrypted).HasDefaultValue(true);
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+            entity.Property(e => e.StoragePath).HasMaxLength(500);
+            entity.Property(e => e.UploadedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.Asset).WithMany(p => p.AssetDocuments)
+                .HasForeignKey(d => d.AssetId)
+                .HasConstraintName("FK_AssetDocs_Assets");
+
+            entity.HasOne(d => d.UploadedByNavigation).WithMany(p => p.AssetDocuments)
+                .HasForeignKey(d => d.UploadedBy)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_AssetDocs_Users");
+        });
+
+        modelBuilder.Entity<AuditLog>(entity =>
+        {
+            entity.HasKey(e => e.LogId);
+
+            entity.ToTable("AUDIT_LOGS");
+
+            entity.Property(e => e.Action)
+                .HasMaxLength(100)
+                .IsUnicode(false);
+            entity.Property(e => e.EntityType)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+            entity.Property(e => e.Ipaddress)
+                .HasMaxLength(45)
+                .IsUnicode(false)
+                .HasColumnName("IPAddress");
+            entity.Property(e => e.Result)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Success");
+            entity.Property(e => e.Timestamp).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.User).WithMany(p => p.AuditLogs)
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.SetNull)
+                .HasConstraintName("FK_AuditLogs_Users");
+        });
+
+        modelBuilder.Entity<Authentication>(entity =>
+        {
+            entity.HasKey(e => e.AuthId);
+
+            entity.ToTable("AUTHENTICATIONS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.PasswordHash).HasMaxLength(255);
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.User).WithMany(p => p.Authentications)
+                .HasForeignKey(d => d.UserId)
+                .HasConstraintName("FK_Auth_Users");
+        });
+
+        modelBuilder.Entity<BeneficiaryAssignment>(entity =>
+        {
+            entity.HasKey(e => e.AssignmentId);
+
+            entity.ToTable("BENEFICIARY_ASSIGNMENTS");
+
+            entity.Property(e => e.Allocation)
+                .HasDefaultValue(100.00m)
+                .HasColumnType("decimal(5, 2)");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.Asset).WithMany(p => p.BeneficiaryAssignments)
+                .HasForeignKey(d => d.AssetId)
+                .HasConstraintName("FK_BenAssign_Assets");
+
+            entity.HasOne(d => d.Beneficiary).WithMany(p => p.BeneficiaryAssignments)
+                .HasForeignKey(d => d.BeneficiaryId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_BenAssign_Users");
+        });
+
+        modelBuilder.Entity<BeneficiaryReceipt>(entity =>
+        {
+            entity.HasKey(e => e.ReceiptId);
+
+            entity.ToTable("BENEFICIARY_RECEIPTS");
+
+            entity.Property(e => e.ConfirmedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Confirmed");
+
+            entity.HasOne(d => d.Beneficiary).WithMany(p => p.BeneficiaryReceipts)
+                .HasForeignKey(d => d.BeneficiaryId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_Receipts_Users");
+
+            entity.HasOne(d => d.Handover).WithMany(p => p.BeneficiaryReceipts)
+                .HasForeignKey(d => d.HandoverId)
+                .HasConstraintName("FK_Receipts_HandoverCases");
+        });
+
+        modelBuilder.Entity<Conversation>(entity =>
+        {
+            entity.ToTable("CONVERSATIONS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Title).HasMaxLength(100);
+            entity.Property(e => e.Type)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Direct");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+        });
+
+        modelBuilder.Entity<DigitalAsset>(entity =>
+        {
+            entity.HasKey(e => e.AssetId);
+
+            entity.ToTable("DIGITAL_ASSETS");
+
+            entity.Property(e => e.AssetName).HasMaxLength(100);
+            entity.Property(e => e.AssetType)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.Vault).WithMany(p => p.DigitalAssets)
+                .HasForeignKey(d => d.VaultId)
+                .HasConstraintName("FK_Assets_Vaults");
+        });
+
+        modelBuilder.Entity<DigitalSignature>(entity =>
+        {
+            entity.HasKey(e => e.SignatureId);
+
+            entity.ToTable("DIGITAL_SIGNATURES");
+
+            entity.Property(e => e.SignedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Valid");
+
+            entity.HasOne(d => d.Signer).WithMany(p => p.DigitalSignatures)
+                .HasForeignKey(d => d.SignerId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_Signatures_Users");
+
+            entity.HasOne(d => d.Verification).WithMany(p => p.DigitalSignatures)
+                .HasForeignKey(d => d.VerificationId)
+                .HasConstraintName("FK_Signatures_Verif");
+        });
+
+        modelBuilder.Entity<DigitalVault>(entity =>
+        {
+            entity.HasKey(e => e.VaultId);
+
+            entity.ToTable("DIGITAL_VAULTS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.VaultName).HasMaxLength(100);
+
+            entity.HasOne(d => d.Owner).WithMany(p => p.DigitalVaults)
+                .HasForeignKey(d => d.OwnerId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_Vaults_Users");
+        });
+
+        modelBuilder.Entity<EncryptionKey>(entity =>
+        {
+            entity.HasKey(e => e.KeyId);
+
+            entity.ToTable("ENCRYPTION_KEYS");
+
+            entity.Property(e => e.Algorithm)
+                .HasMaxLength(50)
+                .IsUnicode(false)
+                .HasDefaultValue("AES-256");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.KeyVersion).HasDefaultValue(1);
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+
+            entity.HasOne(d => d.Asset).WithMany(p => p.EncryptionKeys)
+                .HasForeignKey(d => d.AssetId)
+                .HasConstraintName("FK_EncKeys_Assets");
+        });
+
+        modelBuilder.Entity<ExecutorAssignment>(entity =>
+        {
+            entity.ToTable("EXECUTOR_ASSIGNMENTS");
+
+            entity.Property(e => e.AssignedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Pending");
+
+            entity.HasOne(d => d.Executor).WithMany(p => p.ExecutorAssignments)
+                .HasForeignKey(d => d.ExecutorId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_ExecAssign_Users");
+
+            entity.HasOne(d => d.Vault).WithMany(p => p.ExecutorAssignments)
+                .HasForeignKey(d => d.VaultId)
+                .HasConstraintName("FK_ExecAssign_Vaults");
+        });
+
+        modelBuilder.Entity<HandoverCase>(entity =>
+        {
+            entity.HasKey(e => e.HandoverId);
+
+            entity.ToTable("HANDOVER_CASES");
+
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("In_Progress");
+
+            entity.HasOne(d => d.Assignment).WithMany(p => p.HandoverCases)
+                .HasForeignKey(d => d.AssignmentId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_HandoverCases_Assignments");
+
+            entity.HasOne(d => d.Request).WithMany(p => p.HandoverCases)
+                .HasForeignKey(d => d.RequestId)
+                .HasConstraintName("FK_HandoverCases_Requests");
+        });
+
+        modelBuilder.Entity<HandoverDocument>(entity =>
+        {
+            entity.ToTable("HANDOVER_DOCUMENTS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.FileName).HasMaxLength(255);
+            entity.Property(e => e.FileType)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+            entity.Property(e => e.StoragePath).HasMaxLength(500);
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.Request).WithMany(p => p.HandoverDocuments)
+                .HasForeignKey(d => d.RequestId)
+                .HasConstraintName("FK_HandoverDocs_Requests");
+
+            entity.HasOne(d => d.UploadedByNavigation).WithMany(p => p.HandoverDocuments)
+                .HasForeignKey(d => d.UploadedBy)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_HandoverDocs_Users");
+        });
+
+        modelBuilder.Entity<HandoverRequest>(entity =>
+        {
+            entity.HasKey(e => e.RequestId);
+
+            entity.ToTable("HANDOVER_REQUESTS");
+
+            entity.Property(e => e.InitiatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.RequestType)
+                .HasMaxLength(20)
+                .IsUnicode(false);
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Draft");
+
+            entity.HasOne(d => d.Executor).WithMany(p => p.HandoverRequests)
+                .HasForeignKey(d => d.ExecutorId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_HandoverReq_Users");
+
+            entity.HasOne(d => d.Vault).WithMany(p => p.HandoverRequests)
+                .HasForeignKey(d => d.VaultId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_HandoverReq_Vaults");
+        });
+
+        modelBuilder.Entity<LegalVerification>(entity =>
+        {
+            entity.HasKey(e => e.VerificationId);
+
+            entity.ToTable("LEGAL_VERIFICATIONS");
+
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Pending");
+            entity.Property(e => e.SubmittedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.Request).WithMany(p => p.LegalVerifications)
+                .HasForeignKey(d => d.RequestId)
+                .HasConstraintName("FK_LegalVerif_Requests");
+
+            entity.HasOne(d => d.Verifier).WithMany(p => p.LegalVerifications)
+                .HasForeignKey(d => d.VerifierId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_LegalVerif_Users");
+        });
+
+        modelBuilder.Entity<Message>(entity =>
+        {
+            entity.ToTable("MESSAGES");
+
+            entity.Property(e => e.MessageType)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Text");
+            entity.Property(e => e.SentAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.Conversation).WithMany(p => p.Messages)
+                .HasForeignKey(d => d.ConversationId)
+                .HasConstraintName("FK_Messages_Conversations");
+
+            entity.HasOne(d => d.Sender).WithMany(p => p.Messages)
+                .HasForeignKey(d => d.SenderId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_Messages_Users");
+        });
+
+        modelBuilder.Entity<Notification>(entity =>
+        {
+            entity.ToTable("NOTIFICATIONS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Title).HasMaxLength(150);
+            entity.Property(e => e.Type)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+
+            entity.HasOne(d => d.Handover).WithMany(p => p.Notifications)
+                .HasForeignKey(d => d.HandoverId)
+                .HasConstraintName("FK_Notif_HandoverCases");
+
+            entity.HasOne(d => d.User).WithMany(p => p.Notifications)
+                .HasForeignKey(d => d.UserId)
+                .HasConstraintName("FK_Notif_Users");
+        });
+
+        modelBuilder.Entity<PaymentTransaction>(entity =>
+        {
+            entity.HasKey(e => e.TransactionId);
+
+            entity.ToTable("PAYMENT_TRANSACTIONS");
+
+            entity.Property(e => e.Amount).HasColumnType("decimal(18, 2)");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.PaymentMethod)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Pending");
+            entity.Property(e => e.TransactionCode)
+                .HasMaxLength(100)
+                .IsUnicode(false);
+
+            entity.HasOne(d => d.Subscription).WithMany(p => p.PaymentTransactions)
+                .HasForeignKey(d => d.SubscriptionId)
+                .HasConstraintName("FK_PayTrans_UserSub");
+
+            entity.HasOne(d => d.User).WithMany(p => p.PaymentTransactions)
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_PayTrans_Users");
+        });
+
+        modelBuilder.Entity<ProofOfLife>(entity =>
+        {
+            entity.HasKey(e => e.CheckId);
+
+            entity.ToTable("PROOF_OF_LIFE");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.FrequencyDays).HasDefaultValue(30);
+            entity.Property(e => e.GracePeriodDays).HasDefaultValue(14);
+            entity.Property(e => e.LastPingAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.User).WithMany(p => p.ProofOfLives)
+                .HasForeignKey(d => d.UserId)
+                .HasConstraintName("FK_ProofOfLife_Users");
+        });
+
+        modelBuilder.Entity<Role>(entity =>
+        {
+            entity.ToTable("ROLES");
+
+            entity.HasIndex(e => e.RoleName, "UQ_ROLES_RoleName").IsUnique();
+
+            entity.Property(e => e.RoleName)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+        });
+
+        modelBuilder.Entity<SubscriptionPlan>(entity =>
+        {
+            entity.HasKey(e => e.PlanId);
+
+            entity.ToTable("SUBSCRIPTION_PLANS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.DurationDays).HasDefaultValue(30);
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.MaxStorageBytes).HasDefaultValue(1073741824L);
+            entity.Property(e => e.MaxVaults).HasDefaultValue(1);
+            entity.Property(e => e.PlanName).HasMaxLength(100);
+            entity.Property(e => e.Price).HasColumnType("decimal(18, 2)");
+        });
+
+        modelBuilder.Entity<TwoFactorAuth>(entity =>
+        {
+            entity.HasKey(e => e.TwoFactorId);
+
+            entity.ToTable("TWO_FACTOR_AUTHS");
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Method)
+                .HasMaxLength(20)
+                .IsUnicode(false);
+            entity.Property(e => e.Secret).HasMaxLength(255);
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasOne(d => d.User).WithMany(p => p.TwoFactorAuths)
+                .HasForeignKey(d => d.UserId)
+                .HasConstraintName("FK_2FA_Users");
+        });
+
+        modelBuilder.Entity<User>(entity =>
+        {
+            entity.ToTable("USERS");
+
+            entity.HasIndex(e => e.Email, "UQ_USERS_Email").IsUnique();
+
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Email).HasMaxLength(150);
+            entity.Property(e => e.FullName).HasMaxLength(100);
+            entity.Property(e => e.Phone).HasMaxLength(20);
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+
+            entity.HasMany(d => d.Roles).WithMany(p => p.Users)
+                .UsingEntity<Dictionary<string, object>>(
+                    "UserRole",
+                    r => r.HasOne<Role>().WithMany()
+                        .HasForeignKey("RoleId")
+                        .HasConstraintName("FK_UserRoles_Roles"),
+                    l => l.HasOne<User>().WithMany()
+                        .HasForeignKey("UserId")
+                        .HasConstraintName("FK_UserRoles_Users"),
+                    j =>
+                    {
+                        j.HasKey("UserId", "RoleId");
+                        j.ToTable("USER_ROLES");
+                    });
+        });
+
+        modelBuilder.Entity<UserSubscription>(entity =>
+        {
+            entity.HasKey(e => e.SubscriptionId);
+
+            entity.ToTable("USER_SUBSCRIPTIONS");
+
+            entity.Property(e => e.StartDate).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .IsUnicode(false)
+                .HasDefaultValue("Active");
+
+            entity.HasOne(d => d.Plan).WithMany(p => p.UserSubscriptions)
+                .HasForeignKey(d => d.PlanId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_UserSub_Plans");
+
+            entity.HasOne(d => d.User).WithMany(p => p.UserSubscriptions)
+                .HasForeignKey(d => d.UserId)
+                .HasConstraintName("FK_UserSub_Users");
+        });
+
+        OnModelCreatingPartial(modelBuilder);
+    }
+
+    partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Context\WorkflowConcurrency.cs ===
+using LegacyVault.DAL.Entities;
+using Microsoft.EntityFrameworkCore;
+namespace LegacyVault.DAL.Context;
+public partial class LegacyVaultDbContext
+{
+    partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<HandoverRequest>().Property(x => x.Status).IsConcurrencyToken();
+        modelBuilder.Entity<DigitalAsset>().Property(x => x.UpdatedAt).IsConcurrencyToken();
+        modelBuilder.Entity<Authentication>().Property(x => x.UpdatedAt).IsConcurrencyToken();
+        modelBuilder.Entity<User>().Property(x => x.UpdatedAt).IsConcurrencyToken();
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\AssetDocument.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class AssetDocument
+{
+    public int DocumentId { get; set; }
+
+    public int AssetId { get; set; }
+
+    public string FileName { get; set; } = null!;
+
+    public string FileType { get; set; } = null!;
+
+    public string StoragePath { get; set; } = null!;
+
+    public bool IsEncrypted { get; set; }
+
+    public int UploadedBy { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime UploadedAt { get; set; }
+
+    public virtual DigitalAsset Asset { get; set; } = null!;
+
+    public virtual User UploadedByNavigation { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\AuditLog.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class AuditLog
+{
+    public long LogId { get; set; }
+
+    public int? UserId { get; set; }
+
+    public string Action { get; set; } = null!;
+
+    public string? EntityType { get; set; }
+
+    public int? EntityId { get; set; }
+
+    public DateTime Timestamp { get; set; }
+
+    public string? Ipaddress { get; set; }
+
+    public string Result { get; set; } = null!;
+
+    public virtual User? User { get; set; }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Authentication.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class Authentication
+{
+    public int AuthId { get; set; }
+
+    public int UserId { get; set; }
+
+    public string PasswordHash { get; set; } = null!;
+
+    public int FailedLoginCount { get; set; }
+
+    public DateTime? LockedUntil { get; set; }
+
+    public DateTime? LastLoginAt { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual User User { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\BeneficiaryAssignment.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class BeneficiaryAssignment
+{
+    public int AssignmentId { get; set; }
+
+    public int AssetId { get; set; }
+
+    public int BeneficiaryId { get; set; }
+
+    public decimal Allocation { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual DigitalAsset Asset { get; set; } = null!;
+
+    public virtual User Beneficiary { get; set; } = null!;
+
+    public virtual ICollection<HandoverCase> HandoverCases { get; set; } = new List<HandoverCase>();
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\BeneficiaryReceipt.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class BeneficiaryReceipt
+{
+    public int ReceiptId { get; set; }
+
+    public int HandoverId { get; set; }
+
+    public int BeneficiaryId { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public string? ConfirmationNote { get; set; }
+
+    public DateTime ConfirmedAt { get; set; }
+
+    public virtual User Beneficiary { get; set; } = null!;
+
+    public virtual HandoverCase Handover { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Conversation.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class Conversation
+{
+    public int ConversationId { get; set; }
+
+    public string? Title { get; set; }
+
+    public string Type { get; set; } = null!;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual ICollection<Message> Messages { get; set; } = new List<Message>();
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\DigitalAsset.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class DigitalAsset
+{
+    public int AssetId { get; set; }
+
+    public int VaultId { get; set; }
+
+    public string AssetName { get; set; } = null!;
+
+    public string AssetType { get; set; } = null!;
+
+    public string? Description { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual ICollection<AssetDocument> AssetDocuments { get; set; } = new List<AssetDocument>();
+
+    public virtual ICollection<BeneficiaryAssignment> BeneficiaryAssignments { get; set; } = new List<BeneficiaryAssignment>();
+
+    public virtual ICollection<EncryptionKey> EncryptionKeys { get; set; } = new List<EncryptionKey>();
+
+    public virtual DigitalVault Vault { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\DigitalSignature.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class DigitalSignature
+{
+    public int SignatureId { get; set; }
+
+    public int VerificationId { get; set; }
+
+    public int SignerId { get; set; }
+
+    public string SignatureData { get; set; } = null!;
+
+    public string? CertificateInfo { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime SignedAt { get; set; }
+
+    public virtual User Signer { get; set; } = null!;
+
+    public virtual LegalVerification Verification { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\DigitalVault.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class DigitalVault
+{
+    public int VaultId { get; set; }
+
+    public int OwnerId { get; set; }
+
+    public string VaultName { get; set; } = null!;
+
+    public string? Description { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual ICollection<DigitalAsset> DigitalAssets { get; set; } = new List<DigitalAsset>();
+
+    public virtual ICollection<ExecutorAssignment> ExecutorAssignments { get; set; } = new List<ExecutorAssignment>();
+
+    public virtual ICollection<HandoverRequest> HandoverRequests { get; set; } = new List<HandoverRequest>();
+
+    public virtual User Owner { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\EncryptionKey.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class EncryptionKey
+{
+    public int KeyId { get; set; }
+
+    public int AssetId { get; set; }
+
+    public string EncryptedKey { get; set; } = null!;
+
+    public string Algorithm { get; set; } = null!;
+
+    public int KeyVersion { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime? RotatedAt { get; set; }
+
+    public virtual DigitalAsset Asset { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\ExecutorAssignment.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class ExecutorAssignment
+{
+    public int ExecutorAssignmentId { get; set; }
+
+    public int VaultId { get; set; }
+
+    public int ExecutorId { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime AssignedAt { get; set; }
+
+    public virtual User Executor { get; set; } = null!;
+
+    public virtual DigitalVault Vault { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\HandoverCase.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class HandoverCase
+{
+    public int HandoverId { get; set; }
+
+    public int RequestId { get; set; }
+
+    public int AssignmentId { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime? CompletedAt { get; set; }
+
+    public virtual BeneficiaryAssignment Assignment { get; set; } = null!;
+
+    public virtual ICollection<BeneficiaryReceipt> BeneficiaryReceipts { get; set; } = new List<BeneficiaryReceipt>();
+
+    public virtual ICollection<Notification> Notifications { get; set; } = new List<Notification>();
+
+    public virtual HandoverRequest Request { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\HandoverDocument.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class HandoverDocument
+{
+    public int HandoverDocumentId { get; set; }
+
+    public int RequestId { get; set; }
+
+    public string FileName { get; set; } = null!;
+
+    public string FileType { get; set; } = null!;
+
+    public string StoragePath { get; set; } = null!;
+
+    public bool IsEncrypted { get; set; }
+
+    public int UploadedBy { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual HandoverRequest Request { get; set; } = null!;
+
+    public virtual User UploadedByNavigation { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\HandoverRequest.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class HandoverRequest
+{
+    public int RequestId { get; set; }
+
+    public int VaultId { get; set; }
+
+    public int ExecutorId { get; set; }
+
+    public string RequestType { get; set; } = null!;
+
+    public string Status { get; set; } = null!;
+
+    public DateTime InitiatedAt { get; set; }
+
+    public DateTime? SubmittedAt { get; set; }
+
+    public DateTime? CompletedAt { get; set; }
+
+    public virtual User Executor { get; set; } = null!;
+
+    public virtual ICollection<HandoverCase> HandoverCases { get; set; } = new List<HandoverCase>();
+
+    public virtual ICollection<HandoverDocument> HandoverDocuments { get; set; } = new List<HandoverDocument>();
+
+    public virtual ICollection<LegalVerification> LegalVerifications { get; set; } = new List<LegalVerification>();
+
+    public virtual DigitalVault Vault { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\LegalVerification.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class LegalVerification
+{
+    public int VerificationId { get; set; }
+
+    public int RequestId { get; set; }
+
+    public int VerifierId { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public string? Comment { get; set; }
+
+    public DateTime SubmittedAt { get; set; }
+
+    public DateTime? ReviewedAt { get; set; }
+
+    public virtual ICollection<DigitalSignature> DigitalSignatures { get; set; } = new List<DigitalSignature>();
+
+    public virtual HandoverRequest Request { get; set; } = null!;
+
+    public virtual User Verifier { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Message.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class Message
+{
+    public long MessageId { get; set; }
+
+    public int ConversationId { get; set; }
+
+    public int SenderId { get; set; }
+
+    public string Content { get; set; } = null!;
+
+    public string MessageType { get; set; } = null!;
+
+    public DateTime SentAt { get; set; }
+
+    public bool IsRead { get; set; }
+
+    public virtual Conversation Conversation { get; set; } = null!;
+
+    public virtual User Sender { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Notification.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class Notification
+{
+    public int NotificationId { get; set; }
+
+    public int UserId { get; set; }
+
+    public int? HandoverId { get; set; }
+
+    public string Type { get; set; } = null!;
+
+    public string Title { get; set; } = null!;
+
+    public string Message { get; set; } = null!;
+
+    public bool IsRead { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public virtual HandoverCase? Handover { get; set; }
+
+    public virtual User User { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\PaymentTransaction.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class PaymentTransaction
+{
+    public long TransactionId { get; set; }
+
+    public int UserId { get; set; }
+
+    public int? SubscriptionId { get; set; }
+
+    public decimal Amount { get; set; }
+
+    public string PaymentMethod { get; set; } = null!;
+
+    public string? TransactionCode { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public DateTime CreatedAt { get; set; }
+
+    public virtual UserSubscription? Subscription { get; set; }
+
+    public virtual User User { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\ProofOfLife.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class ProofOfLife
+{
+    public int CheckId { get; set; }
+
+    public int UserId { get; set; }
+
+    public int FrequencyDays { get; set; }
+
+    public int GracePeriodDays { get; set; }
+
+    public DateTime LastPingAt { get; set; }
+
+    public DateTime NextPingDue { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public int MissedCount { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual User User { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Role.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class Role
+{
+    public int RoleId { get; set; }
+
+    public string RoleName { get; set; } = null!;
+
+    public virtual ICollection<User> Users { get; set; } = new List<User>();
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\SubscriptionPlan.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class SubscriptionPlan
+{
+    public int PlanId { get; set; }
+
+    public string PlanName { get; set; } = null!;
+
+    public int MaxVaults { get; set; }
+
+    public long MaxStorageBytes { get; set; }
+
+    public decimal Price { get; set; }
+
+    public int DurationDays { get; set; }
+
+    public bool IsActive { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public virtual ICollection<UserSubscription> UserSubscriptions { get; set; } = new List<UserSubscription>();
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\TwoFactorAuth.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class TwoFactorAuth
+{
+    public int TwoFactorId { get; set; }
+
+    public int UserId { get; set; }
+
+    public string Method { get; set; } = null!;
+
+    public string Secret { get; set; } = null!;
+
+    public bool IsEnabled { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual User User { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\User.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class User
+{
+    public int UserId { get; set; }
+
+    public string FullName { get; set; } = null!;
+
+    public string Email { get; set; } = null!;
+
+    public string? Phone { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public string? IdentityNumber { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public virtual ICollection<AssetDocument> AssetDocuments { get; set; } = new List<AssetDocument>();
+
+    public virtual ICollection<AuditLog> AuditLogs { get; set; } = new List<AuditLog>();
+
+    public virtual ICollection<Authentication> Authentications { get; set; } = new List<Authentication>();
+
+    public virtual ICollection<BeneficiaryAssignment> BeneficiaryAssignments { get; set; } = new List<BeneficiaryAssignment>();
+
+    public virtual ICollection<BeneficiaryReceipt> BeneficiaryReceipts { get; set; } = new List<BeneficiaryReceipt>();
+
+    public virtual ICollection<DigitalSignature> DigitalSignatures { get; set; } = new List<DigitalSignature>();
+
+    public virtual ICollection<DigitalVault> DigitalVaults { get; set; } = new List<DigitalVault>();
+
+    public virtual ICollection<ExecutorAssignment> ExecutorAssignments { get; set; } = new List<ExecutorAssignment>();
+
+    public virtual ICollection<HandoverDocument> HandoverDocuments { get; set; } = new List<HandoverDocument>();
+
+    public virtual ICollection<HandoverRequest> HandoverRequests { get; set; } = new List<HandoverRequest>();
+
+    public virtual ICollection<LegalVerification> LegalVerifications { get; set; } = new List<LegalVerification>();
+
+    public virtual ICollection<Message> Messages { get; set; } = new List<Message>();
+
+    public virtual ICollection<Notification> Notifications { get; set; } = new List<Notification>();
+
+    public virtual ICollection<PaymentTransaction> PaymentTransactions { get; set; } = new List<PaymentTransaction>();
+
+    public virtual ICollection<ProofOfLife> ProofOfLives { get; set; } = new List<ProofOfLife>();
+
+    public virtual ICollection<TwoFactorAuth> TwoFactorAuths { get; set; } = new List<TwoFactorAuth>();
+
+    public virtual ICollection<UserSubscription> UserSubscriptions { get; set; } = new List<UserSubscription>();
+
+    public virtual ICollection<Role> Roles { get; set; } = new List<Role>();
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\UserSubscription.cs ===
+using System;
+using System.Collections.Generic;
+
+namespace LegacyVault.DAL.Entities;
+
+public partial class UserSubscription
+{
+    public int SubscriptionId { get; set; }
+
+    public int UserId { get; set; }
+
+    public int PlanId { get; set; }
+
+    public DateTime StartDate { get; set; }
+
+    public DateTime EndDate { get; set; }
+
+    public string Status { get; set; } = null!;
+
+    public virtual ICollection<PaymentTransaction> PaymentTransactions { get; set; } = new List<PaymentTransaction>();
+
+    public virtual SubscriptionPlan Plan { get; set; } = null!;
+
+    public virtual User User { get; set; } = null!;
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Repositories\VaultRepository.cs ===
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Entities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
+using System.Data;
+namespace LegacyVault.DAL.Repositories;
+public interface IVaultRepository
+{
+    Task<User?> User(int id, CancellationToken ct);
+    Task<User?> LoginUser(string email, CancellationToken ct);
+    Task<User?> UserByEmail(string email, CancellationToken ct);
+    Task<List<User>> UsersByRole(string role, CancellationToken ct);
+    Task<Role?> Role(string name, CancellationToken ct);
+    Task Register(User user, string defaultRole, CancellationToken ct);
+    Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct);
+    Task<DigitalVault?> Vault(int id, CancellationToken ct);
+    Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct);
+    Task<DigitalAsset?> Asset(int id, CancellationToken ct);
+    Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct);
+    Task<HandoverRequest?> Request(int id, CancellationToken ct);
+    Task<List<HandoverCase>> Inherited(int beneficiary, CancellationToken ct);
+    void Add<T>(T entity) where T : class;
+    Task Save(CancellationToken ct);
+}
+public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
+{
+    public Task<User?> User(int id, CancellationToken ct) => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.UserId == id, ct);
+    public Task<User?> LoginUser(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).Include(x => x.Authentications).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
+    public Task<User?> UserByEmail(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
+
+    public Task<List<User>> UsersByRole(string role, CancellationToken ct) =>
+    db.Users
+      .Include(x => x.Roles)
+      .Where(x => x.Status == "Active" && x.Roles.Any(r => r.RoleName == role))
+      .ToListAsync(ct);
+
+    public Task<Role?> Role(string name, CancellationToken ct) => db.Roles.SingleOrDefaultAsync(x => x.RoleName == name, ct);
+    public Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct) => db.DigitalVaults.AsNoTracking().Where(x => x.OwnerId == owner).OrderBy(x => x.VaultId).ToListAsync(ct);
+    public Task<DigitalVault?> Vault(int id, CancellationToken ct) => db.DigitalVaults.SingleOrDefaultAsync(x => x.VaultId == id, ct);
+    public async Task Register(User user, string defaultRole, CancellationToken ct)
+    {
+        // The scaffold maps User.Roles to USER_ROLES and User.Authentications to AUTHENTICATIONS.
+        // Lock the SQL Server role range so simultaneous first registrations cannot create duplicate roles.
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+                var role = db.Database.IsSqlServer()
+                    ? await db.Roles.FromSqlInterpolated($"SELECT [RoleId], [RoleName] FROM [ROLES] WITH (UPDLOCK, HOLDLOCK) WHERE [RoleName] = {defaultRole}").SingleOrDefaultAsync(ct)
+                    : await Role(defaultRole, ct);
+                role ??= new Role { RoleName = defaultRole };
+                user.Roles.Clear();
+                user.Roles.Add(role);
+                db.Users.Add(user);
+                await Save(ct);
+                await transaction.CommitAsync(ct);
+                return;
+            }
+            catch (DbUpdateException ex) when (attempt < 2 && ex.InnerException is SqlException { Number: 1205 })
+            {
+                ResetRegistrationForRetry(user);
+                await Task.Delay(TimeSpan.FromMilliseconds(50 * (attempt + 1)), ct);
+            }
+            catch (SqlException ex) when (attempt < 2 && ex.Number == 1205)
+            {
+                ResetRegistrationForRetry(user);
+                await Task.Delay(TimeSpan.FromMilliseconds(50 * (attempt + 1)), ct);
+            }
+        }
+    }
+    private void ResetRegistrationForRetry(User user)
+    {
+        db.ChangeTracker.Clear();
+        user.UserId = 0;
+        foreach (var auth in user.Authentications) { auth.AuthId = 0; auth.UserId = 0; }
+        user.Roles.Clear();
+    }
+    private IQueryable<DigitalAsset> Assets => db.DigitalAssets.Include(x => x.Vault).Include(x => x.AssetDocuments).Include(x => x.BeneficiaryAssignments).ThenInclude(x => x.Beneficiary).AsSplitQuery();
+    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct) => Assets.Where(x => x.Vault.OwnerId == owner).OrderBy(x => x.AssetId).ToListAsync(ct);
+    public Task<DigitalAsset?> Asset(int id, CancellationToken ct) => Assets.SingleOrDefaultAsync(x => x.AssetId == id, ct);
+    private IQueryable<HandoverRequest> Handovers => db.HandoverRequests.Include(x => x.Vault).ThenInclude(x => x.ExecutorAssignments).Include(x => x.HandoverDocuments).Include(x => x.LegalVerifications).Include(x => x.HandoverCases).ThenInclude(x => x.Assignment).ThenInclude(x => x.Asset).AsSplitQuery();
+    public Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct) => Handovers.Where(x => x.ExecutorId == executor).OrderByDescending(x => x.InitiatedAt).ToListAsync(ct);
+    public Task<HandoverRequest?> Request(int id, CancellationToken ct) => Handovers.SingleOrDefaultAsync(x => x.RequestId == id, ct);
+    public Task<List<HandoverCase>> Inherited(int beneficiary, CancellationToken ct) => db.HandoverCases.Include(x => x.Request).ThenInclude(x => x.LegalVerifications).Include(x => x.Assignment).ThenInclude(x => x.Asset).ThenInclude(x => x.AssetDocuments).Where(x => x.Assignment.BeneficiaryId == beneficiary && x.Assignment.Status == "Active" && x.Request.LegalVerifications.Any(v => v.Status == "Approved") && (x.Status == "In_Progress" || x.Status == "Completed")).OrderBy(x => x.HandoverId).AsSplitQuery().ToListAsync(ct);
+    public void Add<T>(T entity) where T : class => db.Add(entity);
+    public async Task Save(CancellationToken ct)
+    {
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateConcurrencyException) { throw new RepositoryConflictException(); }
+        catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2601 or 2627 }) { throw new RepositoryDuplicateException(); }
+    }
+}
+public sealed class RepositoryConflictException : Exception;
+public sealed class RepositoryDuplicateException : Exception;
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Storage\DocumentStore.cs ===
+namespace LegacyVault.DAL.Storage;
+public interface IDocumentStore
+{
+    Task<string> Write(byte[] bytes, CancellationToken ct);
+    Task<byte[]> Read(string id, CancellationToken ct);
+    Task Delete(string id);
+}
+public sealed class DocumentStore(string root) : IDocumentStore
+{
+    private string PathFor(string id)
+    {
+        if (!Guid.TryParseExact(id, "N", out _)) throw new InvalidDataException("Invalid document identifier.");
+        return Path.Combine(Path.GetFullPath(root), id);
+    }
+    public async Task<string> Write(byte[] bytes, CancellationToken ct)
+    {
+        Directory.CreateDirectory(root);
+        var id = Guid.NewGuid().ToString("N");
+        try { await File.WriteAllBytesAsync(PathFor(id), bytes, ct); return id; }
+        catch { File.Delete(PathFor(id)); throw; }
+    }
+    public Task<byte[]> Read(string id, CancellationToken ct) => File.ReadAllBytesAsync(PathFor(id), ct);
+    public Task Delete(string id) { File.Delete(PathFor(id)); return Task.CompletedTask; }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\BeneficiaryAssignmentTests.cs ===
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Entities;
+using LegacyVault.DAL.Repositories;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+
+internal static class BeneficiaryAssignmentTests
+{
+    private static VaultService Service(LegacyVaultDbContext db) => new(new VaultRepository(db), new FakeStore(), new DocumentProtection(new SecurityOptions()));
+    private static async Task<(int Owner, int Asset)> Seed(DbContextOptions<LegacyVaultDbContext> options)
+    {
+        await using var db = new LegacyVaultDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var identity = new IdentityService(new VaultRepository(db));
+        var owner = 0;
+        foreach (var email in new[] { "owner@example.test", "bob@example.test", "carol@example.test" })
+        {
+            var result = await identity.Register(new RegisterInput { FullName = email.Split('@')[0], Email = email, Password = "Registration123!", ConfirmPassword = "Registration123!" }, default);
+            if (owner == 0) owner = result.UserId;
+        }
+        var vault = await Service(db).CreateVault(owner, new CreateVaultInput { Name = "Fixture" }, default);
+        var asset = await Service(db).CreateAsset(owner, new CreateAssetInput { VaultId = vault.VaultId, Name = "Fixture", Type = "Other" }, default);
+        return (owner, asset.AssetId);
+    }
+    public static async Task Run(Action<bool, string> check)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        connection.CreateFunction("sysdatetime", () => DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff"));
+        var options = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection).Options;
+        var fixture = await Seed(options);
+        DateTime originalRecipientTimestamp;
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            originalRecipientTimestamp = (await db.Users.SingleAsync(x => x.Email == "bob@example.test")).UpdatedAt;
+            await db.Database.ExecuteSqlRawAsync("CREATE TRIGGER fail_assignment BEFORE INSERT ON BENEFICIARY_ASSIGNMENTS BEGIN SELECT RAISE(ABORT, 'Test assignment failure'); END;");
+        }
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            try { await Service(db).AssignBeneficiary(fixture.Owner, fixture.Asset, new AssignBeneficiaryInput { Email = "bob@example.test" }, default); throw new Exception("Expected database failure"); }
+            catch (DbUpdateException) { }
+        }
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            var bob = await db.Users.Include(x => x.Roles).SingleAsync(x => x.Email == "bob@example.test");
+            check(await db.BeneficiaryAssignments.CountAsync() == 0 && await db.AuditLogs.CountAsync() == 0, "failed beneficiary save rolls back assignment and audit together");
+            check(bob.Roles.Single().RoleName == VaultService.OwnerRole && bob.UpdatedAt == originalRecipientTimestamp && !await db.Roles.AnyAsync(x => x.RoleName == VaultService.BeneficiaryRole), "failed assignment cannot partially grant beneficiary access or create its role");
+            await db.Database.ExecuteSqlRawAsync("DROP TRIGGER fail_assignment;");
+            var beneficiaryRole = new Role { RoleName = VaultService.BeneficiaryRole };
+            foreach (var recipient in await db.Users.Where(x => x.Email != "owner@example.test").ToListAsync()) recipient.Roles.Add(beneficiaryRole);
+            await db.SaveChangesAsync();
+        }
+        var competingOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
+            .AddInterceptors(new CompetingAssignment(options, fixture.Owner, fixture.Asset)).Options;
+        await using (var db = new LegacyVaultDbContext(competingOptions))
+        {
+            try { await Service(db).AssignBeneficiary(fixture.Owner, fixture.Asset, new AssignBeneficiaryInput { Email = "bob@example.test", Allocation = 60 }, default); throw new Exception("Expected concurrency conflict"); }
+            catch (RepositoryConflictException) { check(true, "simultaneous allocation updates are rejected by asset concurrency token"); }
+        }
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            var allocations = await db.BeneficiaryAssignments.Include(x => x.Beneficiary).ToListAsync();
+            check(allocations.Count == 1 && allocations.Single().Beneficiary.Email == "carol@example.test" && allocations.Single().Allocation == 60 && await db.AuditLogs.CountAsync() == 1, "concurrent rejected assignment leaves total allocation within 100 percent and no partial audit");
+        }
+    }
+    private sealed class CompetingAssignment(DbContextOptions<LegacyVaultDbContext> options, int owner, int asset) : SaveChangesInterceptor
+    {
+        private bool ran;
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!ran)
+            {
+                ran = true;
+                // Simulate another request committing between the original request's read and save.
+                await using var other = new LegacyVaultDbContext(options);
+                await Service(other).AssignBeneficiary(owner, asset, new AssignBeneficiaryInput { Email = "carol@example.test", Allocation = 60 }, cancellationToken);
+            }
+            return result;
+        }
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\DatabaseAudit.cs ===
+using LegacyVault.DAL.Context;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Repositories;
+
+internal static class DatabaseAudit
+{
+    public static async Task Run()
+    {
+        var root = Directory.GetCurrentDirectory();
+        var api = Path.Combine(root, "LegacyVault.API");
+        if (!Directory.Exists(api)) throw new InvalidOperationException("Run database audit from the solution directory.");
+        var configuration = new ConfigurationBuilder().SetBasePath(api)
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile("appsettings.Development.json", optional: true)
+            .AddUserSecrets("02a585f2-4bc3-4545-bc61-169f5637f022")
+            .AddEnvironmentVariables().Build();
+        var configured = configuration.GetConnectionString("LegacyVault");
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            Console.WriteLine("Database audit unavailable: ConnectionStrings:LegacyVault is not configured for this process. No SQL executed.");
+            Environment.ExitCode = 2; return;
+        }
+        // Read-only SELECTs; never print the connection string, users, password hashes or secrets.
+        var connectionString = new SqlConnectionStringBuilder(configured) { ConnectTimeout = 5 }.ConnectionString;
+        await using var db = new LegacyVaultDbContext(new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlServer(connectionString, sql => sql.CommandTimeout(10)).Options);
+        try
+        {
+            var roles = await db.Roles.AsNoTracking().OrderBy(x => x.RoleId).Select(x => new { x.RoleId, x.RoleName }).ToListAsync();
+            Console.WriteLine($"Read-only database audit: {roles.Count} roles.");
+            foreach (var role in roles) Console.WriteLine($"Role {role.RoleId}: {role.RoleName}");
+            var ownerRole = await new VaultRepository(db).Role(VaultService.OwnerRole, default);
+            Console.WriteLine(ownerRole is null ? "Owner role is missing; registration will initialize it." : $"Registration role lookup passed: {ownerRole.RoleName} (RoleId {ownerRole.RoleId}).");
+            var connection = db.Database.GetDbConnection();
+            await db.Database.OpenConnectionAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandTimeout = 10;
+            command.CommandText = "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS";
+            await using var reader = await command.ExecuteReaderAsync();
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (await reader.ReadAsync()) columns.Add($"{reader.GetString(0)}.{reader.GetString(1)}.{reader.GetString(2)}");
+            var missing = new List<string>();
+            foreach (var entity in db.Model.GetEntityTypes())
+            {
+                var table = entity.GetTableName()!;
+                var schema = entity.GetSchema() ?? "dbo";
+                var identifier = Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table(table, entity.GetSchema());
+                foreach (var property in entity.GetProperties())
+                {
+                    var column = $"{schema}.{table}.{property.GetColumnName(identifier)}";
+                    if (!columns.Contains(column)) missing.Add(column);
+                }
+            }
+            Console.WriteLine($"Scaffold column comparison: {db.Model.GetEntityTypes().Count()} tables; {missing.Count} missing columns.");
+            foreach (var column in missing) Console.WriteLine("Missing: " + column);
+            await reader.CloseAsync();
+            command.CommandText = "SELECT OBJECT_NAME(parent_object_id), definition FROM sys.check_constraints ORDER BY OBJECT_NAME(parent_object_id), name";
+            await using var checks = await command.ExecuteReaderAsync();
+            while (await checks.ReadAsync()) Console.WriteLine($"Check {checks.GetString(0)}: {checks.GetString(1)}");
+            if (missing.Count != 0) Environment.ExitCode = 1;
+        }
+        catch (SqlException ex)
+        {
+            Console.WriteLine($"Database audit could not connect/query (SQL error {ex.Number}). No database data was modified.");
+            Environment.ExitCode = 2;
+        }
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\MainFlowTests.cs ===
+using System.Net;
+using System.Net.Http.Json;
+using LegacyVault.API.Controllers;
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+internal static class MainFlowTests
+{
+    public static async Task Run(Action<bool, string> check)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        connection.CreateFunction("sysdatetime", () => DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff"));
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Testing" });
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Services.AddControllers().AddApplicationPart(typeof(OwnerController).Assembly);
+        builder.Services.AddDbContext<LegacyVaultDbContext>(o => o.UseSqlite(connection));
+        builder.Services.AddScoped<IVaultRepository, VaultRepository>();
+        builder.Services.AddScoped<IdentityService>();
+        builder.Services.AddScoped<VaultService>();
+        builder.Services.AddSingleton(new SecurityOptions());
+        builder.Services.AddSingleton<DocumentProtection>();
+        builder.Services.AddSingleton<IDocumentStore, FakeStore>();
+        builder.Services.AddSingleton<IOtpSender, FakeSender>();
+        builder.Services.AddSingleton<OtpService>();
+        builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
+        builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(o =>
+        {
+            // Loopback test host uses HTTP; production keeps SecurePolicy.Always and HTTPS.
+            o.Cookie.SecurePolicy = Microsoft.AspNetCore.Http.CookieSecurePolicy.SameAsRequest;
+            o.Events.OnRedirectToLogin = context => { context.Response.StatusCode = 401; return Task.CompletedTask; };
+        });
+        builder.Services.AddAuthorization();
+        builder.Services.AddRateLimiter(o =>
+        {
+            foreach (var name in new[] { "login", "otp" })
+                o.AddPolicy(name, _ => System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("test"));
+        });
+        await using var app = builder.Build();
+        app.Use(async (context, next) =>
+        {
+            try { await next(context); }
+            catch (WorkflowException ex) { context.Response.StatusCode = ex.StatusCode; await Microsoft.AspNetCore.Http.HttpResponseJsonExtensions.WriteAsJsonAsync(context.Response, new { status = ex.StatusCode, detail = ex.Message }); }
+        });
+        app.UseRouting();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.UseRateLimiter();
+        app.MapControllers();
+        await using (var scope = app.Services.CreateAsyncScope())
+            await scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>().Database.EnsureCreatedAsync();
+        await app.StartAsync();
+        var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+        using var handler = new HttpClientHandler { CookieContainer = new CookieContainer() };
+        using var client = new HttpClient(handler) { BaseAddress = new Uri(address) };
+        client.DefaultRequestHeaders.Add("X-Vault-Request", "1");
+        check((await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Unauthenticated" })).StatusCode == HttpStatusCode.Unauthorized, "HTTP vault creation requires login");
+        check((await client.PostAsJsonAsync("/api/auth/register", new { fullName = "Test", email = "escalate@example.test", password = "Registration123!", confirmPassword = "Registration123!", role = "Beneficiary" })).StatusCode == HttpStatusCode.BadRequest, "HTTP public registration rejects role selection");
+        var registration = await client.PostAsJsonAsync("/api/auth/register", new { fullName = "Main Flow Owner", email = "mainflow@example.test", password = "Registration123!", confirmPassword = "Registration123!", phone = "0901234567" });
+        check(registration.StatusCode == HttpStatusCode.Created && (await registration.Content.ReadFromJsonAsync<RegistrationDto>())!.Roles.SequenceEqual(new[] { VaultService.OwnerRole }), "HTTP main flow registration creates an owner");
+        var login = await client.PostAsJsonAsync("/api/auth/login", new { email = "mainflow@example.test", password = "Registration123!" });
+        if (login.StatusCode != HttpStatusCode.OK) throw new Exception($"Main flow login failed: HTTP {(int)login.StatusCode}.");
+        var account = (await login.Content.ReadFromJsonAsync<LoginDto>())!;
+        check(login.StatusCode == HttpStatusCode.OK && handler.CookieContainer.GetCookies(client.BaseAddress!).Count > 0, "HTTP main flow login stores a session cookie");
+        var vaultResponse = await client.PostAsJsonAsync("/api/owner/vaults", new { name = " My Vault ", description = "Personal assets" });
+        var vault = (await vaultResponse.Content.ReadFromJsonAsync<VaultDto>())!;
+        check(vaultResponse.StatusCode == HttpStatusCode.Created && vault.VaultId > 0 && vault.Name == "My Vault" && vault.Status == "Active" && vaultResponse.Headers.Location is not null, "HTTP main flow creates a vault with a usable Location");
+        check((await client.GetAsync(vaultResponse.Headers.Location)).StatusCode == HttpStatusCode.OK, "created vault Location resolves to owner detail");
+        check((await client.GetFromJsonAsync<VaultDto[]>("/api/owner/vaults"))!.Single().VaultId == vault.VaultId, "HTTP owner can list created vault");
+        var assetResponse = await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = " Savings Account ", type = "BankAccount", description = "Asset description" });
+        var asset = (await assetResponse.Content.ReadFromJsonAsync<AssetDto>())!;
+        check(assetResponse.StatusCode == HttpStatusCode.Created && asset.AssetId > 0 && asset.Name == "Savings Account" && asset.Status == "Active" && asset.Documents.Count == 0 && assetResponse.Headers.Location is not null, "HTTP main flow creates asset inside owned vault");
+        check((await client.GetFromJsonAsync<AssetDto>(assetResponse.Headers.Location))!.AssetId == asset.AssetId, "created asset Location resolves to asset detail");
+        check((await client.GetFromJsonAsync<AssetDto[]>("/api/owner/assets"))!.Single().AssetId == asset.AssetId, "HTTP main flow lists persisted asset");
+        check((await client.PostAsJsonAsync("/api/beneficiary/otp/request", new { })).StatusCode == HttpStatusCode.Forbidden, "publicly registered owner does not silently gain beneficiary role");
+        check((await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = " ", type = "BankAccount" })).StatusCode == HttpStatusCode.BadRequest, "HTTP asset creation validates required name");
+        check((await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Example", type = new string('X', 51) })).StatusCode == HttpStatusCode.BadRequest, "HTTP asset type respects scaffolded length");
+        check((await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Spoof", ownerId = 999 })).StatusCode == HttpStatusCode.BadRequest, "HTTP caller cannot supply another ownerId");
+        using var otherHandler = new HttpClientHandler { CookieContainer = new CookieContainer() };
+        using var other = new HttpClient(otherHandler) { BaseAddress = client.BaseAddress };
+        other.DefaultRequestHeaders.Add("X-Vault-Request", "1");
+        await other.PostAsJsonAsync("/api/auth/register", new { fullName = "Other Owner", email = "otherflow@example.test", password = "Registration123!", confirmPassword = "Registration123!" });
+        await other.PostAsJsonAsync("/api/auth/login", new { email = "otherflow@example.test", password = "Registration123!" });
+        check((await other.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Unauthorized", type = "Other" })).StatusCode == HttpStatusCode.NotFound, "another owner cannot create an asset in this vault");
+        check((await other.GetAsync($"/api/owner/assets/{asset.AssetId}")).StatusCode == HttpStatusCode.NotFound && (await other.GetFromJsonAsync<AssetDto[]>("/api/owner/assets"))!.Length == 0, "another owner cannot read or list this asset");
+        var selectionPath = $"/api/owner/assets/{asset.AssetId}/beneficiaries";
+        check((await other.PostAsJsonAsync(selectionPath, new { email = "mainflow@example.test", allocation = 100 })).StatusCode == HttpStatusCode.NotFound, "only the asset owner can designate a beneficiary");
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "mainflow@example.test", allocation = 100 })).StatusCode == HttpStatusCode.BadRequest, "beneficiary selection rejects self-inheritance");
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "missing@example.test", allocation = 100 })).StatusCode == HttpStatusCode.NotFound, "beneficiary must have an existing active account");
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "otherflow@example.test", allocation = 0 })).StatusCode == HttpStatusCode.BadRequest, "beneficiary allocation must be positive");
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "otherflow@example.test", allocation = 1.001m })).StatusCode == HttpStatusCode.BadRequest, "beneficiary allocation respects decimal(5,2) precision");
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "otherflow@example.test", allocation = 60, role = "Admin" })).StatusCode == HttpStatusCode.BadRequest, "beneficiary selection cannot grant caller-supplied privileged role");
+        var chosenResponse = await client.PostAsJsonAsync(selectionPath, new { email = " OTHERFLOW@EXAMPLE.TEST ", allocation = 60 });
+        var chosen = (await chosenResponse.Content.ReadFromJsonAsync<BeneficiaryDto>())!;
+        check(chosenResponse.StatusCode == HttpStatusCode.Created && chosen.Allocation == 60 && chosen.Status == "Active", "owner can select a registered owner as beneficiary by normalized email");
+        check((await client.GetFromJsonAsync<BeneficiaryDto[]>($"/api/owner/beneficiaries?assetId={asset.AssetId}"))!.Single().BeneficiaryId == chosen.BeneficiaryId, "owner beneficiary list returns the selected user ID for subsequent upload");
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "otherflow@example.test", allocation = 10 })).StatusCode == HttpStatusCode.Conflict, "duplicate active beneficiary assignment is rejected");
+        var otpResponse = await other.PostAsJsonAsync("/api/beneficiary/otp/request", new { });
+        var challenge = (await otpResponse.Content.ReadFromJsonAsync<OtpChallenge>())!;
+        check(otpResponse.StatusCode == HttpStatusCode.OK, "designated user can request beneficiary OTP without losing owner session");
+        var code = ((FakeSender)app.Services.GetRequiredService<IOtpSender>()).Code;
+        check((await other.PostAsJsonAsync("/api/beneficiary/otp/verify", new { challengeId = challenge.ChallengeId, code })).StatusCode == HttpStatusCode.OK, "designated beneficiary verifies identity using OTP");
+        check((await other.GetFromJsonAsync<InheritanceDto[]>("/api/beneficiary/assets"))!.Length == 0, "designation and OTP do not prematurely release assets without legal handover");
+        check((await other.GetAsync($"/api/owner/assets/{asset.AssetId}")).StatusCode == HttpStatusCode.NotFound, "beneficiary role does not grant ownership of someone else's asset");
+        await client.PostAsJsonAsync("/api/auth/register", new { fullName = "Third User", email = "thirdflow@example.test", password = "Registration123!", confirmPassword = "Registration123!" });
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "thirdflow@example.test", allocation = 50 })).StatusCode == HttpStatusCode.Conflict, "combined beneficiary allocation cannot exceed 100 percent");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+            var rejected = await db.Users.Include(x => x.Roles).SingleAsync(x => x.Email == "thirdflow@example.test");
+            check(rejected.Roles.All(x => x.RoleName != VaultService.BeneficiaryRole), "failed allocation validation does not grant beneficiary role");
+            rejected.Status = "Inactive";
+            await db.SaveChangesAsync();
+        }
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "thirdflow@example.test", allocation = 40 })).StatusCode == HttpStatusCode.NotFound, "inactive recipient cannot be designated");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+            (await db.Users.SingleAsync(x => x.Email == "thirdflow@example.test")).Status = "Active";
+            await db.SaveChangesAsync();
+        }
+        check((await client.PostAsJsonAsync(selectionPath, new { email = "thirdflow@example.test", allocation = 40 })).StatusCode == HttpStatusCode.Created, "second beneficiary can receive the remaining allocation");
+        var allocations = (await client.GetFromJsonAsync<BeneficiaryDto[]>($"/api/owner/beneficiaries?assetId={asset.AssetId}"))!;
+        check(allocations.Length == 2 && allocations.Sum(x => x.Allocation) == 100, "multiple beneficiary assignments persist with a total allocation of 100 percent");
+        var secondAssetResponse = await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Second Asset", type = "Other" });
+        var secondAsset = (await secondAssetResponse.Content.ReadFromJsonAsync<AssetDto>())!;
+        check((await client.PostAsJsonAsync($"/api/owner/assets/{secondAsset.AssetId}/beneficiaries", new { email = "otherflow@example.test", allocation = 100 })).StatusCode == HttpStatusCode.Created, "same beneficiary can be designated for a second asset");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+            var storedVault = await db.DigitalVaults.SingleAsync();
+            var storedAsset = await db.DigitalAssets.SingleAsync(x => x.AssetId == asset.AssetId);
+            check(storedVault.OwnerId == account.UserId && storedAsset.VaultId == storedVault.VaultId && await db.Users.CountAsync() == 3, "main flow persists actual USERS to DIGITAL_VAULTS to DIGITAL_ASSETS foreign keys");
+            var recipient = await db.Users.Include(x => x.Roles).SingleAsync(x => x.UserId == chosen.BeneficiaryId);
+            check(recipient.Roles.Select(x => x.RoleName).Order().SequenceEqual(new[] { "Beneficiary", "Owner" }) && await db.Roles.CountAsync(x => x.RoleName == VaultService.BeneficiaryRole) == 1, "designation persists both roles and reuses the single beneficiary role");
+            storedVault.Status = "Locked";
+            await db.SaveChangesAsync();
+        }
+        check((await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Blocked", type = "Other" })).StatusCode == HttpStatusCode.Conflict, "inactive vault rejects new assets");
+        check((await client.PostAsJsonAsync($"/api/owner/assets/{secondAsset.AssetId}/beneficiaries", new { email = "thirdflow@example.test", allocation = 1 })).StatusCode == HttpStatusCode.Conflict, "inactive vault rejects beneficiary changes");
+        check((await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode == HttpStatusCode.NoContent && (await client.GetAsync("/api/owner/assets")).StatusCode == HttpStatusCode.Unauthorized, "HTTP main flow logout removes access");
+        await app.StopAsync();
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\Program.cs ===
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Entities;
+using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
+
+if (args.Contains("--database-audit")) { await DatabaseAudit.Run(); return; }
+
+var checks = 0;
+void Check(bool condition, string name)
+{
+    if (!condition) throw new Exception("FAILED: " + name);
+    checks++; Console.WriteLine("PASS: " + name);
+}
+async Task Reject(Func<Task> action, int status, string name)
+{
+    try { await action(); throw new Exception("Expected rejection: " + name); }
+    catch (WorkflowException e) { Check(e.StatusCode == status, name); }
+}
+
+var protection = new DocumentProtection(new SecurityOptions { EncryptionKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) });
+var file = new UploadFile("instructions.txt", "text/plain", Encoding.UTF8.GetBytes("private inheritance instructions"));
+var envelope = new ProtectedDocument(file, 1, null);
+var cipher = protection.Encrypt(envelope);
+Check(protection.Decrypt(cipher).File.Content.SequenceEqual(file.Content), "encrypted document round trip preserves every byte");
+Check(!cipher.SequenceEqual(protection.Encrypt(envelope)), "fresh nonce on every encryption");
+cipher[^1] ^= 1;
+try { protection.Decrypt(cipher); throw new Exception("Expected integrity failure"); }
+catch (CryptographicException) { Check(true, "tampered ciphertext rejected"); }
+Check(!protection.Verify(file.Content, new byte[256], 1), "unconfigured signer rejected");
+using var rsa = RSA.Create(2048);
+var certificateRequest = new CertificateRequest("CN=LegacyVault Test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+certificateRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+certificateRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyCertSign, true));
+using var certificate = certificateRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+var signedProtection = new DocumentProtection(new SecurityOptions
+{
+    EncryptionKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+    SignerCertificates = new() { [1] = certificate.ExportCertificatePem(), [6] = certificate.ExportCertificatePem() },
+    TrustedRootCertificates = new() { certificate.ExportCertificatePem() }
+});
+var signature = rsa.SignData(file.Content, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+Check(signedProtection.Verify(file.Content, signature, 1), "trusted RSA certificate signature accepted");
+Check(!signedProtection.Verify(Encoding.UTF8.GetBytes("changed"), signature, 1), "signature cannot validate modified document");
+Check(!signedProtection.Verify(file.Content, signature, 7), "signature cannot validate unconfigured signer identity");
+var salt = RandomNumberGenerator.GetBytes(16);
+var hash = Rfc2898DeriveBytes.Pbkdf2("correct-password", salt, 100000, HashAlgorithmName.SHA256, 32);
+var encoded = $"PBKDF2-SHA256$100000${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
+Check(IdentityService.VerifyPassword("correct-password", encoded) && !IdentityService.VerifyPassword("wrong-password", encoded), "password verification");
+
+var sender = new FakeSender(); var otp = new OtpService(sender);
+var challenge = await otp.Request(3, "session-a", "beneficiary@example.test", default);
+await Reject(() => otp.Request(3, "session-a", "beneficiary@example.test", default), 429, "OTP resend cooldown");
+await Reject(() => { otp.Verify(4, "session-a", challenge.ChallengeId, sender.Code); return Task.CompletedTask; }, 400, "OTP bound to user");
+await Reject(() => { otp.Verify(3, "session-b", challenge.ChallengeId, sender.Code); return Task.CompletedTask; }, 400, "OTP bound to login session");
+otp.Verify(3, "session-a", challenge.ChallengeId, sender.Code); otp.RequireVerified("session-a"); Check(true, "valid OTP unlocks current session");
+await Reject(() => { otp.Verify(3, "session-a", challenge.ChallengeId, sender.Code); return Task.CompletedTask; }, 400, "OTP replay rejected");
+await Reject(() => { otp.RequireVerified("session-b"); return Task.CompletedTask; }, 403, "OTP grant cannot cross sessions");
+otp.Revoke("session-a");
+await Reject(() => { otp.RequireVerified("session-a"); return Task.CompletedTask; }, 403, "logout revokes OTP grant");
+var exhausted = await otp.Request(5, "session-c", "other@example.test", default);
+var actual = sender.Code;
+var wrong = actual == "000000" ? "000001" : "000000";
+for (var i = 0; i < 5; i++) await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, wrong); return Task.CompletedTask; }, 400, $"OTP failed attempt {i + 1}");
+await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, actual); return Task.CompletedTask; }, 400, "OTP attempt limit cannot be bypassed with valid code");
+
+var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, protection);
+await Reject(() => service.OwnerAsset(2, 10, default), 404, "other owner cannot read asset");
+await Reject(() => service.OwnerAsset(3, 10, default), 403, "beneficiary cannot use owner APIs");
+await Reject(() => service.UploadOwnerDocument(1, 10, 3, true, file, null, null, default), 400, "living owner must supply verified signature");
+await Reject(() => service.UploadOwnerDocument(1, 10, 3, false, file, null, null, default), 400, "deceased branch requires death certificate");
+Check(store.Files.Count == 0 && repo.Added.Count == 0, "rejected uploads write no files or records");
+var uploaded = await service.UploadOwnerDocument(1, 10, 3, false, file, null, file, default);
+Check(uploaded.IsEncrypted && store.Files.Count == 2 && repo.Added.OfType<AssetDocument>().All(x => x.Status == "Pending_Legal"), "deceased documents remain encrypted and pending legal verification");
+repo.FailSave = true;
+var count = store.Files.Count;
+try { await service.UploadOwnerDocument(1, 10, 3, false, file, null, file, default); throw new Exception("Expected save failure"); }
+catch (RepositoryConflictException) { Check(store.Files.Count == count, "failed database save removes newly stored files"); }
+repo.FailSave = false;
+await Reject(() => service.Complete(6, 20, file, new byte[256], default), 409, "draft handover cannot be completed");
+await Reject(() => service.Request(7, 20, default), 404, "another executor cannot inspect handover");
+await Reject(() => service.RequestLegal(6, 20, 3, null, file, default), 403, "legal request requires verifier role");
+var verification = await service.RequestLegal(6, 20, 8, "Evidence attached", file, default);
+Check(repo.Handover.Status == "Pending_Legal" && repo.Added.OfType<LegalVerification>().Any(), "legal submission changes status and persists evidence together");
+await Reject(() => service.RequestLegal(6, 20, 8, null, file, default), 409, "duplicate legal submission rejected");
+repo.Handover.Status = "Approved";
+await Reject(() => service.Complete(6, 20, file, new byte[256], default), 409, "completion requires approved legal verification and cases");
+var signedRepo = new FakeRepository(); var signedStore = new FakeStore();
+var signedService = new VaultService(signedRepo, signedStore, signedProtection);
+var signedUpload = await signedService.UploadOwnerDocument(1, 10, 3, true, file, signature, null, default);
+Check(signedUpload.IsEncrypted && signedRepo.Added.OfType<AssetDocument>().Single().Status == "Active", "signed living-owner upload accepted");
+signedRepo.Handover.Status = "Approved";
+signedRepo.Handover.LegalVerifications.Add(new LegalVerification { Status = "Approved" });
+signedRepo.Handover.HandoverCases.Add(new HandoverCase { Status = "In_Progress", Assignment = new BeneficiaryAssignment { AssetId = 10, BeneficiaryId = 3 } });
+await signedService.Complete(6, 20, file, signature, default);
+Check(signedRepo.Handover.Status == "Completed" && signedRepo.Handover.HandoverCases.All(x => x.Status == "Completed"), "signed completion updates request and every case");
+var saved = signedRepo.Added.OfType<HandoverDocument>().Single();
+signedRepo.Handover.HandoverDocuments.Add(saved);
+var detail = await signedService.Request(6, 20, default);
+Check(detail.Documents.Single().SignatureValid == true, "handover detail rechecks stored signature");
+var downloaded = await signedService.RequestDocument(6, 20, saved.HandoverDocumentId, default);
+Check(downloaded.Content.SequenceEqual(file.Content) && downloaded.SignatureValid, "executor reads entire decrypted document and signature status");
+var registrationRepo = new FakeRepository();
+var identity = new IdentityService(registrationRepo);
+RegisterInput Registration(string email = " NewUser@Example.test ", string password = "Registration123!", string? confirmation = null) =>
+    new() { FullName = " Test User ", Email = email, Password = password, ConfirmPassword = confirmation ?? password, Phone = " 0901234567 " };
+var registered = await identity.Register(Registration(), default);
+var account = registrationRepo.RegisteredUsers.Single();
+Check(registered.UserId > 0 && registered.Email == "newuser@example.test" && registered.FullName == "Test User" && account.Phone == "0901234567", "registration creates normalized account");
+Check(account.Status == "Active" && account.Roles.Single().RoleName == VaultService.OwnerRole && account.Authentications.Count == 1, "registration saves active user, authentication and allowed role together");
+Check(account.Authentications.Single().PasswordHash != "Registration123!" && IdentityService.VerifyPassword("Registration123!", account.Authentications.Single().PasswordHash), "registration hashes password compatible with login");
+var login = await identity.Login("NEWUSER@example.test", "Registration123!", default);
+Check(login.UserId == registered.UserId, "registered user can log in immediately");
+await Reject(() => identity.Register(Registration("NEWUSER@EXAMPLE.TEST"), default), 409, "registration rejects case-insensitive duplicate email");
+await Reject(() => identity.Register(Registration("second@example.test", password: "short"), default), 400, "registration rejects short password");
+await Reject(() => identity.Register(Registration("second@example.test", confirmation: "DoesNotMatch123!"), default), 400, "registration requires matching password confirmation");
+await Reject(() => identity.Register(Registration("invalid-email"), default), 400, "registration rejects invalid email");
+await Reject(() => identity.Register(new RegisterInput { FullName = " ", Email = "space@example.test", Password = "Registration123!", ConfirmPassword = "Registration123!" }, default), 400, "registration rejects blank name");
+foreach (var role in new[] { VaultService.ExecutorRole, VaultService.VerifierRole, VaultService.AdminRole, VaultService.BeneficiaryRole })
+{
+    var payload = System.Text.Json.JsonSerializer.Serialize(new { fullName = "Test User", email = "test@example.test", password = "Registration123!", confirmPassword = "Registration123!", role });
+    try
+    {
+        System.Text.Json.JsonSerializer.Deserialize<RegisterInput>(payload, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        throw new Exception("Expected role field rejection");
+    }
+    catch (System.Text.Json.JsonException) { Check(true, "registration rejects caller-supplied role: " + role); }
+}
+var fiveFields = System.Text.Json.JsonSerializer.Deserialize<RegisterInput>("{\"fullName\":\"Test User\",\"email\":\"five@example.test\",\"password\":\"Registration123!\",\"confirmPassword\":\"Registration123!\",\"phone\":\"0901234567\"}", new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+var fiveFieldResult = await identity.Register(fiveFields!, default);
+Check(fiveFieldResult.Roles.SequenceEqual(new[] { VaultService.OwnerRole }), "five-field public registration always assigns owner role");
+registrationRepo.MissingRole = true;
+var missingRoleRegistration = await identity.Register(Registration("missing@example.test"), default);
+Check(missingRoleRegistration.Roles.Single() == VaultService.OwnerRole && registrationRepo.CreatedRoles.Single().RoleName == VaultService.OwnerRole, "registration initializes missing owner role instead of returning 503");
+registrationRepo.MissingRole = false; registrationRepo.DuplicateOnSave = true;
+await Reject(() => identity.Register(Registration("race@example.test"), default), 409, "concurrent duplicate database insert maps to conflict");
+await RelationalRegistrationTests.Run(Check);
+await MainFlowTests.Run(Check);
+await BeneficiaryAssignmentTests.Run(Check);
+Console.WriteLine($"{checks} checks passed.");
+
+sealed class FakeSender : IOtpSender
+{
+    public string Code { get; private set; } = "";
+    public Task Send(string email, string code, CancellationToken ct) { Code = code; return Task.CompletedTask; }
+}
+sealed class FakeStore : IDocumentStore
+{
+    public Dictionary<string, byte[]> Files { get; } = new();
+    public Task<string> Write(byte[] bytes, CancellationToken ct) { var id = Guid.NewGuid().ToString("N"); Files[id] = bytes; return Task.FromResult(id); }
+    public Task<byte[]> Read(string id, CancellationToken ct) => Task.FromResult(Files[id]);
+    public Task Delete(string id) { Files.Remove(id); return Task.CompletedTask; }
+}
+sealed class FakeRepository : IVaultRepository
+{
+    public List<object> Added { get; } = new();
+    public bool FailSave { get; set; }
+    public bool MissingRole { get; set; }
+    public bool DuplicateOnSave { get; set; }
+    public List<User> RegisteredUsers { get; } = new();
+    public List<Role> CreatedRoles { get; } = new();
+    public HandoverRequest Handover { get; } = new() { RequestId = 20, ExecutorId = 6, Status = "Draft", Vault = new DigitalVault { OwnerId = 1, ExecutorAssignments = new List<ExecutorAssignment> { new() { ExecutorId = 6, Status = "Active" } } } };
+    private readonly DigitalAsset asset = new() { AssetId = 10, AssetName = "Account", AssetType = "Account", Status = "Active", Vault = new DigitalVault { OwnerId = 1, Status = "Active" } };
+    public Task<User?> User(int id, CancellationToken ct)
+    {
+        var role = id switch { 1 or 2 => VaultService.OwnerRole, 3 => VaultService.BeneficiaryRole, 6 or 7 => VaultService.ExecutorRole, 8 => VaultService.VerifierRole, _ => "None" };
+        return Task.FromResult<User?>(new User { UserId = id, Status = "Active", Roles = new List<Role> { new() { RoleName = role } } });
+    }
+    public Task<User?> LoginUser(string email, CancellationToken ct) => Task.FromResult(RegisteredUsers.SingleOrDefault(x => string.Equals(x.Email, email, StringComparison.OrdinalIgnoreCase)));
+    public Task<User?> UserByEmail(string email, CancellationToken ct) => LoginUser(email, ct);
+    public Task<Role?> Role(string name, CancellationToken ct) => Task.FromResult<Role?>(MissingRole ? null : new Role { RoleId = 1, RoleName = name });
+    public Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct) => Task.FromResult(new List<DigitalVault> { asset.Vault });
+    public Task<DigitalVault?> Vault(int id, CancellationToken ct) => Task.FromResult<DigitalVault?>(asset.Vault);
+    public async Task Register(User user, string defaultRole, CancellationToken ct)
+    {
+        var role = await Role(defaultRole, ct);
+        if (role is null) { role = new Role { RoleId = 2, RoleName = defaultRole }; CreatedRoles.Add(role); MissingRole = false; }
+        user.Roles.Add(role);
+        Add(user);
+        await Save(ct);
+    }
+    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct) => Task.FromResult(new List<DigitalAsset> { asset });
+    public Task<DigitalAsset?> Asset(int id, CancellationToken ct) => Task.FromResult<DigitalAsset?>(id == 10 ? asset : null);
+    public Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct) => Task.FromResult(new List<HandoverRequest> { Handover });
+    public Task<HandoverRequest?> Request(int id, CancellationToken ct) => Task.FromResult<HandoverRequest?>(id == 20 ? Handover : null);
+    public Task<List<HandoverCase>> Inherited(int beneficiary, CancellationToken ct) => Task.FromResult(new List<HandoverCase>());
+    public void Add<T>(T entity) where T : class => Added.Add(entity);
+    public Task Save(CancellationToken ct)
+    {
+        if (FailSave) return Task.FromException(new RepositoryConflictException());
+        if (DuplicateOnSave) return Task.FromException(new RepositoryDuplicateException());
+        foreach (var user in Added.OfType<User>().Where(x => x.UserId == 0)) { user.UserId = 100 + RegisteredUsers.Count; RegisteredUsers.Add(user); }
+        return Task.CompletedTask;
+    }
+}
+
+
+=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\RelationalRegistrationTests.cs ===
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Entities;
+using LegacyVault.DAL.Repositories;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+
+internal static class RelationalRegistrationTests
+{
+    public static async Task Run(Action<bool, string> check)
+    {
+        using (var modelContext = new LegacyVaultDbContext(new DbContextOptionsBuilder<LegacyVaultDbContext>()
+            .UseSqlServer("Server=localhost;Database=MetadataOnly;Integrated Security=True;Encrypt=True").Options))
+        {
+            var model = modelContext.Model;
+            var user = model.FindEntityType(typeof(User))!;
+            var auth = model.FindEntityType(typeof(Authentication))!;
+            var role = model.FindEntityType(typeof(Role))!;
+            check(user.GetTableName() == "USERS" && auth.GetTableName() == "AUTHENTICATIONS" && role.GetTableName() == "ROLES", "scaffold maps registration to the existing tables");
+            check(user.FindProperty(nameof(User.Email))!.GetMaxLength() == 150 && user.FindProperty(nameof(User.FullName))!.GetMaxLength() == 100 && user.FindProperty(nameof(User.Phone))!.GetMaxLength() == 20, "registration input capacities match scaffolded column lengths");
+            check(user.GetIndexes().Any(x => x.IsUnique && x.Properties.Single().Name == nameof(User.Email)) && role.GetIndexes().Any(x => x.IsUnique && x.Properties.Single().Name == nameof(Role.RoleName)), "scaffold enforces unique email and role name");
+            var join = model.FindEntityType("UserRole")!;
+            check(join.GetTableName() == "USER_ROLES" && join.FindPrimaryKey()!.Properties.Select(x => x.Name).SequenceEqual(new[] { "UserId", "RoleId" }) && join.GetForeignKeys().Count() == 2, "scaffold defines role join composite key and both foreign keys");
+            check(auth.GetForeignKeys().Single().Properties.Single().Name == nameof(Authentication.UserId), "authentication references actual user primary key");
+            check(model.FindEntityType(typeof(AuditLog))!.FindProperty(nameof(AuditLog.Result))!.GetMaxLength() == 20 && "Pending_Legal".Length <= 20, "deceased upload audit result fits scaffolded length");
+            Console.WriteLine($"Scaffold model: {model.GetEntityTypes().Count()} mapped tables, including USER_ROLES.");
+        }
+
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        connection.CreateFunction("sysdatetime", () => DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff"));
+        var options = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection).Options;
+        await using (var setup = new LegacyVaultDbContext(options))
+        {
+            // Only this isolated in-memory database is created; never the configured SQL Server database.
+            await setup.Database.EnsureCreatedAsync();
+            setup.Roles.Add(new Role { RoleName = VaultService.AdminRole });
+            await setup.SaveChangesAsync();
+        }
+        RegisterInput Input(string email) => new() { FullName = "Relational Test", Email = email, Password = "Registration123!", ConfirmPassword = "Registration123!", Phone = "0901234567" };
+        RegistrationDto first;
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            first = await new IdentityService(new VaultRepository(db)).Register(Input(" First@Example.test "), default);
+            check(first.UserId > 0 && first.Roles.SequenceEqual(new[] { VaultService.OwnerRole }), "real EF repository registers when owner role is missing");
+        }
+        int ownerRoleId;
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            var user = await db.Users.Include(x => x.Authentications).Include(x => x.Roles).SingleAsync();
+            ownerRoleId = user.Roles.Single().RoleId;
+            check(user.UserId == first.UserId && user.Email == "first@example.test" && user.Status == "Active", "registration persists and reloads scaffolded user fields");
+            var authentication = user.Authentications.Single();
+            check(authentication.UserId == first.UserId && authentication.AuthId > 0 && authentication.PasswordHash.Length <= 255 && IdentityService.VerifyPassword("Registration123!", authentication.PasswordHash), "real database authentication FK and password hash are correct");
+            check(await db.Set<Dictionary<string, object>>("UserRole").CountAsync() == 1 && user.Roles.Single().RoleName == VaultService.OwnerRole, "actual USER_ROLES row grants only owner access");
+            check(await db.Roles.CountAsync() == 2, "registration preserves preexisting administrator role without granting it");
+        }
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            await new IdentityService(new VaultRepository(db)).Register(Input("second@example.test"), default);
+        }
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            check(await db.Roles.CountAsync() == 2 && await db.Set<Dictionary<string, object>>("UserRole").CountAsync() == 2 && await db.Roles.Where(x => x.RoleId == ownerRoleId).SelectMany(x => x.Users).CountAsync() == 2, "second registration reuses existing role and persists a second join");
+            var login = await new IdentityService(new VaultRepository(db)).Login("FIRST@EXAMPLE.TEST", "Registration123!", default);
+            check(login.UserId == first.UserId, "registered account logs in through real EF query");
+        }
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            try { await new IdentityService(new VaultRepository(db)).Register(Input("FIRST@EXAMPLE.TEST"), default); throw new Exception("Expected duplicate email rejection"); }
+            catch (WorkflowException ex) { check(ex.StatusCode == 409 && await db.Users.CountAsync() == 2, "case-insensitive duplicate registration leaves database unchanged"); }
+        }
+
+        await using var rollbackConnection = new SqliteConnection("Data Source=:memory:");
+        await rollbackConnection.OpenAsync();
+        rollbackConnection.CreateFunction("sysdatetime", () => DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff"));
+        var rollbackOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(rollbackConnection).Options;
+        await using (var setup = new LegacyVaultDbContext(rollbackOptions)) { await setup.Database.EnsureCreatedAsync(); }
+        var failingOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(rollbackConnection).AddInterceptors(new FailAfterDatabaseSave()).Options;
+        await using (var db = new LegacyVaultDbContext(failingOptions))
+        {
+            try { await new IdentityService(new VaultRepository(db)).Register(Input("rollback@example.test"), default); throw new Exception("Expected injected failure"); }
+            catch (DbUpdateException) { }
+        }
+        await using (var db = new LegacyVaultDbContext(rollbackOptions))
+        {
+            check(await db.Users.CountAsync() == 0 && await db.Authentications.CountAsync() == 0 && await db.Roles.CountAsync() == 0 && await db.Set<Dictionary<string, object>>("UserRole").CountAsync() == 0, "failed registration rolls back user, authentication, newly created role and join after SQL writes");
+        }
+    }
+    private sealed class FailAfterDatabaseSave : SaveChangesInterceptor
+    {
+        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default) =>
+            throw new DbUpdateException("Injected failure before registration transaction commit.");
+    }
+}
+
+
