@@ -9,6 +9,8 @@ namespace LegacyVault.BLL.Services;
 
 public sealed class VaultService(IVaultRepository repository, IDocumentStore store, DocumentProtection protection)
 {
+
+
     public const string OwnerRole = "Owner";
     public const string ExecutorRole = "Executor";
     public const string BeneficiaryRole = "Beneficiary";
@@ -332,5 +334,56 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     }
     private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
     { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
+
+    public async Task<DocumentDto> UploadDocumentAsync(
+        int user,
+        int assetId,
+        UploadDocumentInput input,
+        byte[]? signature,
+        CancellationToken ct)
+    {
+        if (input.File == null || input.File.Length == 0)
+            throw new WorkflowException(400, "File upload không hợp lệ.");
+
+        // 1. Kiểm tra quyền sở hữu Asset & trạng thái Vault
+        var asset = await Owned(user, assetId, ct);
+        if (asset.Vault.Status != "Active" || asset.Status != "Active")
+            throw new WorkflowException(409, "Vault or asset is not active.");
+
+        // 2. Chuyển IFormFile sang byte[] và gom thành UploadFile
+        using var ms = new MemoryStream();
+        await input.File.CopyToAsync(ms, ct);
+        var fileBytes = ms.ToArray();
+
+        var uploadFile = new UploadFile(Path.GetFileName(input.File.FileName), input.File.ContentType, fileBytes);
+
+        // 3. Validate định dạng & dung lượng file bằng hàm có sẵn trong service
+        Validate(uploadFile);
+
+        // 4. Mã hóa AesGcm qua DocumentProtection
+        var protectedDoc = new ProtectedDocument(uploadFile, input.SignerId, signature);
+        byte[] encryptedBytes = protection.Encrypt(protectedDoc);
+
+        // 5. Ghi file mã hóa vào DocumentStore
+        var documentStorageId = await store.Write(encryptedBytes, ct);
+
+        // 6. Lưu Metadata vào DB (Gán đầy đủ AssetId, UploadedBy, Status)
+        var docEntity = new AssetDocument
+        {
+            AssetId = assetId,
+            FileName = uploadFile.FileName,
+            FileType = uploadFile.FileType,
+            StoragePath = documentStorageId,
+            IsEncrypted = true,
+            UploadedBy = user,
+            Status = "Active",
+            UploadedAt = DateTime.UtcNow
+        };
+
+        repository.Add(docEntity);
+        await repository.Save(ct);
+
+        return new DocumentDto(docEntity.DocumentId, docEntity.FileName, docEntity.FileType, docEntity.IsEncrypted);
+    }
 
 }
