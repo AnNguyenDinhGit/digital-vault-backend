@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.0.31903.59
+# Visual Studio Version 18
+VisualStudioVersion = 18.9.12128.139 oobstable
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LegacyVault.API", "LegacyVault.API\LegacyVault.API.csproj", "{44240ADF-F20E-43FE-8E4A-8B34C590458E}"
 EndProject
@@ -10,6 +10,11 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LegacyVault.DAL", "LegacyVault.DAL\LegacyVault.DAL.csproj", "{13C9017B-CF01-49C6-A26D-147865AD557E}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LegacyVault.Tests", "LegacyVault.Tests\LegacyVault.Tests.csproj", "{19B87C12-1092-412A-AB61-CB67ABC4CD5A}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{08FF099A-B3A0-41EB-BA7F-C8D65A433BDF}"
+	ProjectSection(SolutionItems) = preProject
+		DOCUMENTATION.md = DOCUMENTATION.md
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -72,5 +77,8 @@ Global
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9B5EC319-2B33-4A91-BD6E-EBEF5B6F2EF5}
 	EndGlobalSection
 EndGlobal
