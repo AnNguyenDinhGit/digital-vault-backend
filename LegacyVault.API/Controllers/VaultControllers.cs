@@ -8,6 +8,10 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using LegacyVault.BLL.Interfaces;
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Entities;
+using Microsoft.EntityFrameworkCore;
 
 namespace LegacyVault.API.Controllers;
 
@@ -126,7 +130,11 @@ public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] s
 public sealed record LoginInput([Required, EmailAddress] string Email, [Required, StringLength(1024)] string Password);
 
 [ApiController, Route("api/auth")]
-public sealed class AuthController(IdentityService identity, OtpService otp) : VaultController
+public sealed class AuthController(
+    IdentityService identity,
+    OtpService otp,
+    IJwtTokenService jwtTokenService,
+    LegacyVaultDbContext dbContext) : VaultController
 {
     [HttpPost("register"), EnableRateLimiting("login")]
     [ProducesResponseType(typeof(RegistrationDto), StatusCodes.Status201Created)]
@@ -135,14 +143,108 @@ public sealed class AuthController(IdentityService identity, OtpService otp) : V
         var result = await identity.Register(input, ct);
         return StatusCode(StatusCodes.Status201Created, result);
     }
+
     [HttpPost("login"), EnableRateLimiting("login")]
     public async Task<IActionResult> Login(LoginInput input, CancellationToken ct)
     {
-        var result = await identity.Login(input.Email, input.Password, ct);
-        var claims = new[] { new Claim(ClaimTypes.NameIdentifier, result.UserId.ToString()), new Claim("vault_session", Guid.NewGuid().ToString("N")) };
-        await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)));
-        return Ok(result);
+        try
+        {
+            var result = await identity.Login(input.Email, input.Password, ct);
+
+            // 1. Lấy role an toàn
+            var role = result.Roles?.FirstOrDefault() ?? "User";
+
+            // 2. Tạo cặp Token
+            var accessToken = jwtTokenService.GenerateAccessToken(result.UserId, input.Email, role);
+            var refreshTokenEntity = jwtTokenService.GenerateRefreshToken(result.UserId);
+
+            // 3. Lưu RefreshToken vào DB
+            dbContext.RefreshTokens.Add(refreshTokenEntity);
+            await dbContext.SaveChangesAsync(ct);
+
+            return Ok(new
+            {
+                UserId = result.UserId,
+                Roles = result.Roles,
+                AccessToken = accessToken,
+                RefreshToken = refreshTokenEntity.Token,
+                ExpiresAt = refreshTokenEntity.ExpiresAt
+            });
+        }
+        catch (Exception ex)
+        {
+            // Trả về thông báo lỗi chi tiết để debug
+            return StatusCode(500, new { Message = "Lỗi xử lý Login/JWT", Detail = ex.Message, Inner = ex.InnerException?.Message });
+        }
     }
+
     [Authorize, HttpPost("logout")]
     public async Task<IActionResult> Logout() { otp.Revoke(SessionId); await HttpContext.SignOutAsync(); return NoContent(); }
+
+    [HttpPost("refresh-token")]
+    public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenRequestDto request)
+    {
+        if (string.IsNullOrWhiteSpace(request.AccessToken) || string.IsNullOrWhiteSpace(request.RefreshToken))
+        {
+            return BadRequest(new { Message = "AccessToken và RefreshToken không được để trống." });
+        }
+
+        ClaimsPrincipal principal;
+        try
+        {
+            principal = jwtTokenService.GetPrincipalFromExpiredToken(request.AccessToken);
+        }
+        catch
+        {
+            return BadRequest(new { Message = "AccessToken không hợp lệ." });
+        }
+
+        var userIdClaim = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
+        {
+            return BadRequest(new { Message = "Token không chứa UserId hợp lệ." });
+        }
+
+        var storedRefreshToken = await dbContext.RefreshTokens
+            .FirstOrDefaultAsync(r => r.Token == request.RefreshToken && r.UserId == userId);
+
+        if (storedRefreshToken == null)
+        {
+            return Unauthorized(new { Message = "RefreshToken không tồn tại." });
+        }
+
+        if (storedRefreshToken.IsRevoked)
+        {
+            return Unauthorized(new { Message = "RefreshToken đã bị thu hồi." });
+        }
+
+        if (storedRefreshToken.ExpiresAt < DateTime.UtcNow)
+        {
+            return Unauthorized(new { Message = "RefreshToken đã hết hạn, vui lòng đăng nhập lại." });
+        }
+
+        storedRefreshToken.IsRevoked = true;
+
+        var email = principal.FindFirst(ClaimTypes.Email)?.Value ?? "";
+        var role = principal.FindFirst(ClaimTypes.Role)?.Value ?? "";
+
+        var newAccessToken = jwtTokenService.GenerateAccessToken(userId, email, role);
+        var newRefreshTokenEntity = jwtTokenService.GenerateRefreshToken(userId);
+
+        storedRefreshToken.ReplacedByToken = newRefreshTokenEntity.Token;
+
+        dbContext.RefreshTokens.Add(newRefreshTokenEntity);
+        await dbContext.SaveChangesAsync();
+
+        return Ok(new
+        {
+            AccessToken = newAccessToken,
+            RefreshToken = newRefreshTokenEntity.Token,
+            ExpiresAt = newRefreshTokenEntity.ExpiresAt
+        });
+    }
+
+    public sealed record RefreshTokenRequestDto(string AccessToken, string RefreshToken);
 }
+
+
