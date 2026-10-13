@@ -11,6 +11,7 @@ public partial class LegacyVaultDbContext : DbContext
         : base(options)
     {
     }
+    public DbSet<RefreshToken> RefreshTokens { get; set; }
 
     public virtual DbSet<AssetDocument> AssetDocuments { get; set; }
 
