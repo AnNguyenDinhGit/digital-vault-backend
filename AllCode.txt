@@ -1,125 +1,6 @@
-﻿=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.API\Program.cs ===
-using LegacyVault.DAL.Context;
-using Microsoft.EntityFrameworkCore;
-using LegacyVault.BLL.DTOs;
-using LegacyVault.BLL.Security;
-using LegacyVault.BLL.Services;
-using LegacyVault.DAL.Repositories;
-using LegacyVault.DAL.Storage;
-using Microsoft.AspNetCore.Authentication.Cookies;
-using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.DataProtection;
-using Microsoft.OpenApi.Models;
-
-var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(options =>
-{
-    options.SwaggerDoc("v1", new OpenApiInfo
-    {
-        Title = "LegacyVault API",
-        Version = "v1",
-        Description = "First call POST /api/auth/login over HTTPS. The browser stores the session cookie and sends it on subsequent requests. Beneficiaries must verify OTP before accessing inherited assets. Upload endpoints accept multipart/form-data; signatures are detached RSA-SHA256 binary files."
-    });
-    options.OperationFilter<LegacyVault.API.Swagger.MutationHeaderFilter>();
-});
-var cookieKeys = builder.Services.AddDataProtection()
-    .SetApplicationName("LegacyVault")
-    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "auth-keys")));
-if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
-builder.Services.AddScoped<IVaultRepository, VaultRepository>();
-builder.Services.AddScoped<VaultService>();
-builder.Services.AddScoped<IdentityService>();
-builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
-builder.Services.AddSingleton(builder.Configuration.GetSection("Mail").Get<MailOptions>() ?? new MailOptions());
-builder.Services.AddSingleton<DocumentProtection>();
-builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>();
-builder.Services.AddSingleton<OtpService>();
-builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
-{
-    options.Cookie.Name = "LegacyVault.Session";
-    options.Cookie.HttpOnly = true;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
-    options.Cookie.SameSite = SameSiteMode.Strict;
-    options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
-    options.SlidingExpiration = false;
-    options.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = 401; return Task.CompletedTask; };
-    options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
-});
-builder.Services.AddAuthorization();
-builder.Services.AddRateLimiter(options =>
-{
-    options.RejectionStatusCode = 429;
-    foreach (var policy in new[] { "login", "otp" })
-        options.AddPolicy(policy, ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
-});
-
-// Reads environment variables and Development User Secrets.
-// Startup does not open a connection or modify the database.
-builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("LegacyVault");
-    if (string.IsNullOrWhiteSpace(connectionString))
-    {
-        throw new WorkflowException(503,
-            "Missing ConnectionStrings:LegacyVault. Configure User Secrets or ConnectionStrings__LegacyVault.");
-    }
-    options.UseSqlServer(connectionString);
-});
-
-var app = builder.Build();
-app.Use(async (context, next) =>
-{
-    context.Response.Headers["Cache-Control"] = "no-store";
-    try
-    {
-        // A custom header prevents cross-site form submissions when using cookie authentication.
-        if (context.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(context.Request.Method) &&
-            !HttpMethods.IsHead(context.Request.Method) && !HttpMethods.IsOptions(context.Request.Method) &&
-            context.Request.Headers["X-Vault-Request"] != "1")
-            throw new WorkflowException(400, "Set X-Vault-Request: 1 on mutation requests.");
-        await next(context);
-    }
-    catch (WorkflowException ex)
-    {
-        context.Response.StatusCode = ex.StatusCode;
-        await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message });
-    }
-    catch (RepositoryConflictException)
-    {
-        context.Response.StatusCode = 409;
-        await context.Response.WriteAsJsonAsync(new { status = 409, detail = "The resource changed. Reload and retry." });
-    }
-    catch (Exception ex) when (ex is not OperationCanceledException || !context.RequestAborted.IsCancellationRequested)
-    {
-        app.Logger.LogError(ex, "API operation failed");
-        context.Response.StatusCode = 500;
-        await context.Response.WriteAsJsonAsync(new { status = 500, detail = "The operation could not be completed." });
-    }
-});
-app.UseHttpsRedirection();
-
-// Báº­t Swagger cho má»i mÃ´i trÆ°á»ng (ká»ƒ cáº£ Production khi cháº¡y Docker)
-app.UseSwagger();
-app.UseSwaggerUI(options =>
-{
-    options.SwaggerEndpoint("/swagger/v1/swagger.json", "LegacyVault API v1");
-    options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; request.credentials = 'same-origin'; return request; }");
-});
-
-app.UseRouting();
-app.UseAuthentication();
-app.UseAuthorization();
-app.UseRateLimiter();
-app.MapControllers();
-app.Run();
-
-
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.API\Controllers\VaultControllers.cs ===
+// ==========================================
+// File: ./LegacyVault.API/Controllers/VaultControllers.cs
+// ==========================================
 using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
 using LegacyVault.BLL.DTOs;
@@ -268,9 +149,136 @@ public sealed class AuthController(IdentityService identity, OtpService otp) : V
     [Authorize, HttpPost("logout")]
     public async Task<IActionResult> Logout() { otp.Revoke(SessionId); await HttpContext.SignOutAsync(); return NoContent(); }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.API\Swagger\MutationHeaderFilter.cs ===
+// ==========================================
+// File: ./LegacyVault.API/Program.cs
+// ==========================================
+using LegacyVault.DAL.Context;
+using Microsoft.EntityFrameworkCore;
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.OpenApi.Models;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "LegacyVault API",
+        Version = "v1",
+        Description = "First call POST /api/auth/login over HTTPS. The browser stores the session cookie and sends it on subsequent requests. Beneficiaries must verify OTP before accessing inherited assets. Upload endpoints accept multipart/form-data; signatures are detached RSA-SHA256 binary files."
+    });
+    options.OperationFilter<LegacyVault.API.Swagger.MutationHeaderFilter>();
+});
+var cookieKeys = builder.Services.AddDataProtection()
+    .SetApplicationName("LegacyVault")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "auth-keys")));
+if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
+builder.Services.AddScoped<IVaultRepository, VaultRepository>();
+builder.Services.AddScoped<VaultService>();
+builder.Services.AddScoped<IdentityService>();
+builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
+builder.Services.AddSingleton(builder.Configuration.GetSection("Mail").Get<MailOptions>() ?? new MailOptions());
+builder.Services.AddSingleton<DocumentProtection>();
+builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>();
+builder.Services.AddSingleton<OtpService>();
+builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
+{
+    options.Cookie.Name = "LegacyVault.Session";
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
+    options.SlidingExpiration = false;
+    options.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = 401; return Task.CompletedTask; };
+    options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
+});
+builder.Services.AddAuthorization();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = 429;
+    foreach (var policy in new[] { "login", "otp" })
+        options.AddPolicy(policy, ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+});
+
+// Reads environment variables and Development User Secrets.
+// Startup does not open a connection or modify the database.
+builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("LegacyVault");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new WorkflowException(503,
+            "Missing ConnectionStrings:LegacyVault. Configure User Secrets or ConnectionStrings__LegacyVault.");
+    }
+    options.UseSqlServer(connectionString);
+});
+
+var app = builder.Build();
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["Cache-Control"] = "no-store";
+    try
+    {
+        // A custom header prevents cross-site form submissions when using cookie authentication.
+        if (context.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(context.Request.Method) &&
+            !HttpMethods.IsHead(context.Request.Method) && !HttpMethods.IsOptions(context.Request.Method) &&
+            context.Request.Headers["X-Vault-Request"] != "1")
+            throw new WorkflowException(400, "Set X-Vault-Request: 1 on mutation requests.");
+        await next(context);
+    }
+    catch (WorkflowException ex)
+    {
+        context.Response.StatusCode = ex.StatusCode;
+        await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message });
+    }
+    catch (RepositoryConflictException)
+    {
+        context.Response.StatusCode = 409;
+        await context.Response.WriteAsJsonAsync(new { status = 409, detail = "The resource changed. Reload and retry." });
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException || !context.RequestAborted.IsCancellationRequested)
+    {
+        app.Logger.LogError(ex, "API operation failed");
+        context.Response.StatusCode = 500;
+        await context.Response.WriteAsJsonAsync(new { status = 500, detail = "The operation could not be completed." });
+    }
+});
+app.UseHttpsRedirection();
+
+// Bật Swagger cho mọi môi trường (kể cả Production khi chạy Docker)
+app.UseSwagger();
+app.UseSwaggerUI(options =>
+{
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "LegacyVault API v1");
+    options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; request.credentials = 'include'; return request; }");
+});
+
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+app.MapControllers();
+app.Run();
+-e 
+
+
+// ==========================================
+// File: ./LegacyVault.API/Swagger/MutationHeaderFilter.cs
+// ==========================================
 using Microsoft.OpenApi.Any;
 using Microsoft.OpenApi.Models;
 using Swashbuckle.AspNetCore.SwaggerGen;
@@ -293,9 +301,12 @@ public sealed class MutationHeaderFilter : IOperationFilter
         });
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\AssetCreationDtos.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/DTOs/AssetCreationDtos.cs
+// ==========================================
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
@@ -320,9 +331,12 @@ public sealed class CreateAssetInput
 }
 
 public sealed record VaultDto(int VaultId, string Name, string? Description, string Status);
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\BeneficiarySelectionDto.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/DTOs/BeneficiarySelectionDto.cs
+// ==========================================
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
@@ -334,9 +348,12 @@ public sealed class AssignBeneficiaryInput
     [Required, EmailAddress, StringLength(150)] public string Email { get; init; } = null!;
     [Range(typeof(decimal), "0.01", "100")] public decimal Allocation { get; init; } = 100m;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\RegistrationDtos.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/DTOs/RegistrationDtos.cs
+// ==========================================
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
@@ -366,10 +383,13 @@ public sealed class UpdateProfileInput
     [StringLength(20)]
     public string? IdentityNumber { get; init; }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\UploadDocumentInput.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.BLL/DTOs/UploadDocumentInput.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -388,9 +408,12 @@ public class UploadDocumentInput
     [Required]
     public int SignerId { get; set; }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\DTOs\WorkflowDtos.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/DTOs/WorkflowDtos.cs
+// ==========================================
 namespace LegacyVault.BLL.DTOs;
 public sealed record AssetDto(int AssetId, string Name, string Type, string? Description, string Status, IReadOnlyList<DocumentDto> Documents);
 public sealed record DocumentDto(int DocumentId, string FileName, string FileType, bool IsEncrypted, bool? SignatureValid = null);
@@ -405,9 +428,12 @@ public sealed class WorkflowException(int statusCode, string message) : Exceptio
 {
     public int StatusCode { get; } = statusCode;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Security\DocumentProtection.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/Security/DocumentProtection.cs
+// ==========================================
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
@@ -476,9 +502,12 @@ public sealed class DocumentProtection(SecurityOptions options)
         return JsonSerializer.Deserialize<ProtectedDocument>(plain) ?? throw new InvalidDataException();
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Security\OtpService.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/Security/OtpService.cs
+// ==========================================
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Mail;
@@ -568,10 +597,13 @@ public sealed class OtpService(IOtpSender sender)
         foreach (var entry in challenges.Where(x => x.Value.Session == session).ToArray()) challenges.TryRemove(entry.Key, out _);
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\BeneficiaryService.cs ===
-using LegacyVault.DAL.Context;
+// ==========================================
+// File: ./LegacyVault.BLL/Services/BeneficiaryService.cs
+// ==========================================
+﻿using LegacyVault.DAL.Context;
 using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
 
@@ -642,11 +674,13 @@ public class BeneficiaryService : IBeneficiaryService
         // Trả về dữ liệu giải mã mẫu hoặc logic xử lý khóa
         return "Decrypted Content Data";
     }
-}
+}-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\IBeneficiaryService.cs ===
-using LegacyVault.DAL.Entities;
+// ==========================================
+// File: ./LegacyVault.BLL/Services/IBeneficiaryService.cs
+// ==========================================
+﻿using LegacyVault.DAL.Entities;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -665,9 +699,12 @@ namespace LegacyVault.BLL.Services
         Task<string?> DecryptAssetDataAsync(int assetId, string decryptKey);
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\IdentityService.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/Services/IdentityService.cs
+// ==========================================
     using System.Security.Cryptography;
 using System.ComponentModel.DataAnnotations;
 using LegacyVault.BLL.DTOs;
@@ -722,7 +759,7 @@ public sealed class IdentityService(IVaultRepository repository)
         return new RegistrationDto(user.UserId, user.FullName, user.Email, user.Phone, user.IdentityNumber, user.Roles.Select(x => x.RoleName).ToArray());
     }
 
-    // Cáº­p nháº­t thÃ´ng tin Profile (Há» tÃªn, SÄT, CCCD)
+    // Cập nhật thông tin Profile (Họ tên, SĐT, CCCD)
     public async Task<bool> UpdateProfile(int userId, UpdateProfileInput input, CancellationToken ct)
     {
         var errors = new List<ValidationResult>();
@@ -739,7 +776,7 @@ public sealed class IdentityService(IVaultRepository repository)
         if (input.Phone != null)
             user.Phone = string.IsNullOrWhiteSpace(input.Phone) ? null : input.Phone.Trim();
 
-        // Cáº­p nháº­t sá»‘ CCCD (IdentityNumber)
+        // Cập nhật số CCCD (IdentityNumber)
         if (input.IdentityNumber != null)
             user.IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber) ? null : input.IdentityNumber.Trim();
 
@@ -796,11 +833,13 @@ public sealed class IdentityService(IVaultRepository repository)
             throw new WorkflowException(403, "Active beneficiary required.");
         return user.Email;
     }
-}
+}-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\LocalStorageService.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.BLL/Services/LocalStorageService.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -827,9 +866,12 @@ public class LocalStorageService : IStorageService
         return Path.Combine("uploads", folder, uniqueFileName);
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.BLL\Services\VaultService.cs ===
+// ==========================================
+// File: ./LegacyVault.BLL/Services/VaultService.cs
+// ==========================================
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
@@ -911,24 +953,24 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
 
     private async Task<int> GetOrAssignRandomExecutor(DigitalVault vault, CancellationToken ct)
     {
-        // Kiá»ƒm tra xem Vault Ä‘Ã£ cÃ³ Executor (ngÆ°á»i dÃ¹ng chá»n hoáº·c há»‡ thá»‘ng tá»± gÃ¡n) chÆ°a
+        // Kiểm tra xem Vault đã có Executor (người dùng chọn hoặc hệ thống tự gán) chưa
         var activeAssignment = vault.ExecutorAssignments
             .FirstOrDefault(x => x.Status == "Active" || x.Status == "AutoAssigned");
 
         if (activeAssignment is not null)
             return activeAssignment.ExecutorId;
 
-        // Láº¥y danh sÃ¡ch Executor Ä‘ang Active trÃªn toÃ n há»‡ thá»‘ng
+        // Lấy danh sách Executor đang Active trên toàn hệ thống
         var availableExecutors = await repository.UsersByRole(ExecutorRole, ct);
         var activeExecutors = availableExecutors.Where(u => u.Status == "Active").ToList();
 
         if (activeExecutors.Count == 0)
             throw new WorkflowException(500, "No active executors available in the system.");
 
-        // Chá»n ngáº«u nhiÃªn 1 Executor
+        // Chọn ngẫu nhiên 1 Executor
         var randomExecutor = activeExecutors[Random.Shared.Next(activeExecutors.Count)];
 
-        // LÆ°u thÃ´ng tin phÃ¢n cÃ´ng tá»± Ä‘á»™ng vÃ o DB
+        // Lưu thông tin phân công tự động vào DB
         var autoAssignment = new ExecutorAssignment
         {
             VaultId = vault.VaultId,
@@ -957,7 +999,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         if (vault is null || vault.Status != "Active")
             throw new WorkflowException(404, "Vault not found or inactive.");
 
-        // Tá»± Ä‘á»™ng láº¥y Executor do Owner chá»n, hoáº·c random gÃ¡n Executor má»›i náº¿u Vault chÆ°a cÃ³
+        // Tự động lấy Executor do Owner chọn, hoặc random gán Executor mới nếu Vault chưa có
         var executorId = await GetOrAssignRandomExecutor(vault, ct);
 
         var now = DateTime.UtcNow;
@@ -1175,31 +1217,31 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         CancellationToken ct)
     {
         if (input.File == null || input.File.Length == 0)
-            throw new WorkflowException(400, "File upload khÃ´ng há»£p lá»‡.");
+            throw new WorkflowException(400, "File upload không hợp lệ.");
 
-        // 1. Kiá»ƒm tra quyá»n sá»Ÿ há»¯u Asset & tráº¡ng thÃ¡i Vault
+        // 1. Kiểm tra quyền sở hữu Asset & trạng thái Vault
         var asset = await Owned(user, assetId, ct);
         if (asset.Vault.Status != "Active" || asset.Status != "Active")
             throw new WorkflowException(409, "Vault or asset is not active.");
 
-        // 2. Chuyá»ƒn IFormFile sang byte[] vÃ  gom thÃ nh UploadFile
+        // 2. Chuyển IFormFile sang byte[] và gom thành UploadFile
         using var ms = new MemoryStream();
         await input.File.CopyToAsync(ms, ct);
         var fileBytes = ms.ToArray();
 
         var uploadFile = new UploadFile(Path.GetFileName(input.File.FileName), input.File.ContentType, fileBytes);
 
-        // 3. Validate Ä‘á»‹nh dáº¡ng & dung lÆ°á»£ng file báº±ng hÃ m cÃ³ sáºµn trong service
+        // 3. Validate định dạng & dung lượng file bằng hàm có sẵn trong service
         Validate(uploadFile);
 
-        // 4. MÃ£ hÃ³a AesGcm qua DocumentProtection
+        // 4. Mã hóa AesGcm qua DocumentProtection
         var protectedDoc = new ProtectedDocument(uploadFile, input.SignerId, signature);
         byte[] encryptedBytes = protection.Encrypt(protectedDoc);
 
-        // 5. Ghi file mÃ£ hÃ³a vÃ o DocumentStore
+        // 5. Ghi file mã hóa vào DocumentStore
         var documentStorageId = await store.Write(encryptedBytes, ct);
 
-        // 6. LÆ°u Metadata vÃ o DB (GÃ¡n Ä‘áº§y Ä‘á»§ AssetId, UploadedBy, Status)
+        // 6. Lưu Metadata vào DB (Gán đầy đủ AssetId, UploadedBy, Status)
         var docEntity = new AssetDocument
         {
             AssetId = assetId,
@@ -1219,10 +1261,13 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     }
 
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Context\LegacyVaultDbContext.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Context/LegacyVaultDbContext.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -1808,9 +1853,12 @@ public partial class LegacyVaultDbContext : DbContext
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Context\WorkflowConcurrency.cs ===
+// ==========================================
+// File: ./LegacyVault.DAL/Context/WorkflowConcurrency.cs
+// ==========================================
 using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
 namespace LegacyVault.DAL.Context;
@@ -1824,10 +1872,13 @@ public partial class LegacyVaultDbContext
         modelBuilder.Entity<User>().Property(x => x.UpdatedAt).IsConcurrencyToken();
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\AssetDocument.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/AssetDocument.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -1856,10 +1907,13 @@ public partial class AssetDocument
 
     public virtual User UploadedByNavigation { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\AuditLog.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/AuditLog.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -1884,10 +1938,13 @@ public partial class AuditLog
 
     public virtual User? User { get; set; }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Authentication.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/Authentication.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -1912,10 +1969,13 @@ public partial class Authentication
 
     public virtual User User { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\BeneficiaryAssignment.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/BeneficiaryAssignment.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -1942,10 +2002,13 @@ public partial class BeneficiaryAssignment
 
     public virtual ICollection<HandoverCase> HandoverCases { get; set; } = new List<HandoverCase>();
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\BeneficiaryReceipt.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/BeneficiaryReceipt.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -1968,10 +2031,13 @@ public partial class BeneficiaryReceipt
 
     public virtual HandoverCase Handover { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Conversation.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/Conversation.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -1990,10 +2056,13 @@ public partial class Conversation
 
     public virtual ICollection<Message> Messages { get; set; } = new List<Message>();
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\DigitalAsset.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/DigitalAsset.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2024,10 +2093,13 @@ public partial class DigitalAsset
 
     public virtual DigitalVault Vault { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\DigitalSignature.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/DigitalSignature.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2052,10 +2124,13 @@ public partial class DigitalSignature
 
     public virtual LegalVerification Verification { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\DigitalVault.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/DigitalVault.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2084,10 +2159,13 @@ public partial class DigitalVault
 
     public virtual User Owner { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\EncryptionKey.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/EncryptionKey.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2112,10 +2190,13 @@ public partial class EncryptionKey
 
     public virtual DigitalAsset Asset { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\ExecutorAssignment.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/ExecutorAssignment.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2136,10 +2217,13 @@ public partial class ExecutorAssignment
 
     public virtual DigitalVault Vault { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\HandoverCase.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/HandoverCase.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2164,10 +2248,13 @@ public partial class HandoverCase
 
     public virtual HandoverRequest Request { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\HandoverDocument.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/HandoverDocument.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2196,10 +2283,13 @@ public partial class HandoverDocument
 
     public virtual User UploadedByNavigation { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\HandoverRequest.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/HandoverRequest.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2232,10 +2322,13 @@ public partial class HandoverRequest
 
     public virtual DigitalVault Vault { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\LegalVerification.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/LegalVerification.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2262,10 +2355,13 @@ public partial class LegalVerification
 
     public virtual User Verifier { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Message.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/Message.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2290,10 +2386,13 @@ public partial class Message
 
     public virtual User Sender { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Notification.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/Notification.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2320,10 +2419,13 @@ public partial class Notification
 
     public virtual User User { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\PaymentTransaction.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/PaymentTransaction.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2350,10 +2452,13 @@ public partial class PaymentTransaction
 
     public virtual User User { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\ProofOfLife.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/ProofOfLife.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2382,10 +2487,13 @@ public partial class ProofOfLife
 
     public virtual User User { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\Role.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/Role.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2398,10 +2506,13 @@ public partial class Role
 
     public virtual ICollection<User> Users { get; set; } = new List<User>();
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\SubscriptionPlan.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/SubscriptionPlan.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2426,10 +2537,13 @@ public partial class SubscriptionPlan
 
     public virtual ICollection<UserSubscription> UserSubscriptions { get; set; } = new List<UserSubscription>();
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\TwoFactorAuth.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/TwoFactorAuth.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2452,10 +2566,13 @@ public partial class TwoFactorAuth
 
     public virtual User User { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\User.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/User.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2514,10 +2631,13 @@ public partial class User
 
     public virtual ICollection<Role> Roles { get; set; } = new List<Role>();
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Entities\UserSubscription.cs ===
-using System;
+// ==========================================
+// File: ./LegacyVault.DAL/Entities/UserSubscription.cs
+// ==========================================
+﻿using System;
 using System.Collections.Generic;
 
 namespace LegacyVault.DAL.Entities;
@@ -2542,9 +2662,12 @@ public partial class UserSubscription
 
     public virtual User User { get; set; } = null!;
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Repositories\VaultRepository.cs ===
+// ==========================================
+// File: ./LegacyVault.DAL/Repositories/VaultRepository.cs
+// ==========================================
 using LegacyVault.DAL.Context;
 using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -2640,9 +2763,12 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
 }
 public sealed class RepositoryConflictException : Exception;
 public sealed class RepositoryDuplicateException : Exception;
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.DAL\Storage\DocumentStore.cs ===
+// ==========================================
+// File: ./LegacyVault.DAL/Storage/DocumentStore.cs
+// ==========================================
 namespace LegacyVault.DAL.Storage;
 public interface IDocumentStore
 {
@@ -2667,9 +2793,12 @@ public sealed class DocumentStore(string root) : IDocumentStore
     public Task<byte[]> Read(string id, CancellationToken ct) => File.ReadAllBytesAsync(PathFor(id), ct);
     public Task Delete(string id) { File.Delete(PathFor(id)); return Task.CompletedTask; }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\BeneficiaryAssignmentTests.cs ===
+// ==========================================
+// File: ./LegacyVault.Tests/BeneficiaryAssignmentTests.cs
+// ==========================================
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
@@ -2755,9 +2884,12 @@ internal static class BeneficiaryAssignmentTests
         }
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\DatabaseAudit.cs ===
+// ==========================================
+// File: ./LegacyVault.Tests/DatabaseAudit.cs
+// ==========================================
 using LegacyVault.DAL.Context;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -2828,9 +2960,12 @@ internal static class DatabaseAudit
         }
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\MainFlowTests.cs ===
+// ==========================================
+// File: ./LegacyVault.Tests/MainFlowTests.cs
+// ==========================================
 using System.Net;
 using System.Net.Http.Json;
 using LegacyVault.API.Controllers;
@@ -2990,9 +3125,12 @@ internal static class MainFlowTests
         await app.StopAsync();
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\Program.cs ===
+// ==========================================
+// File: ./LegacyVault.Tests/Program.cs
+// ==========================================
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -3192,9 +3330,12 @@ sealed class FakeRepository : IVaultRepository
         return Task.CompletedTask;
     }
 }
+-e 
 
 
-=== FILE: D:\FPT\SWP391\digital-vault-backend\LegacyVault.Tests\RelationalRegistrationTests.cs ===
+// ==========================================
+// File: ./LegacyVault.Tests/RelationalRegistrationTests.cs
+// ==========================================
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Services;
 using LegacyVault.DAL.Context;
@@ -3292,5 +3433,6 @@ internal static class RelationalRegistrationTests
             throw new DbUpdateException("Injected failure before registration transaction commit.");
     }
 }
+-e 
 
 
