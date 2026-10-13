@@ -125,6 +125,10 @@ Email phải thuộc tài khoản đã đăng ký và Active; hiện chưa có l
 
 ## Kiểm thử đã chạy
 
+Có thể thay bước đăng ký/login mật khẩu bằng [Google → OTP](Google-login-Swagger.md). Chỉ sau OTP hợp lệ mới tạo/tìm User và cấp cookie; các bước tạo kho/tài sản và chỉ định người thụ hưởng dùng cùng API hiện có. Tài khoản Google-only không có mật khẩu và chưa có API thiết lập mật khẩu.
+
+Kết quả gần nhất: build thành công, **154 kiểm tra đạt**, gồm Google giả lập, token không hợp lệ, OTP, quyền tài khoản và cookie HTTPS. Chưa kiểm thử Google/SMTP thật.
+
 Test `MainFlowTests` chạy các controller thật qua HTTP, đăng ký/login bằng cookie, tạo kho/tài sản, đọc lại thông tin, kiểm tra khóa ngoại, từ chối owner khác và kho không hoạt động. Database dùng SQLite in-memory; không tạo tài khoản test trong SQL Server hiện tại. HTTP test host dùng cookie bảo vệ bằng khóa tạm trong RAM và HTTP loopback; cấu hình production vẫn HTTPS + Secure cookie.
 
 ```powershell

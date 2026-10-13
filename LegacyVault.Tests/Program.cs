@@ -141,6 +141,7 @@ await Reject(() => identity.Register(Registration("race@example.test"), default)
 await RelationalRegistrationTests.Run(Check);
 await MainFlowTests.Run(Check);
 await BeneficiaryAssignmentTests.Run(Check);
+await GoogleLoginTests.Run(Check);
 Console.WriteLine($"{checks} checks passed.");
 
 sealed class FakeSender : IOtpSender
@@ -172,6 +173,17 @@ sealed class FakeRepository : IVaultRepository
     }
     public Task<User?> LoginUser(string email, CancellationToken ct) => Task.FromResult(RegisteredUsers.SingleOrDefault(x => string.Equals(x.Email, email, StringComparison.OrdinalIgnoreCase)));
     public Task<User?> UserByEmail(string email, CancellationToken ct) => LoginUser(email, ct);
+    public async Task<List<User>> UsersByRole(string role, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var users = new List<User>(RegisteredUsers);
+        foreach (var id in new[] { 1, 2, 3, 6, 7, 8 })
+        {
+            var user = await User(id, ct);
+            if (user is not null) users.Add(user);
+        }
+        return users.Where(x => x.Status == "Active" && x.Roles.Any(r => r.RoleName == role)).ToList();
+    }
     public Task<Role?> Role(string name, CancellationToken ct) => Task.FromResult<Role?>(MissingRole ? null : new Role { RoleId = 1, RoleName = name });
     public Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct) => Task.FromResult(new List<DigitalVault> { asset.Vault });
     public Task<DigitalVault?> Vault(int id, CancellationToken ct) => Task.FromResult<DigitalVault?>(asset.Vault);
