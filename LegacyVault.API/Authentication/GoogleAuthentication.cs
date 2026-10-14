@@ -18,7 +18,7 @@ public static class GoogleAuthentication
     public const string ChallengeCookie = "LegacyVault.GoogleChallenge";
     public static CookieOptions PendingCookie => new()
     {
-        HttpOnly = true, Secure = true, SameSite = SameSiteMode.Lax,
+        HttpOnly = true, Secure = true, SameSite = SameSiteMode.None,
         Path = "/api/auth/google", MaxAge = TimeSpan.FromMinutes(10), IsEssential = true
     };
 
@@ -32,7 +32,7 @@ public static class GoogleAuthentication
         if (!settings.Configured) return services;
         services.AddAuthentication().AddOpenIdConnect(Scheme, options =>
         {
-            options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+            options.SignInScheme = "GoogleTemporary";
             options.Authority = "https://accounts.google.com";
             options.ClientId = settings.ClientId;
             options.ClientSecret = settings.ClientSecret;

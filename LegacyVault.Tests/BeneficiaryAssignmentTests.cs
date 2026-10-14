@@ -47,7 +47,7 @@ internal static class BeneficiaryAssignmentTests
         await using (var db = new LegacyVaultDbContext(options))
         {
             var bob = await db.Users.Include(x => x.Roles).SingleAsync(x => x.Email == "bob@example.test");
-            check(await db.BeneficiaryAssignments.CountAsync() == 0 && await db.AuditLogs.CountAsync() == 0, "failed beneficiary save rolls back assignment and audit together");
+            check(await db.BeneficiaryAssignments.CountAsync() == 0 && !await db.AuditLogs.AnyAsync(x => x.Action == "AssignBeneficiary"), "failed beneficiary save rolls back assignment and audit together");
             check(bob.Roles.Single().RoleName == VaultService.OwnerRole && bob.UpdatedAt == originalRecipientTimestamp && !await db.Roles.AnyAsync(x => x.RoleName == VaultService.BeneficiaryRole), "failed assignment cannot partially grant beneficiary access or create its role");
             await db.Database.ExecuteSqlRawAsync("DROP TRIGGER fail_assignment;");
             var beneficiaryRole = new Role { RoleName = VaultService.BeneficiaryRole };
@@ -64,7 +64,7 @@ internal static class BeneficiaryAssignmentTests
         await using (var db = new LegacyVaultDbContext(options))
         {
             var allocations = await db.BeneficiaryAssignments.Include(x => x.Beneficiary).ToListAsync();
-            check(allocations.Count == 1 && allocations.Single().Beneficiary.Email == "carol@example.test" && allocations.Single().Allocation == 60 && await db.AuditLogs.CountAsync() == 1, "concurrent rejected assignment leaves total allocation within 100 percent and no partial audit");
+            check(allocations.Count == 1 && allocations.Single().Beneficiary.Email == "carol@example.test" && allocations.Single().Allocation == 60 && await db.AuditLogs.CountAsync(x => x.Action == "AssignBeneficiary") == 1, "concurrent rejected assignment leaves total allocation within 100 percent and no partial audit");
         }
     }
     private sealed class CompetingAssignment(DbContextOptions<LegacyVaultDbContext> options, int owner, int asset) : SaveChangesInterceptor

@@ -1,33 +1,26 @@
-# Trạng thái chức năng — cập nhật 08/10/2026
+# Trạng thái LegacyVault — JWT Bearer
 
-Giữ API → BLL → DAL. Google login giữ nguyên schema và entities scaffold.
+## Đã triển khai
 
-## Chức năng có endpoint
+- JWT HS256, issuer/audience/expiry; /auth/me và kiểm tra User Active/locked/roles từ DB ở mỗi request.
+- Password login tôn trọng Email/TOTP 2FA; Google OIDC/OTP trả JWT và không bỏ qua 2FA tài khoản.
+- Owner kho/tài sản/phân bổ/giấy tờ create/list/detail/update/close/revoke, ownership và allocation concurrency.
+- Tạo/cancel hồ sơ, chọn Executor hoặc random độc lập, Staff intake assignment/request/cases cùng transaction; không thay Executor.
+- Executor/Staff chỉ thao tác hồ sơ được giao, upload/start/complete; LegalVerifier review độc lập, approve/reject/additional information.
+- Beneficiary OTP gate, tài sản/hồ sơ/tài liệu của mình, confirm/read receipt; notifications và audit persistence.
+- Swagger Bearer, CORS origin allowlist, cấu hình mẫu không credentials, collection HTTP và contract frontend.
+- BeneficiaryService placeholder được thay bằng wrapper qua ManagementService/repository, được DI và dùng ở controller; không trả EF entities.
 
-| Nhóm | Chức năng |
-| --- | --- |
-| Tài khoản | Đăng ký Owner, login mật khẩu, logout |
-| Google | Bắt đầu OIDC, callback, trang lấy challengeId, xác minh/gửi lại OTP và cấp cookie |
-| Owner | Tạo/danh sách/chi tiết kho; tạo/danh sách/chi tiết tài sản; chọn người thụ hưởng bằng email và tỷ lệ; danh sách người thụ hưởng; upload giấy tờ mã hóa |
-| Executor | Danh sách/chi tiết đơn; đọc giấy tờ và kiểm tra chữ ký; xác nhận hoàn thành bằng file/chữ ký; gửi yêu cầu xác minh pháp lý |
-| Beneficiary | Yêu cầu/xác minh OTP riêng; danh sách/chi tiết tài sản thừa kế; đọc giấy tờ sau khi đủ điều kiện bàn giao |
+## Giới hạn rõ ràng
 
-Google mới tạo User Active + Owner sau OTP, không tạo mật khẩu giả. Email đã có dùng lại User và giữ mật khẩu/role. Chặn tài khoản nhân viên, không Active và đang khóa. SMTP đã được bật gửi thật; phải cấu hình credentials hợp lệ.
+Không invitation/refresh-token persistence phù hợp, không API cấp tài khoản nhân viên hoặc đặt mật khẩu Google-only. OTP/challenge/TOTP replay tracking trong bộ nhớ một instance. Logout thu hồi OTP grant, không revoke JWT. Không client-side encryption/E2EE hoặc chữ ký số trên receipt chỉ có note/status.
 
-## Kiểm thử
+ExecutorId bắt buộc int nên không tạo request unassigned. Staff dùng USERS/ROLES/USER_ROLES và UserId tại ExecutorId. Script ensure-staff-role.sql được chuẩn bị, không chạy tự động hoặc gán cho user nào.
 
-Đã bổ sung UsersByRole vào FakeRepository để sửa CS0535. Build thành công, **154 kiểm tra đạt**. SQLite in-memory, Google discovery/token/JWKS và SMTP giả lập được dùng trong test; HTTPS loopback kiểm tra cookie và callback. Không tạo tài khoản test trên SQL Server thật. Chưa test Google/SMTP thật.
+## Xác minh
 
-## Phần chưa hoàn chỉnh
+Kết quả cuối: build 0 lỗi/0 cảnh báo, console harness **256 kiểm tra đạt**. [Báo cáo lệnh chạy và file sửa](Backend-JWT-handover.md).
 
-- Tạo đơn bàn giao và random Executor có logic BLL, chưa có endpoint. Cần kiểm tra quyền, transaction và đồng bộ lọc AutoAssigned ở danh sách đơn.
-- BeneficiaryService bổ sung chưa nối controller/DI; một số hàm còn placeholder hoặc thiếu kiểm tra quyền. Không coi các hàm này là API đã hoàn thành.
-- Chưa có API duyệt/từ chối pháp lý, cấp tài khoản nhân viên, sửa/xóa phân bổ hoặc thiết lập mật khẩu cho Google-only User.
-- Google nhận diện bằng email, không lưu sub; email đổi không tự nhận ra User cũ. Challenge OTP lưu trong bộ nhớ một instance, mất khi restart.
+Build/test console bằng SQLite relational và Google/SMTP doubles, không seed test trên SQL Server. Google test dùng TestServer, không import chứng thư Windows. SELECT audit kết nối được, so sánh 25 bảng không thiếu cột, xác nhận ExecutorId NOT NULL và mô tả kho nvarchar(500). Audit không chứng minh toàn bộ schema, constraints/index hoặc SQL Server concurrency. Google/SMTP thật và chứng thư production chưa được kiểm chứng.
 
-## Tài liệu test
-
-- [Google và Swagger](Google-login-Swagger.md)
-- [Đăng ký, tạo tài sản và chọn người thụ hưởng](Luong-chinh-dang-ky-tao-assets.md)
-- [Danh sách API](API.md)
-- [Swagger: giấy tờ, bàn giao và OTP](Huong-dan-test-API-Swagger.md)
+[Contract và danh sách API hiện tại](Frontend-JWT-integration.md), [Swagger](Huong-dan-test-API-Swagger.md), [HTTP collection](../LegacyVault.http). File người dùng Danh-sach-API-da-lam.md được giữ nguyên và có thể mô tả contract cũ.

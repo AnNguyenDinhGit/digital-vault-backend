@@ -27,6 +27,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.TestHost;
 
 internal static class GoogleLoginTests
 {
@@ -75,14 +76,9 @@ internal static class GoogleLoginTests
         using var rsa = RSA.Create(2048);
         var key = new RsaSecurityKey(rsa) { KeyId = "test-google-key" };
         var backchannel = new GoogleBackchannel(key);
-        using var tlsKey = RSA.Create(2048);
-        var certRequest = new CertificateRequest("CN=localhost", tlsKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-        using var generatedCertificate = certRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
-        // Windows Schannel needs an imported private key for a TLS server certificate.
-        using var certificate = new X509Certificate2(generatedCertificate.Export(X509ContentType.Pfx), (string?)null, X509KeyStorageFlags.UserKeySet);
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Testing" });
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(o => o.Listen(IPAddress.Loopback, 0, listen => listen.UseHttps(certificate)));
+        builder.WebHost.UseTestServer();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["Google:ClientId"] = "test-client", ["Google:ClientSecret"] = "test-secret" });
         builder.Services.AddControllers().AddApplicationPart(typeof(GoogleAuthController).Assembly);
         builder.Services.AddDbContext<LegacyVaultDbContext>(o => o.UseSqlite(connection));
@@ -95,12 +91,9 @@ internal static class GoogleLoginTests
         builder.Services.AddSingleton<IOtpSender>(sender);
         builder.Services.AddSingleton<OtpService>();
         builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
-        builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(o =>
-        {
-            o.Cookie.Name = "LegacyVault.Session";
-            o.Cookie.SecurePolicy = Microsoft.AspNetCore.Http.CookieSecurePolicy.Always;
-            o.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = 401; return Task.CompletedTask; };
-        });
+        TestAuthentication.Configure(builder.Configuration);
+        builder.Services.AddVaultJwt(builder.Configuration);
+        builder.Services.AddAuthentication().AddCookie("GoogleTemporary");
         builder.Services.AddGoogleEmailAuthentication(builder.Configuration);
         string? oidcFailure = null;
         builder.Services.PostConfigure<OpenIdConnectOptions>(GoogleAuthentication.Scheme, o =>
@@ -134,9 +127,8 @@ internal static class GoogleLoginTests
         await using (var scope = app.Services.CreateAsyncScope())
             await scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>().Database.EnsureCreatedAsync();
         await app.StartAsync();
-        var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
-        using var handler = new HttpClientHandler { AllowAutoRedirect = false, CookieContainer = new CookieContainer(), ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator };
-        using var client = new HttpClient(handler) { BaseAddress = new Uri(address) };
+        using var handler = new CookieTestHandler(app.GetTestServer().CreateHandler());
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://localhost") };
         client.DefaultRequestHeaders.Add("X-Vault-Request", "1");
 
         async Task<(string Id, string Code)> StartGoogle()
@@ -152,6 +144,8 @@ internal static class GoogleLoginTests
             var id = handler.CookieContainer.GetCookies(new Uri(client.BaseAddress!, "/api/auth/google/callback"))[GoogleAuthentication.ChallengeCookie]!.Value;
             var page = await client.GetStringAsync("/api/auth/google/callback");
             check(page.Contains(id) && !page.Contains(sender.Code), "callback shows challenge ID without exposing OTP");
+            var state = (await client.GetFromJsonAsync<OtpChallenge>("/api/auth/google/challenge"))!;
+            check(state.ChallengeId == id, "frontend can retrieve Google challenge as cookie-bound JSON without tokens in URL");
             return (id, sender.Code);
         }
 
@@ -159,14 +153,14 @@ internal static class GoogleLoginTests
         check(!handler.CookieContainer.GetCookies(client.BaseAddress!).Cast<Cookie>().Any(c => c.Name == "LegacyVault.Session"), "Google callback does not grant application login before OTP");
         await using (var scope = app.Services.CreateAsyncScope())
             check(!await scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>().Users.AnyAsync(), "Google callback creates no account before OTP");
-        using var outsider = new HttpClient(new HttpClientHandler { ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator }) { BaseAddress = client.BaseAddress };
+        using var outsider = new HttpClient(app.GetTestServer().CreateHandler()) { BaseAddress = client.BaseAddress };
         outsider.DefaultRequestHeaders.Add("X-Vault-Request", "1");
         check((await outsider.PostAsJsonAsync("/api/auth/google/otp/verify", new { challengeId = first.Id, code = first.Code })).StatusCode == HttpStatusCode.BadRequest, "HTTP Google verification requires the initiating browser cookie");
         check((await client.PostAsJsonAsync("/api/auth/google/otp/verify", new { challengeId = first.Id, code = first.Code, role = "Admin" })).StatusCode == HttpStatusCode.BadRequest, "Google verification rejects caller-supplied roles");
         var response = await client.PostAsJsonAsync("/api/auth/google/otp/verify", new { challengeId = first.Id, code = first.Code });
-        var account = (await response.Content.ReadFromJsonAsync<LoginDto>())!;
+        var account = await TestAuthentication.UseToken(client, response);
         check(response.StatusCode == HttpStatusCode.OK && account.Roles.SequenceEqual(new[] { "Owner" }), "Google OTP creates an owner and issues application login");
-        check((await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Google Vault" })).StatusCode == HttpStatusCode.Created, "Google application cookie authorizes existing owner APIs");
+        check((await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Google Vault" })).StatusCode == HttpStatusCode.Created, "Google Bearer JWT authorizes existing owner APIs");
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
@@ -175,6 +169,14 @@ internal static class GoogleLoginTests
         }
         check((await client.PostAsJsonAsync("/api/auth/login", new { email = "newgoogle@example.test", password = "Registration123!" })).StatusCode == HttpStatusCode.Unauthorized, "Google-only user cannot log in with an invented password");
         check((await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode == HttpStatusCode.NoContent, "Google session works with existing logout");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+            var u = await db.Users.SingleAsync(x => x.UserId == account.UserId);
+            u.TwoFactorAuths.Add(new() { Method = "Email", Secret = "email-factor", IsEnabled = true, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }); await db.SaveChangesAsync();
+            var responseAfterGoogleOtp = await scope.ServiceProvider.GetRequiredService<PasswordAuthenticationService>().AfterPrimary(new(account.UserId, account.Roles), default);
+            check(responseAfterGoogleOtp is LoginChallengeDto, "Google primary authentication cannot bypass an enabled account 2FA factor");
+        }
         check((await client.PostAsJsonAsync("/api/auth/google/otp/verify", new { challengeId = first.Id, code = first.Code })).StatusCode == HttpStatusCode.BadRequest, "HTTP Google OTP replay is rejected");
 
         backchannel.EmailVerified = false;

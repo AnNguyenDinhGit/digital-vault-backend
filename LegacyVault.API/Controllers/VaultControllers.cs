@@ -17,7 +17,8 @@ public abstract class VaultController : ControllerBase
     protected string SessionId => User.FindFirstValue("vault_session") ?? throw new WorkflowException(401, "Login required.");
     protected static async Task<UploadFile> ReadUpload(IFormFile file, CancellationToken ct)
     {
-        if (file.Length is <= 0 or > 10 * 1024 * 1024) throw new WorkflowException(400, "File must be between 1 byte and 10 MB.");
+        if (file.Length > 10 * 1024 * 1024) throw new WorkflowException(413, "File exceeds 10 MB.");
+        if (file.Length <= 0) throw new WorkflowException(400, "File must not be empty.");
         using var buffer = new MemoryStream(); await file.CopyToAsync(buffer, ct);
         return new UploadFile(Path.GetFileName(file.FileName), file.ContentType, buffer.ToArray());
     }
@@ -48,6 +49,11 @@ public sealed class CompletionForm
 {
     [Required] public IFormFile File { get; set; } = null!;
     [Required] public IFormFile Signature { get; set; } = null!;
+}
+public sealed class HandoverUploadForm
+{
+    [Required] public IFormFile File { get; set; } = null!;
+    public IFormFile? Signature { get; set; }
 }
 public sealed class LegalForm
 {
@@ -101,6 +107,11 @@ public sealed class ExecutorController(VaultService service) : VaultController
     {
         await service.Complete(UserId, requestId, await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct); return NoContent();
     }
+    [HttpPost("{requestId:int}/start")]
+    public async Task<IActionResult> Start(int requestId, CancellationToken ct) { await service.StartHandover(UserId, requestId, ct); return NoContent(); }
+    [HttpPost("{requestId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<DocumentDto> Upload(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) =>
+        await service.UploadHandoverDocument(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
     [HttpPost("{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) =>
         Ok(new { VerificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
@@ -126,7 +137,7 @@ public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] s
 public sealed record LoginInput([Required, EmailAddress] string Email, [Required, StringLength(1024)] string Password);
 
 [ApiController, Route("api/auth")]
-public sealed class AuthController(IdentityService identity, OtpService otp) : VaultController
+public sealed class AuthController(IdentityService identity, OtpService otp, PasswordAuthenticationService authentication) : VaultController
 {
     [HttpPost("register"), EnableRateLimiting("login")]
     [ProducesResponseType(typeof(RegistrationDto), StatusCodes.Status201Created)]
@@ -138,11 +149,13 @@ public sealed class AuthController(IdentityService identity, OtpService otp) : V
     [HttpPost("login"), EnableRateLimiting("login")]
     public async Task<IActionResult> Login(LoginInput input, CancellationToken ct)
     {
-        var result = await identity.Login(input.Email, input.Password, ct);
-        var claims = new[] { new Claim(ClaimTypes.NameIdentifier, result.UserId.ToString()), new Claim("vault_session", Guid.NewGuid().ToString("N")) };
-        await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)));
-        return Ok(result);
+        var result = await authentication.Login(input.Email, input.Password, ct);
+        return result is LoginChallengeDto ? Accepted(result) : Ok(result);
     }
+    [HttpPost("2fa/verify"), EnableRateLimiting("otp")]
+    public async Task<TokenDto> VerifyFactor(FactorInput input, CancellationToken ct) => await authentication.Verify(input, ct);
+    [Authorize, HttpGet("me")]
+    public Task<MeDto> Me(CancellationToken ct) => identity.Me(UserId, ct);
     [Authorize, HttpPost("logout")]
-    public async Task<IActionResult> Logout() { otp.Revoke(SessionId); await HttpContext.SignOutAsync(); return NoContent(); }
+    public IActionResult Logout() { otp.Revoke(SessionId); return NoContent(); }
 }

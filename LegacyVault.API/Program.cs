@@ -21,9 +21,11 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "LegacyVault API",
         Version = "v1",
-        Description = "First call POST /api/auth/login over HTTPS. The browser stores the session cookie and sends it on subsequent requests. Beneficiaries must verify OTP before accessing inherited assets. Upload endpoints accept multipart/form-data; signatures are detached RSA-SHA256 binary files."
+        Description = "Login returns a Bearer accessToken, or 202 with a mandatory 2FA challenge. Use Authorize with the JWT. Google uses temporary browser cookies only until OTP completes."
     });
     options.OperationFilter<LegacyVault.API.Swagger.MutationHeaderFilter>();
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme { Type = SecuritySchemeType.Http, Scheme = "bearer", BearerFormat = "JWT" });
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement { [new OpenApiSecurityScheme { Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" } }] = Array.Empty<string>() });
 });
 var cookieKeys = builder.Services.AddDataProtection()
     .SetApplicationName("LegacyVault")
@@ -31,6 +33,9 @@ var cookieKeys = builder.Services.AddDataProtection()
 if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
 builder.Services.AddScoped<IVaultRepository, VaultRepository>();
 builder.Services.AddScoped<VaultService>();
+builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
+builder.Services.AddScoped<ManagementService>();
+builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
 builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
 builder.Services.AddSingleton(builder.Configuration.GetSection("Mail").Get<MailOptions>() ?? new MailOptions());
@@ -38,19 +43,11 @@ builder.Services.AddSingleton<DocumentProtection>();
 builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>();
 builder.Services.AddSingleton<OtpService>();
 builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
-{
-    options.Cookie.Name = "LegacyVault.Session";
-    options.Cookie.HttpOnly = true;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
-    options.Cookie.SameSite = SameSiteMode.Strict;
-    options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
-    options.SlidingExpiration = false;
-    options.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = 401; return Task.CompletedTask; };
-    options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
-});
+builder.Services.AddVaultJwt(builder.Configuration);
+builder.Services.AddAuthentication().AddCookie("GoogleTemporary", options => { options.Cookie.SecurePolicy = CookieSecurePolicy.Always; });
 builder.Services.AddAuthorization();
 builder.Services.AddGoogleEmailAuthentication(builder.Configuration);
+builder.Services.AddVaultCors(builder.Configuration);
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
@@ -73,35 +70,7 @@ builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
 });
 
 var app = builder.Build();
-app.Use(async (context, next) =>
-{
-    context.Response.Headers["Cache-Control"] = "no-store";
-    try
-    {
-        // A custom header prevents cross-site form submissions when using cookie authentication.
-        if (context.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(context.Request.Method) &&
-            !HttpMethods.IsHead(context.Request.Method) && !HttpMethods.IsOptions(context.Request.Method) &&
-            context.Request.Headers["X-Vault-Request"] != "1")
-            throw new WorkflowException(400, "Set X-Vault-Request: 1 on mutation requests.");
-        await next(context);
-    }
-    catch (WorkflowException ex)
-    {
-        context.Response.StatusCode = ex.StatusCode;
-        await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message });
-    }
-    catch (RepositoryConflictException)
-    {
-        context.Response.StatusCode = 409;
-        await context.Response.WriteAsJsonAsync(new { status = 409, detail = "The resource changed. Reload and retry." });
-    }
-    catch (Exception ex) when (ex is not OperationCanceledException || !context.RequestAborted.IsCancellationRequested)
-    {
-        app.Logger.LogError(ex, "API operation failed");
-        context.Response.StatusCode = 500;
-        await context.Response.WriteAsJsonAsync(new { status = 500, detail = "The operation could not be completed." });
-    }
-});
+app.UseVaultErrors();
 app.UseHttpsRedirection();
 if (app.Environment.IsDevelopment())
 {
@@ -113,6 +82,7 @@ if (app.Environment.IsDevelopment())
     });
 }
 app.UseRouting();
+app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();

@@ -59,6 +59,10 @@ internal static class DatabaseAudit
             command.CommandText = "SELECT OBJECT_NAME(parent_object_id), definition FROM sys.check_constraints ORDER BY OBJECT_NAME(parent_object_id), name";
             await using var checks = await command.ExecuteReaderAsync();
             while (await checks.ReadAsync()) Console.WriteLine($"Check {checks.GetString(0)}: {checks.GetString(1)}");
+            await checks.CloseAsync();
+            command.CommandText = "SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, DATETIME_PRECISION FROM INFORMATION_SCHEMA.COLUMNS WHERE (TABLE_NAME = 'HANDOVER_REQUESTS' AND COLUMN_NAME = 'ExecutorId') OR (TABLE_NAME = 'DIGITAL_VAULTS' AND COLUMN_NAME = 'Description') OR (COLUMN_NAME = 'UpdatedAt' AND TABLE_NAME IN ('DIGITAL_VAULTS','DIGITAL_ASSETS','USERS','AUTHENTICATIONS'))";
+            await using var critical = await command.ExecuteReaderAsync();
+            while (await critical.ReadAsync()) Console.WriteLine($"Critical column {critical.GetString(0)}.{critical.GetString(1)}: nullable={critical.GetString(2)}, type={critical.GetString(3)}, maxLength={(critical.IsDBNull(4) ? "n/a" : critical.GetInt32(4).ToString())}, datetimePrecision={(critical.IsDBNull(5) ? "n/a" : critical.GetValue(5).ToString())}");
             if (missing.Count != 0) Environment.ExitCode = 1;
         }
         catch (SqlException ex)
