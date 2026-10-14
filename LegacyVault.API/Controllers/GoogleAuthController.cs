@@ -38,9 +38,10 @@ public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp o
     }
 
     [HttpGet("callback")]
-    public async Task<ContentResult> Callback(CancellationToken ct)
+    public async Task<IActionResult> Callback(CancellationToken ct)
     {
         var challenge = await otp.Current(Browser, Request.Cookies[GoogleAuthentication.ChallengeCookie] ?? "", ct);
+        if (!string.IsNullOrEmpty(options.FrontendCallbackUrl)) return Redirect(options.FrontendCallbackUrl);
         Response.Headers["Cache-Control"] = "no-store";
         Response.Headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
         Response.Headers["Referrer-Policy"] = "no-referrer";
@@ -61,11 +62,13 @@ public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp o
     public IActionResult Error() => BadRequest(new { detail = "Google authentication failed or was cancelled. Start again." });
 
     [HttpPost("otp/verify"), EnableRateLimiting("otp")]
+    [ProducesResponseType(typeof(TokenDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(LoginChallengeDto), StatusCodes.Status202Accepted)]
     public async Task<IActionResult> Verify(GoogleOtpInput input, CancellationToken ct)
     {
         var google = await otp.Verify(Browser, input.ChallengeId, input.Code, ct);
         var result = await identity.GoogleLogin(google.Email, google.FullName, ct);
-        var response = await authentication.AfterPrimary(result, ct);
+        var response = await authentication.AfterPrimary(result, ct, google: true);
         Response.Cookies.Delete(GoogleAuthentication.BrowserCookie, GoogleAuthentication.PendingCookie);
         Response.Cookies.Delete(GoogleAuthentication.ChallengeCookie, GoogleAuthentication.PendingCookie);
         return response is LoginChallengeDto ? Accepted(response) : Ok(response);

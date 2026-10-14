@@ -19,12 +19,15 @@ public sealed class SmtpOtpSender(MailOptions options) : IOtpSender
 {
     public async Task Send(string email, string code, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(options.Host) || string.IsNullOrWhiteSpace(options.From))
+        if (string.IsNullOrWhiteSpace(options.Host) || !MailAddress.TryCreate(options.From, out _) || options.Port is < 1 or > 65535)
             throw new WorkflowException(503, "OTP email delivery is not configured.");
         using var client = new SmtpClient(options.Host, options.Port) { EnableSsl = true, Credentials = new NetworkCredential(options.Username, options.Password) };
         using var message = new MailMessage(options.From, email, "LegacyVault identity verification", $"Your code is {code}. It expires in 5 minutes. Do not share this code.");
-        try { await client.SendMailAsync(message, ct); }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        try { await client.SendMailAsync(message, timeout.Token); }
         catch (SmtpException) { throw new WorkflowException(503, "OTP email delivery failed. Please retry later."); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new WorkflowException(503, "OTP email delivery timed out. Please retry later."); }
     }
 }
 public sealed record OtpChallenge(string ChallengeId, DateTime ExpiresAt);

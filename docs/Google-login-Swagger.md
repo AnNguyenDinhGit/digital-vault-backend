@@ -40,6 +40,10 @@ Cookie tạm Secure/HttpOnly/SameSite=None chỉ phục vụ Google challenge. F
 
 Frontend có thể GET `/api/auth/google/challenge` (credentials include) sau callback để nhận challengeId/expiry dạng JSON, thay vì đọc HTML. Không gọi/poll quá 10 lần/IP/phút.
 
+`Google:FrontendCallbackUrl` mặc định trống để dùng trang Swagger. Khi FE sẵn sàng, đặt URL HTTPS cố định trên `Cors:Origins`, ví dụ `https://frontend.example.com/auth/google`; không query/fragment và không nhận returnUrl tùy ý. Callback redirect không mang token/OTP/challengeId; FE đọc challenge qua GET ở trên. Không thay Google Authorized redirect URI `/api/auth/google/oidc-callback` bằng URL frontend này.
+
+Nếu nhận 202, Email 2FA có thể gửi lại qua POST `/api/auth/2fa/resend` với challengeId, chờ 60 giây và dùng challenge mới. TOTP không resend. Tham khảo [contract login](Backend-login.md).
+
 ## Quy tắc và giới hạn
 
 Email mới tạo User + Owner atomically sau OTP. Email cũ giữ tên/mật khẩu/roles; User không Active/đang khóa hoặc có Admin/Executor/Staff/LegalVerifier bị chặn khỏi Google công khai. Google không bỏ qua 2FA tài khoản; OTP beneficiary riêng vẫn bắt buộc khi xem di sản.

@@ -99,12 +99,16 @@ internal static class JwtWorkflowTests
         await using (var db = new LegacyVaultDbContext(dbOptions)) { (await db.Users.SingleAsync(u => u.UserId == ids["owner"])).Roles.Add(await db.Roles.SingleAsync(r => r.RoleName == "Owner")); await db.SaveChangesAsync(); }
         client.DefaultRequestHeaders.Authorization = null;
         var login = await client.PostAsJsonAsync("/api/auth/login", new { email = "owner@example.test", password = "Registration123!" });
+        await Expect(await client.PostAsJsonAsync("/api/auth/login", new { email = "owner@example.test", password = "Registration123!", role = "Admin" }), HttpStatusCode.BadRequest, "password login rejects role selection");
+        await Expect(await client.PostAsJsonAsync("/api/auth/refresh-token", new { accessToken = "unused", refreshToken = "unused" }), HttpStatusCode.NotFound, "legacy refresh route is not exposed without verified persistence");
         var realToken = await TestAuthentication.UseToken(client, login); check(realToken.TokenType == "Bearer" && realToken.ExpiresIn == 900, "password login returns bounded JWT token contract");
         await EditUser("owner", u => u.TwoFactorAuths.Add(new() { Method = "Email", Secret = "unused-email-secret", IsEnabled = true, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }));
         client.DefaultRequestHeaders.Authorization = null;
         var factorResponse = await client.PostAsJsonAsync("/api/auth/login", new { email = "owner@example.test", password = "Registration123!" });
         await Expect(factorResponse, HttpStatusCode.Accepted, "enabled Email 2FA returns challenge instead of token");
         var challenge = (await factorResponse.Content.ReadFromJsonAsync<LoginChallengeDto>())!;
+        await Expect(await client.PostAsJsonAsync("/api/auth/2fa/resend", new { challengeId = challenge.ChallengeId }), HttpStatusCode.TooManyRequests, "HTTP 2FA resend enforces cooldown without issuing a token");
+        await Expect(await client.PostAsJsonAsync("/api/auth/2fa/resend", new { challengeId = challenge.ChallengeId, email = "attacker@example.test" }), HttpStatusCode.BadRequest, "HTTP 2FA resend rejects caller-supplied destination");
         client.DefaultRequestHeaders.Authorization = new("Bearer", challenge.ChallengeId); await Expect(await client.GetAsync("/api/auth/me"), HttpStatusCode.Unauthorized, "2FA challenge cannot authorize business API");
         client.DefaultRequestHeaders.Authorization = null;
         var code = ((FakeSender)app.Services.GetRequiredService<IOtpSender>()).Code;

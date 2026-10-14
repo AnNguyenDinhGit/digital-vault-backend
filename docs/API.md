@@ -7,6 +7,7 @@ Contract hiện tại: **JWT Bearer**, API → BLL → DAL. Danh sách method/pa
 - POST `/api/auth/register`: tạo Owner bằng email/mật khẩu, không tự login.
 - POST `/api/auth/login`: 200 TokenDto hoặc 202 LoginChallengeDto khi 2FA enabled.
 - POST `/api/auth/2fa/verify`: hoàn thành Email/TOTP, trả TokenDto.
+- POST `/api/auth/2fa/resend`: gửi lại Email OTP, cooldown 60 giây; chưa cấp token, không hỗ trợ resend TOTP.
 - GET `/api/auth/me`: Bearer, profile công khai và roles hiện tại từ DB.
 - POST `/api/auth/logout`: Bearer, thu hồi beneficiary OTP grant; client bỏ token, JWT không được revoke.
 - GET `/api/auth/google/start`: browser navigation; middleware callback `/api/auth/google/oidc-callback` → trang `/api/auth/google/callback`.

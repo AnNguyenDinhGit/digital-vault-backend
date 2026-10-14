@@ -35,6 +35,12 @@ Content-Type: application/json
 
 {"challengeId":"{{challengeId}}","code":"{{otp}}"}
 
+### Resend Email factor after 60 seconds; use the new challengeId, never an exhausted challenge
+POST {{baseUrl}}/api/auth/2fa/resend
+Content-Type: application/json
+
+{"challengeId":"{{challengeId}}"}
+
 ### Google start: open this URL in a browser, do not follow provider redirect in this client
 GET {{baseUrl}}/api/auth/google/start
 
