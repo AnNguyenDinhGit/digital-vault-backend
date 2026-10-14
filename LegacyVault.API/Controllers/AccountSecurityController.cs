@@ -6,7 +6,7 @@ namespace LegacyVault.API.Controllers
 {
     [ApiController]
     [Route("api/account-security")]
-    //[Authorize]
+    [Authorize]
     public class AccountSecurityController : ControllerBase
     {
         private readonly IAccountEncryptionService _encryptionService;
