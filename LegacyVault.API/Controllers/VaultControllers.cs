@@ -132,7 +132,8 @@ public sealed class BeneficiaryController(VaultService service, IdentityService 
     { otp.RequireVerified(SessionId); return ContentFile(await service.InheritedDocument(UserId, assetId, documentId, ct)); }
 }
 public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId, [Required, RegularExpression("^[0-9]{6}$")] string Code);
-public sealed record LoginInput([Required, EmailAddress] string Email, [Required, StringLength(1024)] string Password);
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
+public sealed record LoginInput([Required, EmailAddress, StringLength(150)] string Email, [Required, StringLength(1024)] string Password);
 
 [ApiController, Route("api/auth")]
 public sealed class AuthController(IdentityService identity, OtpService otp, PasswordAuthenticationService authentication) : VaultController
@@ -146,6 +147,8 @@ public sealed class AuthController(IdentityService identity, OtpService otp, Pas
     }
 
     [HttpPost("login"), EnableRateLimiting("login")]
+    [ProducesResponseType(typeof(TokenDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(LoginChallengeDto), StatusCodes.Status202Accepted)]
     public async Task<IActionResult> Login(LoginInput input, CancellationToken ct)
     {
         var result = await authentication.Login(input.Email, input.Password, ct);
@@ -153,6 +156,8 @@ public sealed class AuthController(IdentityService identity, OtpService otp, Pas
     }
     [HttpPost("2fa/verify"), EnableRateLimiting("otp")]
     public async Task<TokenDto> VerifyFactor(FactorInput input, CancellationToken ct) => await authentication.Verify(input, ct);
+    [HttpPost("2fa/resend"), EnableRateLimiting("otp")]
+    public Task<LoginChallengeDto> ResendFactor(FactorResendInput input, CancellationToken ct) => authentication.Resend(input, ct);
     [Authorize, HttpGet("me")]
     public Task<MeDto> Me(CancellationToken ct) => identity.Me(UserId, ct);
     [Authorize, HttpPost("logout")]

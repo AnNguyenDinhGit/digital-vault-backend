@@ -150,6 +150,14 @@ internal static class GoogleLoginTests
         }
 
         var first = await StartGoogle();
+        var googleSettings = app.Services.GetRequiredService<GoogleOptions>();
+        googleSettings.FrontendCallbackUrl = "https://frontend.example.test/auth/google";
+        var frontendRedirect = await client.GetAsync("/api/auth/google/callback");
+        check(frontendRedirect.StatusCode == HttpStatusCode.Redirect && frontendRedirect.Headers.Location?.OriginalString == googleSettings.FrontendCallbackUrl,
+            "Google callback redirects to fixed frontend URL without OTP, token or challenge in URL");
+        check((await client.GetFromJsonAsync<OtpChallenge>("/api/auth/google/challenge"))!.ChallengeId == first.Id,
+            "frontend redirect preserves cookie-bound challenge retrieval");
+        googleSettings.FrontendCallbackUrl = "";
         check(!handler.CookieContainer.GetCookies(client.BaseAddress!).Cast<Cookie>().Any(c => c.Name == "LegacyVault.Session"), "Google callback does not grant application login before OTP");
         await using (var scope = app.Services.CreateAsyncScope())
             check(!await scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>().Users.AnyAsync(), "Google callback creates no account before OTP");

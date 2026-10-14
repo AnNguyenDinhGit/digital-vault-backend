@@ -24,6 +24,7 @@ Console test harness, không `dotnet test`. `appsettings.json` là cấu hình m
 - [Contract frontend JWT và toàn bộ endpoint](docs/Frontend-JWT-integration.md)
 - [Test Swagger](docs/Huong-dan-test-API-Swagger.md)
 - [Google login](docs/Google-login-Swagger.md)
+- [Contract login hoàn thiện và giới hạn triển khai](docs/Backend-login.md)
 - [HTTP collection](LegacyVault.http)
 - [Trạng thái và giới hạn](docs/Trang-thai-chuc-nang.md)
 - [Báo cáo bàn giao và 256 kiểm tra](docs/Backend-JWT-handover.md)

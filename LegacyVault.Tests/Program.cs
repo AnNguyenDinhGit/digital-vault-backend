@@ -142,6 +142,7 @@ await RelationalRegistrationTests.Run(Check);
 await MainFlowTests.Run(Check);
 await BeneficiaryAssignmentTests.Run(Check);
 await GoogleLoginTests.Run(Check);
+await LoginSecurityTests.Run(Check);
 try { await JwtWorkflowTests.Run(Check); }
 catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; return; }
 Console.WriteLine($"{checks} checks passed.");

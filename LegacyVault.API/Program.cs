@@ -18,7 +18,6 @@ builder.Services.AddEndpointsApiExplorer();
 
 // 1. Đăng ký các Services Bảo mật & JWT
 builder.Services.AddSingleton<IAccountEncryptionService, AccountEncryptionService>();
-builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 
 // 2. Cấu hình Swagger UI hỗ trợ nút "Authorize" (Bearer Token)
 builder.Services.AddSwaggerGen(options =>

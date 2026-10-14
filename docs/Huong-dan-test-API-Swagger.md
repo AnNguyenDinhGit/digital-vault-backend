@@ -16,6 +16,7 @@ Gọi POST `/api/auth/register` với fullName/email/password/confirmPassword/ph
 
 - 200: lấy accessToken, bấm **Authorize** và dán JWT.
 - 202: lấy challengeId/method; nhận OTP email hoặc mã TOTP, gọi POST `/api/auth/2fa/verify`; lấy token rồi Authorize.
+- Email OTP chưa đến: chờ 60 giây, POST `/api/auth/2fa/resend` với `{"challengeId":"..."}`. Dùng challengeId mới; challenge cũ mất hiệu lực. TOTP không gửi lại qua email.
 - Method 2FA không hỗ trợ trả 503; không được bỏ qua.
 
 Gọi GET `/api/auth/me` để kiểm tra UserId/roles. Khi đổi tài khoản, logout rồi xóa Bearer ở Authorize và login tài khoản khác. JWT logout không revoke token cũ; client phải bỏ token.

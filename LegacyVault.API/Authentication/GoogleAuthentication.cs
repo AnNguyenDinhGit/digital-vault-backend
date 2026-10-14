@@ -8,7 +8,18 @@ public sealed class GoogleOptions
 {
     public string ClientId { get; set; } = "";
     public string ClientSecret { get; set; } = "";
+    public string FrontendCallbackUrl { get; set; } = "";
     public bool Configured => !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(ClientSecret);
+
+    public void ValidateFrontendCallback(IEnumerable<string> origins)
+    {
+        if (string.IsNullOrEmpty(FrontendCallbackUrl)) return;
+        if (!Uri.TryCreate(FrontendCallbackUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != "https" && !(uri.Scheme == "http" && uri.IsLoopback)) ||
+            uri.UserInfo.Length > 0 || uri.Query.Length > 0 || uri.Fragment.Length > 0 ||
+            !origins.Contains(uri.GetLeftPart(UriPartial.Authority), StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Google:FrontendCallbackUrl must be a fixed HTTPS URL on a configured Cors:Origins origin (HTTP permitted only for loopback), without query, fragment or user information.");
+    }
 }
 
 public static class GoogleAuthentication
@@ -25,6 +36,7 @@ public static class GoogleAuthentication
     public static IServiceCollection AddGoogleEmailAuthentication(this IServiceCollection services, IConfiguration configuration)
     {
         var settings = configuration.GetSection("Google").Get<GoogleOptions>() ?? new GoogleOptions();
+        settings.ValidateFrontendCallback(configuration.GetSection("Cors:Origins").Get<string[]>() ?? Array.Empty<string>());
         services.AddSingleton(settings);
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         services.AddSingleton<GoogleLoginOtp>();

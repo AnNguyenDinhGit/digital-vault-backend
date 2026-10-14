@@ -9,4 +9,6 @@ public sealed record LoginChallengeDto(string ChallengeId, string Method, DateTi
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record FactorInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId,
     [Required, RegularExpression("^[0-9]{6}$")] string Code);
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record FactorResendInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId);
 public interface IAccessTokenIssuer { TokenDto Issue(LoginDto login); }

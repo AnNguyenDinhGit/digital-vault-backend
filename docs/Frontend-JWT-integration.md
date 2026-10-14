@@ -20,6 +20,7 @@ Dùng khóa ngẫu nhiên đủ mạnh, không dùng chuỗi mẫu trên. JWT kh
 | `Cors__Origins__0`, `Cors__Origins__1` | Origin frontend cụ thể, không path/wildcard; mặc định localhost:5173 |
 | `ConnectionStrings__LegacyVault` | SQL Server hiện hữu |
 | `Google__ClientId`, `Google__ClientSecret` | Google OAuth web client |
+| `Google__FrontendCallbackUrl` | Tùy chọn: URL FE cố định trên origin CORS allowlist, không query/fragment; trống để test Swagger |
 | `Mail__Host`, `Mail__Port`, `Mail__Username`, `Mail__Password`, `Mail__From` | SMTP TLS, mặc định port 587 |
 | `Security__EncryptionKey` | Base64 của khóa AES 32 byte |
 | `Security__SignerCertificates__USER_ID` | Chứng thư PEM của người ký |
@@ -50,7 +51,7 @@ Có 2FA → 202, **không có accessToken**:
 {"challengeId":"32_HEX_CHARACTERS","method":"Email","expiresAt":"2026-10-14T12:05:00Z","requiresTwoFactor":true}
 ```
 
-`POST /api/auth/2fa/verify`, anonymous, `{"challengeId":"...","code":"123456"}` → 200 TokenDto trên. Challenge không thể dùng làm Bearer. Hỗ trợ đúng `Method=Email` (OTP gửi đến User.Email) hoặc `Method=TOTP` (Secret Base32, SHA1, 6 số, 30 giây, cửa sổ ±1). Đúng một factor enabled; cấu hình/method khác trả 503, không bỏ qua. Challenge hết hạn 5 phút, tối đa 5 lần thử; login lại để gửi challenge mới, cooldown 60 giây. Email Secret không dùng để sinh mã; fingerprint của cấu hình được kiểm tra khi verify. TOTP reuse được chặn trong instance hiện tại.
+`POST /api/auth/2fa/verify`, anonymous, `{"challengeId":"...","code":"123456"}` → 200 TokenDto trên. Challenge không thể dùng làm Bearer. Hỗ trợ đúng `Method=Email` (OTP gửi đến User.Email) hoặc `Method=TOTP` (Secret Base32, SHA1, 6 số, 30 giây, cửa sổ ±1). Đúng một factor enabled; cấu hình/method khác trả 503, không bỏ qua. Challenge hết hạn 5 phút, tối đa 5 lần thử. `POST /api/auth/2fa/resend` với `{"challengeId":"..."}` gửi lại Email OTP sau cooldown 60 giây, trả challenge mới và hủy challenge cũ; không resend TOTP. Hết hạn/hết lượt phải login lại. Fingerprint kiểm tra email/password/factor configuration; nếu đổi thì 409. LastLoginAt và audit thành công chỉ lưu sau khi đủ factor; lỗi persistence không cấp token. TOTP reuse được chặn trong instance hiện tại.
 
 `POST /api/auth/register` vẫn tạo Owner bằng fullName/email/password/confirmPassword/phone; không cho chọn role. Đăng ký không tự cấp token. Mật khẩu tối thiểu 12 ký tự, confirmPassword khớp; email trùng 409.
 
@@ -59,6 +60,8 @@ Có 2FA → 202, **không có accessToken**:
 Mở `/api/auth/google/start` bằng browser navigation. Google gọi `/api/auth/google/oidc-callback`; backend xác minh OIDC, gửi OTP và chuyển tới `/api/auth/google/callback`. Trang callback cung cấp challengeId, không có OTP/token trong URL. Gọi `/api/auth/google/otp/verify` với challengeId/code → 200 TokenDto; nếu tài khoản có 2FA enabled → 202 và tiếp tục `/api/auth/2fa/verify`. Google không bỏ qua 2FA tài khoản.
 
 Giữ cookies **chỉ cho bước Google**: frontend fetch với `credentials: "include"`, `X-Vault-Request: 1`, origin được allowlist. Cookie tạm Secure/HttpOnly/SameSite=None. Dùng HTTPS; không gửi token qua URL. `/api/auth/google/otp/resend` trả challengeId mới, cooldown 60 giây. Không có redirect tùy ý hoặc refresh token. Chưa có UI frontend riêng; có thể dùng trang callback + Swagger cùng browser.
+
+Khi FE sẵn sàng, cấu hình `Google:FrontendCallbackUrl` để trang callback redirect tới một URL HTTPS cố định trên CORS origin allowlist (HTTP chỉ loopback). URL không có query/fragment và không chứa token/OTP/challenge. FE tiếp tục lấy challenge qua endpoint JSON bên dưới. Chi tiết luồng, lỗi và giới hạn: [Backend-login.md](Backend-login.md).
 
 Frontend có thể mở Google trong popup/browser navigation rồi gọi **GET `/api/auth/google/challenge`** với credentials include khi callback hoàn tất để lấy `{challengeId,expiresAt}` dạng JSON. Endpoint chỉ chấp nhận cookie của browser đã bắt đầu luồng; browser khác trả 400. Không cần parse trang HTML hoặc truyền JWT/OTP qua URL. Có rate limit 10/IP/phút; tránh poll liên tục. Sau đó hiển thị form OTP và POST verify để nhận token.
 
@@ -72,14 +75,6 @@ Authorization: Bearer JWT_VALUE
 200: `{"userId":1,"fullName":"Owner","email":"owner@example.com","roles":["Owner"],"status":"Active"}`. Mỗi request Bearer kiểm tra User Active, khóa mật khẩu và role từ database; token cũ không giữ role bị thu hồi. API nghiệp vụ không dùng application cookie, không cần `X-Vault-Request`. Actor UserId lấy từ principal, không gửi ownerId/userId để giả lập.
 
 Frontend: login → OTP/Google nếu cần → lưu accessToken trong bộ nhớ → gọi me → gắn Bearer cho API → gặp 401 thì bỏ token và đăng nhập lại. 403 là thiếu quyền/OTP, không đồng nghĩa token hết hạn. Không có refresh-token persistence nên **không phát refresh token**.
-
-Đã đọc frontend hiện tại nhưng không sửa: `src/callapi/axiosClient.js` đang dựa vào withCredentials, `authApi.js` kiểm tra session bằng owner/vaults, `AuthContext.jsx` chỉ giữ userId/roles. Đội frontend cần:
-
-- Nhận và giữ accessToken; interceptor gắn Authorization Bearer cho nghiệp vụ, không coi cookie là login.
-- Xử lý 202 thành màn hình Email/TOTP, không đặt trạng thái logged-in trước khi có token.
-- Đổi checkSession sang GET auth/me để nhận profile/roles thật; không dùng 403 owner/vaults để suy ra phiên hợp lệ.
-- Giữ credentials include + X-Vault-Request riêng cho Google POST; base URL HTTPS và Cors origin khớp.
-- Logout/401 xóa token và user; reload khi không có token phải login lại. Phân biệt mảng list cũ với PageDto mới.
 
 Đã đọc frontend hiện tại nhưng không sửa: `src/callapi/axiosClient.js` đang dựa vào withCredentials, `authApi.js` kiểm tra session bằng owner/vaults, `AuthContext.jsx` chỉ giữ userId/roles. Đội frontend cần:
 

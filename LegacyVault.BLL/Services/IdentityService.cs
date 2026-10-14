@@ -9,6 +9,7 @@ namespace LegacyVault.BLL.Services;
 
 public sealed class IdentityService(IVaultRepository repository)
 {
+    private static readonly Lazy<string> UnavailableAccountHash = new(() => HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))));
     public static string HashPassword(string password)
     {
         var salt = RandomNumberGenerator.GetBytes(16);
@@ -213,8 +214,9 @@ public sealed class IdentityService(IVaultRepository repository)
     {
         var login = await CheckPassword(email, password, ct);
         var user = await repository.User(login.UserId, ct);
-        if (user!.TwoFactorAuths.Any(x => x.IsEnabled)) throw new WorkflowException(409, "Two-factor authentication required.");
-        return login;
+        if (user is null) throw new WorkflowException(401, "Account unavailable.");
+        if (user.TwoFactorAuths.Any(x => x.IsEnabled)) throw new WorkflowException(409, "Two-factor authentication required.");
+        return await CompleteLogin(login.UserId, false, ct);
     }
     public async Task<LoginDto> CheckPassword(string email, string password, CancellationToken ct)
     {
@@ -222,8 +224,12 @@ public sealed class IdentityService(IVaultRepository repository)
             throw new WorkflowException(400, "Invalid login input.");
         var user = await repository.LoginUser(email.Trim(), ct);
         var auth = user?.Authentications.OrderByDescending(x => x.CreatedAt).FirstOrDefault();
-        if (user is null || user.Status != "Active" || auth is null || auth.LockedUntil > DateTime.UtcNow)
+        if (user is null || user.Status != "Active" || auth is null || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow))
+        {
+            // Keep unavailable-account failures on the password hashing path as well.
+            _ = VerifyPassword(password, UnavailableAccountHash.Value);
             throw new WorkflowException(401, "Invalid credentials or account unavailable.");
+        }
         if (!VerifyPassword(password, auth.PasswordHash))
         {
             auth.FailedLoginCount++;
@@ -235,7 +241,7 @@ public sealed class IdentityService(IVaultRepository repository)
                 401,
                 "Invalid credentials or account unavailable.");
         }
-        auth.FailedLoginCount = 0; auth.LastLoginAt = DateTime.UtcNow; auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
+        auth.FailedLoginCount = 0; auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
         await repository.Save(ct);
 
         return new LoginDto(
@@ -268,6 +274,33 @@ public sealed class IdentityService(IVaultRepository repository)
         if (user is null || user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow))
             throw new WorkflowException(401, "Account unavailable.");
         return new(user.UserId, user.FullName, user.Email, user.Roles.Select(x => x.RoleName).ToArray(), user.Status);
+    }
+
+    // Persist success only after every mandatory factor has completed, before issuing a token.
+    public async Task<LoginDto> CompleteLogin(int userId, bool google, CancellationToken ct)
+    {
+        var user = await repository.User(userId, ct);
+        if (user is null || user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow))
+            throw new WorkflowException(401, "Account unavailable.");
+        if (google) RequireGoogleAccount(user);
+        var auth = user.Authentications.OrderByDescending(x => x.CreatedAt).FirstOrDefault();
+        if (auth is not null)
+        {
+            auth.LastLoginAt = DateTime.UtcNow;
+            auth.FailedLoginCount = 0;
+            auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
+        }
+        repository.Add(new AuditLog { UserId = userId, Action = google ? "GoogleLogin" : "PasswordLogin", EntityType = "User",
+            EntityId = userId, Timestamp = DateTime.UtcNow, Result = "Success" });
+        await repository.Save(ct);
+        return new(user.UserId, user.Roles.Select(x => x.RoleName).ToArray());
+    }
+
+    public static void RequireGoogleAccount(User user)
+    {
+        if (user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow) ||
+            user.Roles.Any(x => x.RoleName is VaultService.AdminRole or VaultService.ExecutorRole or VaultService.VerifierRole or ManagementService.StaffRole))
+            throw new WorkflowException(403, "This account cannot use public Google sign-in.");
     }
 
     // Google Login - merged from branch dung
@@ -333,9 +366,7 @@ public sealed class IdentityService(IVaultRepository repository)
                     "Email was registered concurrently. Start Google sign-in again.");
             }
         }
-        if (user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow) ||
-            user.Roles.Any(x => x.RoleName is VaultService.AdminRole or VaultService.ExecutorRole or VaultService.VerifierRole or ManagementService.StaffRole))
-            throw new WorkflowException(403, "This account cannot use public Google sign-in.");
+        RequireGoogleAccount(user);
         return new LoginDto(user.UserId, user.Roles.Select(x => x.RoleName).ToArray());
     }
 }
