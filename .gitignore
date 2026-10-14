@@ -10,3 +10,11 @@
 *.suo
 **/App_Data/
 .artifacts/
+/AllCode.txt
+/LegacyVault.sln
+
+# Ignore appsettings secrets
+**/appsettings.json
+**/appsettings.Development.json
+**/appsettings.Production.json
+**/secrets.json

@@ -72,15 +72,15 @@ builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
 var app = builder.Build();
 app.UseVaultErrors();
 app.UseHttpsRedirection();
-if (app.Environment.IsDevelopment())
+
+// Bật Swagger cho mọi môi trường (kể cả Production khi chạy Docker)
+app.UseSwagger();
+app.UseSwaggerUI(options =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI(options =>
-    {
-        options.SwaggerEndpoint("/swagger/v1/swagger.json", "LegacyVault API v1");
-        options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; request.credentials = 'same-origin'; return request; }");
-    });
-}
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "LegacyVault API v1");
+    options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; request.credentials = 'include'; return request; }");
+});
+
 app.UseRouting();
 app.UseCors("Frontend");
 app.UseAuthentication();
