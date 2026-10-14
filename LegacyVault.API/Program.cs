@@ -10,9 +10,6 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.OpenApi.Models;
 using LegacyVault.API.Authentication;
 using LegacyVault.BLL.Interfaces;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
-using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,7 +27,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "LegacyVault API",
         Version = "v1",
-        Description = "LegacyVault API with JWT Bearer Authentication & AES Encryption."
+        Description = "Login returns a Bearer accessToken, or 202 with a mandatory 2FA challenge. Use Authorize with the JWT. Google uses temporary browser cookies only until OTP completes."
     });
 
     // Thêm cấu hình nút Authorize trên Swagger UI
@@ -38,10 +35,10 @@ builder.Services.AddSwaggerGen(options =>
     {
         Name = "Authorization",
         Type = SecuritySchemeType.Http,
-        Scheme = "Bearer",
+        Scheme = "bearer",
         BearerFormat = "JWT",
         In = ParameterLocation.Header,
-        Description = "Nhập Access Token theo định dạng: Bearer {your_token}"
+        Description = "Nhập accessToken; Swagger tự thêm tiền tố Bearer."
     });
 
     options.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -70,6 +67,9 @@ if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
 
 builder.Services.AddScoped<IVaultRepository, VaultRepository>();
 builder.Services.AddScoped<VaultService>();
+builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
+builder.Services.AddScoped<ManagementService>();
+builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
 
 builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
@@ -78,37 +78,11 @@ builder.Services.AddSingleton<DocumentProtection>();
 builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>();
 builder.Services.AddSingleton<OtpService>();
 builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
-
-// 3. Chuyển Cấu hình Authentication từ Cookie sang JWT Bearer
-var jwtKey = builder.Configuration["Jwt:Key"] ?? "LegacyVault_Secret_JWT_Key_For_Signing_Tokens_2026_Super_Secret!";
-var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "LegacyVaultAPI";
-var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "LegacyVaultClient";
-
-builder.Services.AddAuthentication(options =>
-{
-    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-})
-.AddJwtBearer(options =>
-{
-    options.RequireHttpsMetadata = false;
-    options.SaveToken = true;
-    options.TokenValidationParameters = new TokenValidationParameters
-    {
-        ValidateIssuerSigningKey = true,
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
-        ValidateIssuer = true,
-        ValidIssuer = jwtIssuer,
-        ValidateAudience = true,
-        ValidAudience = jwtAudience,
-        ValidateLifetime = true,
-        ClockSkew = TimeSpan.Zero
-    };
-});
-
+builder.Services.AddVaultJwt(builder.Configuration);
+builder.Services.AddAuthentication().AddCookie("GoogleTemporary", options => { options.Cookie.SecurePolicy = CookieSecurePolicy.Always; });
 builder.Services.AddAuthorization();
 builder.Services.AddGoogleEmailAuthentication(builder.Configuration);
-
+builder.Services.AddVaultCors(builder.Configuration);
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
@@ -129,47 +103,18 @@ builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
 });
 
 var app = builder.Build();
-
-app.Use(async (context, next) =>
-{
-    context.Response.Headers["Cache-Control"] = "no-store";
-    try
-    {
-        if (context.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(context.Request.Method) &&
-            !HttpMethods.IsHead(context.Request.Method) && !HttpMethods.IsOptions(context.Request.Method) &&
-            context.Request.Headers["X-Vault-Request"] != "1")
-            throw new WorkflowException(400, "Set X-Vault-Request: 1 on mutation requests.");
-        await next(context);
-    }
-    catch (WorkflowException ex)
-    {
-        context.Response.StatusCode = ex.StatusCode;
-        await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message });
-    }
-    catch (RepositoryConflictException)
-    {
-        context.Response.StatusCode = 409;
-        await context.Response.WriteAsJsonAsync(new { status = 409, detail = "The resource changed. Reload and retry." });
-    }
-    catch (Exception ex) when (ex is not OperationCanceledException || !context.RequestAborted.IsCancellationRequested)
-    {
-        app.Logger.LogError(ex, "API operation failed");
-        context.Response.StatusCode = 500;
-        await context.Response.WriteAsJsonAsync(new { status = 500, detail = "The operation could not be completed." });
-    }
-});
-
+app.UseVaultErrors();
 app.UseHttpsRedirection();
 
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "LegacyVault API v1");
-    options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; return request; }");
+    options.UseRequestInterceptor("(request) => { request.headers['X-Vault-Request'] = '1'; request.credentials = 'include'; return request; }");
 });
 
 app.UseRouting();
-
+app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseAuthorization();
 

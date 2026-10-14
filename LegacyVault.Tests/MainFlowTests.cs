@@ -17,6 +17,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using LegacyVault.API.Authentication;
 
 internal static class MainFlowTests
 {
@@ -39,12 +40,8 @@ internal static class MainFlowTests
         builder.Services.AddSingleton<IOtpSender, FakeSender>();
         builder.Services.AddSingleton<OtpService>();
         builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
-        builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(o =>
-        {
-            // Loopback test host uses HTTP; production keeps SecurePolicy.Always and HTTPS.
-            o.Cookie.SecurePolicy = Microsoft.AspNetCore.Http.CookieSecurePolicy.SameAsRequest;
-            o.Events.OnRedirectToLogin = context => { context.Response.StatusCode = 401; return Task.CompletedTask; };
-        });
+        TestAuthentication.Configure(builder.Configuration);
+        builder.Services.AddVaultJwt(builder.Configuration);
         builder.Services.AddAuthorization();
         builder.Services.AddRateLimiter(o =>
         {
@@ -75,8 +72,8 @@ internal static class MainFlowTests
         check(registration.StatusCode == HttpStatusCode.Created && (await registration.Content.ReadFromJsonAsync<RegistrationDto>())!.Roles.SequenceEqual(new[] { VaultService.OwnerRole }), "HTTP main flow registration creates an owner");
         var login = await client.PostAsJsonAsync("/api/auth/login", new { email = "mainflow@example.test", password = "Registration123!" });
         if (login.StatusCode != HttpStatusCode.OK) throw new Exception($"Main flow login failed: HTTP {(int)login.StatusCode}.");
-        var account = (await login.Content.ReadFromJsonAsync<LoginDto>())!;
-        check(login.StatusCode == HttpStatusCode.OK && handler.CookieContainer.GetCookies(client.BaseAddress!).Count > 0, "HTTP main flow login stores a session cookie");
+        var account = await TestAuthentication.UseToken(client, login);
+        check(login.StatusCode == HttpStatusCode.OK && !string.IsNullOrEmpty(account.AccessToken), "HTTP main flow login returns Bearer JWT");
         var vaultResponse = await client.PostAsJsonAsync("/api/owner/vaults", new { name = " My Vault ", description = "Personal assets" });
         var vault = (await vaultResponse.Content.ReadFromJsonAsync<VaultDto>())!;
         check(vaultResponse.StatusCode == HttpStatusCode.Created && vault.VaultId > 0 && vault.Name == "My Vault" && vault.Status == "Active" && vaultResponse.Headers.Location is not null, "HTTP main flow creates a vault with a usable Location");
@@ -95,7 +92,7 @@ internal static class MainFlowTests
         using var other = new HttpClient(otherHandler) { BaseAddress = client.BaseAddress };
         other.DefaultRequestHeaders.Add("X-Vault-Request", "1");
         await other.PostAsJsonAsync("/api/auth/register", new { fullName = "Other Owner", email = "otherflow@example.test", password = "Registration123!", confirmPassword = "Registration123!" });
-        await other.PostAsJsonAsync("/api/auth/login", new { email = "otherflow@example.test", password = "Registration123!" });
+        await TestAuthentication.UseToken(other, await other.PostAsJsonAsync("/api/auth/login", new { email = "otherflow@example.test", password = "Registration123!" }));
         check((await other.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Unauthorized", type = "Other" })).StatusCode == HttpStatusCode.NotFound, "another owner cannot create an asset in this vault");
         check((await other.GetAsync($"/api/owner/assets/{asset.AssetId}")).StatusCode == HttpStatusCode.NotFound && (await other.GetFromJsonAsync<AssetDto[]>("/api/owner/assets"))!.Length == 0, "another owner cannot read or list this asset");
         var selectionPath = $"/api/owner/assets/{asset.AssetId}/beneficiaries";
@@ -153,7 +150,9 @@ internal static class MainFlowTests
         }
         check((await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Blocked", type = "Other" })).StatusCode == HttpStatusCode.Conflict, "inactive vault rejects new assets");
         check((await client.PostAsJsonAsync($"/api/owner/assets/{secondAsset.AssetId}/beneficiaries", new { email = "thirdflow@example.test", allocation = 1 })).StatusCode == HttpStatusCode.Conflict, "inactive vault rejects beneficiary changes");
-        check((await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode == HttpStatusCode.NoContent && (await client.GetAsync("/api/owner/assets")).StatusCode == HttpStatusCode.Unauthorized, "HTTP main flow logout removes access");
+        check((await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode == HttpStatusCode.NoContent, "JWT logout ends OTP grant without claiming access token revocation");
+        client.DefaultRequestHeaders.Authorization = null;
+        check((await client.GetAsync("/api/owner/assets")).StatusCode == HttpStatusCode.Unauthorized, "discarding JWT removes client access");
         await app.StopAsync();
     }
 }

@@ -1,0 +1,74 @@
+using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
+using LegacyVault.BLL.Services;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace LegacyVault.API.Controllers;
+
+[ApiController, Authorize, Route("api/owner")]
+public sealed class OwnerManagementController(ManagementService service) : VaultController
+{
+    [HttpPut("vaults/{vaultId:int}")] public Task<VaultDto> UpdateVault(int vaultId, CreateVaultInput input, CancellationToken ct) => service.UpdateVault(UserId, vaultId, input, ct);
+    [HttpPost("vaults/{vaultId:int}/close")] public async Task<IActionResult> Close(int vaultId, CancellationToken ct) { await service.CloseVault(UserId, vaultId, ct); return NoContent(); }
+    [HttpPut("assets/{assetId:int}")] public Task<AssetDto> UpdateAsset(int assetId, UpdateAssetInput input, CancellationToken ct) => service.UpdateAsset(UserId, assetId, input, ct);
+    [HttpPost("assets/{assetId:int}/revoke")] public async Task<IActionResult> RevokeAsset(int assetId, CancellationToken ct) { await service.RevokeAsset(UserId, assetId, ct); return NoContent(); }
+    [HttpGet("assets/{assetId:int}/allocations")] public Task<IReadOnlyList<AssignmentDto>> Allocations(int assetId, CancellationToken ct) => service.Allocations(UserId, assetId, ct);
+    [HttpPut("assets/{assetId:int}/allocations/{assignmentId:int}")] public Task<AssignmentDto> Allocation(int assetId, int assignmentId, AllocationInput input, CancellationToken ct) => service.ChangeAllocation(UserId, assetId, assignmentId, input, ct);
+    [HttpPost("assets/{assetId:int}/allocations/{assignmentId:int}/revoke")] public Task<AssignmentDto> RevokeAllocation(int assetId, int assignmentId, CancellationToken ct) => service.ChangeAllocation(UserId, assetId, assignmentId, null, ct);
+    [HttpGet("assets/{assetId:int}/documents")] public Task<IReadOnlyList<ManagedDocumentDto>> Documents(int assetId, CancellationToken ct) => service.Documents(UserId, assetId, ct);
+    [HttpGet("assets/{assetId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int assetId, int documentId, CancellationToken ct) => ContentFile(await service.OwnerDocument(UserId, assetId, documentId, ct));
+    [HttpPost("assets/{assetId:int}/documents/{documentId:int}/revoke")] public async Task<IActionResult> RevokeDocument(int assetId, int documentId, CancellationToken ct) { await service.RevokeDocument(UserId, assetId, documentId, ct); return NoContent(); }
+    [HttpPut("vaults/{vaultId:int}/executor")] public async Task<IActionResult> Executor(int vaultId, ExecutorInput input, CancellationToken ct) { await service.AssignExecutor(UserId, vaultId, input, ct); return NoContent(); }
+    [HttpPost("vaults/{vaultId:int}/handovers")] public async Task<IActionResult> Create(int vaultId, CancellationToken ct) { var r = await service.CreateRequest(UserId, vaultId, ct); return Created($"/api/owner/handovers/{r.RequestId}", r); }
+    [HttpGet("handovers")] public Task<PageDto<HandoverDto>> Requests([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null, CancellationToken ct = default) => service.Requests(UserId, "Owner", page, pageSize, status, ct);
+    [HttpGet("handovers/{requestId:int}")] public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.OwnerRequest(UserId, requestId, ct);
+    [HttpPost("handovers/{requestId:int}/cancel")] public async Task<IActionResult> Cancel(int requestId, CancellationToken ct) { await service.Cancel(UserId, requestId, ct); return NoContent(); }
+}
+
+[ApiController, Authorize(Roles = "Staff"), Route("api/staff")]
+public sealed class StaffController(ManagementService management, VaultService service) : VaultController
+{
+    [HttpGet("intake-vaults")] public Task<PageDto<IntakeDto>> IntakeList([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) => management.IntakeList(UserId, page, pageSize, ct);
+    [HttpPost("intake-vaults/{vaultId:int}/accept")] public async Task<IActionResult> Intake(int vaultId, CancellationToken ct) { var r = await management.Intake(UserId, vaultId, ct); return Created($"/api/staff/handovers/{r.RequestId}", r); }
+    [HttpGet("handovers")] public Task<PageDto<HandoverDto>> Requests([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null, CancellationToken ct = default) => management.Requests(UserId, "Operator", page, pageSize, status, ct);
+    [HttpGet("handovers/{requestId:int}")] public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.Request(UserId, requestId, ct);
+    [HttpGet("handovers/{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.RequestDocument(UserId, requestId, documentId, ct));
+    [HttpPost("handovers/{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) => Ok(new { verificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
+    [HttpPost("handovers/{requestId:int}/complete"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<IActionResult> Complete(int requestId, [FromForm] CompletionForm form, CancellationToken ct) { await service.Complete(UserId, requestId, await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct); return NoContent(); }
+    [HttpPost("handovers/{requestId:int}/start")] public async Task<IActionResult> Start(int requestId, CancellationToken ct) { await service.StartHandover(UserId, requestId, ct); return NoContent(); }
+    [HttpPost("handovers/{requestId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<DocumentDto> Upload(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) => await service.UploadHandoverDocument(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
+}
+
+[ApiController, Authorize, Route("api/legal/handovers")]
+public sealed class LegalController(ManagementService service) : VaultController
+{
+    [HttpGet] public Task<PageDto<HandoverDto>> Requests([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null, CancellationToken ct = default) => service.Requests(UserId, "LegalVerifier", page, pageSize, status, ct);
+    [HttpGet("{requestId:int}")] public async Task<IActionResult> Detail(int requestId, CancellationToken ct) { var value = await service.LegalDetail(UserId, requestId, ct); return Ok(new { request = value.Request, verification = value.Verification }); }
+    [HttpGet("{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, false, ct));
+    [HttpGet("{requestId:int}/asset-documents/{documentId:int}/content")] public async Task<IActionResult> AssetDocument(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, true, ct));
+    [HttpPost("{requestId:int}/approve")] public Task<ReviewDto> Approve(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Approved", input, ct);
+    [HttpPost("{requestId:int}/reject")] public Task<ReviewDto> Reject(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Rejected", input, ct);
+    [HttpPost("{requestId:int}/request-additional-information")] public Task<ReviewDto> Additional(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Additional_Info", input, ct);
+}
+
+[ApiController, Authorize, Route("api/beneficiary/handovers")]
+public sealed class BeneficiaryHandoverController(IBeneficiaryService service) : VaultController
+{
+    [HttpGet] public Task<PageDto<CaseDto>> Cases([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) => service.Cases(UserId, SessionId, page, pageSize, ct);
+    [HttpGet("{handoverId:int}")] public Task<CaseDto> Case(int handoverId, CancellationToken ct) => service.Detail(UserId, SessionId, handoverId, ct);
+    [HttpGet("{handoverId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int handoverId, int documentId, CancellationToken ct) => ContentFile(await service.Document(UserId, SessionId, handoverId, documentId, ct));
+    [HttpPost("{handoverId:int}/receipt")] public Task<ReceiptDto> Receipt(int handoverId, ReceiptInput input, CancellationToken ct) => service.Confirm(UserId, SessionId, handoverId, input, ct);
+    [HttpGet("{handoverId:int}/receipt")] public Task<ReceiptDto> ReadReceipt(int handoverId, CancellationToken ct) => service.Receipt(UserId, SessionId, handoverId, ct);
+    [HttpGet("{handoverId:int}/documents")] public Task<IReadOnlyList<DocumentDto>> Documents(int handoverId, CancellationToken ct) => service.Documents(UserId, SessionId, handoverId, ct);
+}
+
+[ApiController, Authorize, Route("api/notifications")]
+public sealed class NotificationsController(ManagementService service) : VaultController
+{
+    [HttpGet] public Task<PageDto<NotificationDto>> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) => service.Notifications(UserId, page, pageSize, ct);
+    [HttpPost("{notificationId:int}/read")] public async Task<IActionResult> Read(int notificationId, CancellationToken ct) { await service.ReadNotification(UserId, notificationId, ct); return NoContent(); }
+}

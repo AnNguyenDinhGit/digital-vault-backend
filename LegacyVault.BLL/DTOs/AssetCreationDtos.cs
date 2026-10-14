@@ -7,7 +7,7 @@ namespace LegacyVault.BLL.DTOs;
 public sealed class CreateVaultInput
 {
     [Required, StringLength(100)] public string Name { get; init; } = null!;
-    [StringLength(4000)] public string? Description { get; init; }
+    [StringLength(500)] public string? Description { get; init; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

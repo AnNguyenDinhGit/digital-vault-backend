@@ -1,138 +1,33 @@
-# Luồng chính: đăng ký → đăng nhập → tạo kho → tạo tài sản
+# Luồng chính: đăng ký → JWT → kho → tài sản → người thụ hưởng
 
-Chạy API, rồi mở **https://localhost:7015/swagger**:
+## 1. Tài khoản
 
-```powershell
-dotnet run --project LegacyVault.API --launch-profile https
-```
+POST `/api/auth/register` nhận fullName/email/password/confirmPassword/phone; luôn Owner. POST `/api/auth/login` nhận email/password, trả 200 JWT hoặc 202 challenge khi 2FA enabled. Hoàn tất POST `/api/auth/2fa/verify` nếu cần. Google + OTP cũng trả cùng token contract, xem [Google](Google-login-Swagger.md).
 
-Nếu API đang chạy bản cũ, Ctrl+C rồi chạy lại. Thực hiện toàn bộ các bước trên cùng trình duyệt và cùng địa chỉ HTTPS để cookie được gửi tự động. Swagger tự thêm `X-Vault-Request: 1` vào POST. Các ví dụ email/ID dưới đây cần thay bằng dữ liệu test của bạn.
+Dán accessToken vào Swagger Authorize, gọi GET `/api/auth/me`. Không dùng application cookie cho API nghiệp vụ.
 
-## 1. Đăng ký
+## 2. Tạo kho và tài sản
 
-`POST /api/auth/register` → **Try it out** → nhập:
+POST `/api/owner/vaults` với name/description (≤500), lấy vaultId. POST `/api/owner/assets` với vaultId/name/type/description, lấy assetId. Kho phải Active và của người gọi. Không gửi ownerId/status; server quyết định. Name ≤100, type ASCII ≤50, mô tả tài sản ≤4000.
 
-```json
-{
-  "fullName": "Nguyen Van A",
-  "email": "owner@example.com",
-  "password": "Registration123!",
-  "confirmPassword": "Registration123!",
-  "phone": "0901234567"
-}
-```
+GET list/detail để kiểm tra. PUT vault/asset cập nhật; POST close/revoke giữ lịch sử và bị chặn khi có hồ sơ bàn giao bảo vệ.
 
-**Execute**. Kỳ vọng **201**, body có userId, fullName, email và roles = `["Owner"]`. Email đã đăng ký trả 409. Không có trường chọn role. Chưa tạo vault hoặc tài sản ở bước này; đăng ký cũng không tự đăng nhập.
+## 3. Chọn người thụ hưởng
 
-## 2. Đăng nhập
-
-`POST /api/auth/login`:
+Tài khoản B đăng ký bình thường. Login A bằng JWT, POST `/api/owner/assets/{assetId}/beneficiaries`:
 
 ```json
-{
-  "email": "owner@example.com",
-  "password": "Registration123!"
-}
+{"email":"beneficiary@example.com","allocation":100}
 ```
 
-Kỳ vọng **200**; browser lưu cookie `LegacyVault.Session`. Không nhập token/Authorize. Mật khẩu là mật khẩu gốc vừa đăng ký, không phải hash.
+201 trả beneficiaryId; B giữ Owner và nhận thêm Beneficiary. Email phải đăng ký/Active, không tự thụ hưởng/trùng; tổng ≤100, 2 chữ số thập phân. GET allocations trả assignmentId; PUT allocation hoặc POST revoke để thay đổi trước khi bàn giao. Không có lời mời email chưa đăng ký vì schema không có invitation persistence.
 
-## 3. Tạo kho
+## 4. Giấy tờ và bàn giao
 
-Tài sản phải thuộc một kho, vì `DigitalAsset.VaultId` là khóa ngoại tới `DigitalVault`. Dùng `POST /api/owner/vaults`:
+Owner upload multipart File/BeneficiaryId/OwnerAlive/Signature/DeathCertificate. Backend AES-256-GCM, tối đa 10 MiB/file. Còn sống cần chữ ký rời; khai báo mất cần giấy chứng tử, chờ pháp lý. GET documents/content và POST revoke có ownership checks.
 
-```json
-{
-  "name": "Kho tai san cua toi",
-  "description": "Kho luu tru tai san ca nhan"
-}
-```
+Chọn Executor độc lập bằng PUT vaults/{id}/executor hoặc để server chọn khi POST vaults/{id}/handovers. Mọi tài sản Active cần tài liệu và đúng 100% phân bổ. Executor/Staff nộp evidence cho LegalVerifier; chỉ approve mới mở bước bàn giao. Staff intake chỉ khi đủ điều kiện và không có Executor hợp lệ, không có request unassigned.
 
-Kỳ vọng **201**, ví dụ:
+Login B bằng JWT, xác minh OTP beneficiary riêng để xem di sản. Chỉ định B không tự mở tài sản. Confirm receipt chỉ sau Completed, không thể confirm thay người khác/lặp.
 
-```json
-{
-  "vaultId": 10,
-  "name": "Kho tai san cua toi",
-  "description": "Kho luu tru tai san ca nhan",
-  "status": "Active"
-}
-```
-
-Ghi lại vaultId thực tế, không mặc định là 10. OwnerId tự lấy từ phiên đăng nhập; request không nhận ownerId hoặc status. `name` bắt buộc, tối đa 100 ký tự; `description` tùy chọn, tối đa 4.000 ký tự.
-
-Có thể kiểm tra bằng `GET /api/owner/vaults` và `GET /api/owner/vaults/{vaultId}`. Nếu đã có kho, dùng vaultId của mình thay vì tạo kho mới.
-
-## 4. Tạo tài sản
-
-`POST /api/owner/assets`, thay vaultId bằng ID lấy từ bước 3:
-
-```json
-{
-  "vaultId": 10,
-  "name": "Tai khoan tiet kiem",
-  "type": "BankAccount",
-  "description": "Thong tin mo ta tai san"
-}
-```
-
-Kỳ vọng **201**, ví dụ:
-
-```json
-{
-  "assetId": 20,
-  "name": "Tai khoan tiet kiem",
-  "type": "BankAccount",
-  "description": "Thong tin mo ta tai san",
-  "status": "Active",
-  "documents": []
-}
-```
-
-Ghi lại assetId thực tế. `name` bắt buộc, tối đa 100; `type` bắt buộc, tối đa 50 ký tự ASCII vì mapping AssetType là varchar(50); `description` tùy chọn, tối đa 4.000. Ví dụ type: BankAccount, CryptoWallet, SocialAccount, Document, Other; đây là ví dụ, không phải enum bắt buộc. Name và description có thể chứa tiếng Việt.
-
-Kho phải thuộc user đang đăng nhập và có Status=Active. Kho không tồn tại/thuộc người khác trả 404; kho không hoạt động trả 409. Request không nhận assetId, ownerId hay status. Bước này tạo thông tin tài sản, không upload giấy tờ, gán người thụ hưởng hoặc tạo bàn giao; chưa áp dụng hạn mức gói dịch vụ.
-
-## 5. Xem lại tài sản
-
-- `GET /api/owner/assets`: kỳ vọng 200, mảng có tài sản mới.
-- `GET /api/owner/assets/{assetId}`: nhập assetId thực tế, kỳ vọng 200 và metadata tài sản.
-- Hai response 201 ở bước tạo có header Location trỏ tới endpoint chi tiết tương ứng.
-- `POST /api/auth/logout`: kỳ vọng 204; gọi API owner sau logout trả 401.
-
-## Người thụ hưởng có đăng ký được không?
-
-**Có.** Mọi tài khoản đăng ký đều nhận role **Owner** để quản lý kho của mình. Khi được chủ sở hữu khác chỉ định, tài khoản nhận thêm **Beneficiary**, vẫn giữ Owner. Quan hệ `BeneficiaryAssignment` xác định người đó được thụ hưởng tài sản nào; role không cho phép đọc mọi tài sản.
-
-## 6. Chọn người thụ hưởng bằng email
-
-1. Đăng ký tài khoản B bằng `/api/auth/register`, với email `beneficiary@example.com` (thay bằng email thật để nhận OTP).
-2. Login tài khoản A đã tạo kho/tài sản. Trong Swagger, gọi `POST /api/owner/assets/{assetId}/beneficiaries`, nhập assetId của A và body:
-
-```json
-{
-  "email": "beneficiary@example.com",
-  "allocation": 100
-}
-```
-
-Kỳ vọng 201, trả về `assetId`, `beneficiaryId`, `fullName`, `allocation`, `status`. Server tạo assignment Active và cấp thêm Beneficiary cho B trong cùng lần lưu. Không gửi role hoặc beneficiaryId trong request này.
-
-3. Gọi `GET /api/owner/beneficiaries?assetId=...` để lấy danh sách. Dùng `beneficiaryId` trả về khi upload giấy tờ.
-4. Logout A, login B. Gọi `/api/beneficiary/otp/request`, nhận mã trong email rồi gọi `/api/beneficiary/otp/verify`. API danh sách tài sản thừa kế vẫn trả mảng rỗng nếu chưa có bàn giao đủ điều kiện: assignment Active, HandoverCase In_Progress/Completed và LegalVerification Approved. Chỉ định người thụ hưởng không tự mở tài sản.
-
-Email phải thuộc tài khoản đã đăng ký và Active; hiện chưa có lời mời cho email chưa đăng ký. Không được chọn chính mình (400), chọn trùng trên cùng tài sản (409), hoặc phân bổ vượt tổng 100% (409). Tỷ lệ từ 0,01 đến 100, tối đa hai chữ số thập phân. Với hai người, thêm lần lượt 60% và 40%; hiện chưa có API sửa/xóa phân bổ đã tạo. Executor, LegalVerifier và Admin tiếp tục dùng tài khoản được cấp riêng.
-
-## Kiểm thử đã chạy
-
-Có thể thay bước đăng ký/login mật khẩu bằng [Google → OTP](Google-login-Swagger.md). Chỉ sau OTP hợp lệ mới tạo/tìm User và cấp cookie; các bước tạo kho/tài sản và chỉ định người thụ hưởng dùng cùng API hiện có. Tài khoản Google-only không có mật khẩu và chưa có API thiết lập mật khẩu.
-
-Kết quả gần nhất: build thành công, **154 kiểm tra đạt**, gồm Google giả lập, token không hợp lệ, OTP, quyền tài khoản và cookie HTTPS. Chưa kiểm thử Google/SMTP thật.
-
-Test `MainFlowTests` chạy các controller thật qua HTTP, đăng ký/login bằng cookie, tạo kho/tài sản, đọc lại thông tin, kiểm tra khóa ngoại, từ chối owner khác và kho không hoạt động. Database dùng SQLite in-memory; không tạo tài khoản test trong SQL Server hiện tại. HTTP test host dùng cookie bảo vệ bằng khóa tạm trong RAM và HTTP loopback; cấu hình production vẫn HTTPS + Secure cookie.
-
-```powershell
-dotnet run --project LegacyVault.Tests
-```
-
-Hướng dẫn upload/chữ ký/OTP chi tiết: [Huong-dan-test-API-Swagger.md](Huong-dan-test-API-Swagger.md).
+Toàn bộ method/path/DTO, state machine, status codes và pagination: [Frontend-JWT-integration.md](Frontend-JWT-integration.md). Test console: `dotnet run --project LegacyVault.Tests`; dùng SQLite relational và external doubles, không database thật.

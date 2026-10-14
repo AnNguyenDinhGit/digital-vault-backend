@@ -10,6 +10,7 @@
 *.suo
 **/App_Data/
 .artifacts/
+/AllCode.txt
 /LegacyVault.sln
 
 # Ignore appsettings secrets

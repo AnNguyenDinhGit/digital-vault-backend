@@ -1,0 +1,220 @@
+# Backend-only collection. Configure variables locally; do not run fixture creation on production.
+# Password/Google login can return 202: finish 2FA before copying accessToken.
+@baseUrl = https://localhost:7015
+@ownerEmail = owner@example.test
+@ownerPassword = REPLACE_LOCALLY
+@ownerToken = REPLACE_WITH_ACCESS_TOKEN
+@operatorToken = REPLACE_WITH_EXECUTOR_OR_STAFF_TOKEN
+@legalToken = REPLACE_WITH_ASSIGNED_LEGAL_TOKEN
+@beneficiaryToken = REPLACE_WITH_BENEFICIARY_TOKEN
+@challengeId = REPLACE_WITH_CHALLENGE_ID
+@otp = REPLACE_WITH_6_DIGIT_CODE
+@vaultId = 1
+@assetId = 1
+@assignmentId = 1
+@beneficiaryId = 1
+@executorId = 1
+@verifierId = 1
+@requestId = 1
+@handoverId = 1
+@documentId = 1
+@documentPath = REPLACE_WITH_LOCAL_DOCUMENT_PATH
+@deathCertificatePath = REPLACE_WITH_LOCAL_DEATH_CERTIFICATE_PATH
+@signaturePath = REPLACE_WITH_LOCAL_DETACHED_SIGNATURE_PATH
+
+### Password login: 200 TokenDto, or 202 LoginChallengeDto
+# @name passwordLogin
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"email":"{{ownerEmail}}","password":"{{ownerPassword}}"}
+
+### Mandatory factor when login returned 202
+POST {{baseUrl}}/api/auth/2fa/verify
+Content-Type: application/json
+
+{"challengeId":"{{challengeId}}","code":"{{otp}}"}
+
+### Google start: open this URL in a browser, do not follow provider redirect in this client
+GET {{baseUrl}}/api/auth/google/start
+
+### Google OTP: browser cookie from Google flow is required, not only challenge ID
+POST {{baseUrl}}/api/auth/google/otp/verify
+X-Vault-Request: 1
+Content-Type: application/json
+
+{"challengeId":"{{challengeId}}","code":"{{otp}}"}
+
+### Profile: current roles/state from database
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer {{ownerToken}}
+
+### Create vault; copy vaultId from response
+POST {{baseUrl}}/api/owner/vaults
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{"name":"My vault","description":"Description within 500 characters"}
+
+### Create asset; copy assetId from response
+POST {{baseUrl}}/api/owner/assets
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{"vaultId":{{vaultId}},"name":"Document asset","type":"Document","description":"Instructions"}
+
+### Recipient must already have an active account
+POST {{baseUrl}}/api/owner/assets/{{assetId}}/beneficiaries
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{"email":"beneficiary@example.test","allocation":100}
+
+### Get assignmentId for update/revoke
+GET {{baseUrl}}/api/owner/assets/{{assetId}}/allocations
+Authorization: Bearer {{ownerToken}}
+
+### Change allocation before handover; total remains <=100
+PUT {{baseUrl}}/api/owner/assets/{{assetId}}/allocations/{{assignmentId}}
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{"allocation":100}
+
+### Deceased declaration upload: each file <=10 MiB, proof remains pending legal review
+POST {{baseUrl}}/api/owner/assets/{{assetId}}/documents
+Authorization: Bearer {{ownerToken}}
+Content-Type: multipart/form-data; boundary=VaultBoundary
+
+--VaultBoundary
+Content-Disposition: form-data; name="BeneficiaryId"
+
+{{beneficiaryId}}
+--VaultBoundary
+Content-Disposition: form-data; name="OwnerAlive"
+
+false
+--VaultBoundary
+Content-Disposition: form-data; name="File"; filename="instructions.txt"
+Content-Type: text/plain
+
+< {{documentPath}}
+--VaultBoundary
+Content-Disposition: form-data; name="DeathCertificate"; filename="proof.pdf"
+Content-Type: application/pdf
+
+< {{deathCertificatePath}}
+--VaultBoundary--
+
+### Owner selects Executor; optional when a suitable random Executor exists
+PUT {{baseUrl}}/api/owner/vaults/{{vaultId}}/executor
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{"executorId":{{executorId}}}
+
+### Create handover: documents + 100% allocation on every active asset
+POST {{baseUrl}}/api/owner/vaults/{{vaultId}}/handovers
+Authorization: Bearer {{ownerToken}}
+
+### Staff intake is an alternative, not a replacement for a valid Executor
+GET {{baseUrl}}/api/staff/intake-vaults?page=1&pageSize=20
+Authorization: Bearer {{operatorToken}}
+
+### Staff role needed; vault must have no assigned Executor/protected request
+POST {{baseUrl}}/api/staff/intake-vaults/{{vaultId}}/accept
+Authorization: Bearer {{operatorToken}}
+
+### Assigned operator detail
+GET {{baseUrl}}/api/executor/handovers/{{requestId}}
+Authorization: Bearer {{operatorToken}}
+
+### Submit legal evidence (Staff may use corresponding /api/staff/handovers path)
+POST {{baseUrl}}/api/executor/handovers/{{requestId}}/legal-verifications
+Authorization: Bearer {{operatorToken}}
+Content-Type: multipart/form-data; boundary=LegalBoundary
+
+--LegalBoundary
+Content-Disposition: form-data; name="VerifierId"
+
+{{verifierId}}
+--LegalBoundary
+Content-Disposition: form-data; name="Comment"
+
+Please review the evidence independently.
+--LegalBoundary
+Content-Disposition: form-data; name="Evidence"; filename="proof.pdf"
+Content-Type: application/pdf
+
+< {{deathCertificatePath}}
+--LegalBoundary--
+
+### Assigned LegalVerifier lists pending reviews
+GET {{baseUrl}}/api/legal/handovers?page=1&pageSize=20&status=Pending_Legal
+Authorization: Bearer {{legalToken}}
+
+### Legal reads asset evidence with scoped access
+GET {{baseUrl}}/api/legal/handovers/{{requestId}}/asset-documents/{{documentId}}/content
+Authorization: Bearer {{legalToken}}
+
+### Approve only after evidence review (reject / request-additional-information also available)
+POST {{baseUrl}}/api/legal/handovers/{{requestId}}/approve
+Authorization: Bearer {{legalToken}}
+Content-Type: application/json
+
+{"comment":"Evidence reviewed and approved"}
+
+### Start only after approval
+POST {{baseUrl}}/api/executor/handovers/{{requestId}}/start
+Authorization: Bearer {{operatorToken}}
+
+### Signed completion: certificate must be configured for operator UserId
+POST {{baseUrl}}/api/executor/handovers/{{requestId}}/complete
+Authorization: Bearer {{operatorToken}}
+Content-Type: multipart/form-data; boundary=CompletionBoundary
+
+--CompletionBoundary
+Content-Disposition: form-data; name="File"; filename="completion.txt"
+Content-Type: text/plain
+
+< {{documentPath}}
+--CompletionBoundary
+Content-Disposition: form-data; name="Signature"; filename="signature.bin"
+Content-Type: application/octet-stream
+
+< {{signaturePath}}
+--CompletionBoundary--
+
+### Separate beneficiary identity gate for current JWT session
+POST {{baseUrl}}/api/beneficiary/otp/request
+Authorization: Bearer {{beneficiaryToken}}
+
+### Verify using beneficiary challenge and email code
+POST {{baseUrl}}/api/beneficiary/otp/verify
+Authorization: Bearer {{beneficiaryToken}}
+Content-Type: application/json
+
+{"challengeId":"{{challengeId}}","code":"{{otp}}"}
+
+### Inherited assets
+GET {{baseUrl}}/api/beneficiary/assets
+Authorization: Bearer {{beneficiaryToken}}
+
+### Beneficiary cases, handoverId is case ID, not requestId
+GET {{baseUrl}}/api/beneficiary/handovers?page=1&pageSize=20
+Authorization: Bearer {{beneficiaryToken}}
+
+### Confirm receipt after Completed; does not claim digital signature verification
+POST {{baseUrl}}/api/beneficiary/handovers/{{handoverId}}/receipt
+Authorization: Bearer {{beneficiaryToken}}
+Content-Type: application/json
+
+{"note":"Received"}
+
+### Notifications belong only to current user
+GET {{baseUrl}}/api/notifications?page=1&pageSize=20
+Authorization: Bearer {{beneficiaryToken}}
+
+### Logout: discard JWT locally; this endpoint cannot revoke JWT without persistence
+POST {{baseUrl}}/api/auth/logout
+Authorization: Bearer {{ownerToken}}

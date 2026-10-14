@@ -9,5 +9,9 @@ public partial class LegacyVaultDbContext
         modelBuilder.Entity<DigitalAsset>().Property(x => x.UpdatedAt).IsConcurrencyToken();
         modelBuilder.Entity<Authentication>().Property(x => x.UpdatedAt).IsConcurrencyToken();
         modelBuilder.Entity<User>().Property(x => x.UpdatedAt).IsConcurrencyToken();
+        modelBuilder.Entity<DigitalVault>().Property(x => x.UpdatedAt).IsConcurrencyToken();
+        modelBuilder.Entity<LegalVerification>().Property(x => x.Status).IsConcurrencyToken();
+        modelBuilder.Entity<HandoverCase>().Property(x => x.Status).IsConcurrencyToken();
+        modelBuilder.Entity<AssetDocument>().Property(x => x.Status).IsConcurrencyToken();
     }
 }

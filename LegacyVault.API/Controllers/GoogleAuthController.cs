@@ -21,7 +21,7 @@ public sealed record GoogleOtpInput(
 public sealed record GoogleResendInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId);
 
 [ApiController, Route("api/auth/google")]
-public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp otp, IdentityService identity) : ControllerBase
+public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp otp, IdentityService identity, PasswordAuthenticationService authentication) : ControllerBase
 {
     private string Browser => Request.Cookies[GoogleAuthentication.BrowserCookie] ?? "";
 
@@ -49,25 +49,26 @@ public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp o
             <h1>Kiểm tra email để lấy OTP</h1>
             <p>Trong cùng trình duyệt, mở Swagger và gọi POST /api/auth/google/otp/verify với body:</p>
             <pre>{"challengeId":"{{challenge.ChallengeId}}","code":"MA_OTP_6_SO"}</pre>
-            <p>OTP có hạn 5 phút. Xác minh thành công mới tạo tài khoản hoặc đăng nhập.</p>
+            <p>OTP có hạn 5 phút. Kết quả 200 trả accessToken để Authorize Bearer; nếu 202, hoàn tất /api/auth/2fa/verify trước. API nghiệp vụ không dùng cookie đăng nhập.</p>
             <a href="/swagger">Mở Swagger</a></html>
             """, "text/html; charset=utf-8");
     }
+    [HttpGet("challenge"), EnableRateLimiting("otp")]
+    public Task<OtpChallenge> ChallengeState(CancellationToken ct) =>
+        otp.Current(Browser, Request.Cookies[GoogleAuthentication.ChallengeCookie] ?? "", ct);
 
     [HttpGet("error")]
     public IActionResult Error() => BadRequest(new { detail = "Google authentication failed or was cancelled. Start again." });
 
     [HttpPost("otp/verify"), EnableRateLimiting("otp")]
-    public async Task<ActionResult<LoginDto>> Verify(GoogleOtpInput input, CancellationToken ct)
+    public async Task<IActionResult> Verify(GoogleOtpInput input, CancellationToken ct)
     {
         var google = await otp.Verify(Browser, input.ChallengeId, input.Code, ct);
         var result = await identity.GoogleLogin(google.Email, google.FullName, ct);
-        var claims = new[] { new Claim(ClaimTypes.NameIdentifier, result.UserId.ToString()), new Claim("vault_session", Guid.NewGuid().ToString("N")) };
-        await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
-            new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)));
+        var response = await authentication.AfterPrimary(result, ct);
         Response.Cookies.Delete(GoogleAuthentication.BrowserCookie, GoogleAuthentication.PendingCookie);
         Response.Cookies.Delete(GoogleAuthentication.ChallengeCookie, GoogleAuthentication.PendingCookie);
-        return Ok(result);
+        return response is LoginChallengeDto ? Accepted(response) : Ok(response);
     }
 
     [HttpPost("otp/resend"), EnableRateLimiting("otp")]

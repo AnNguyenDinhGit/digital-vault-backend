@@ -3,15 +3,9 @@ using System.Security.Claims;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
-using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using LegacyVault.BLL.Interfaces;
-using LegacyVault.DAL.Context;
-using LegacyVault.DAL.Entities;
-using Microsoft.EntityFrameworkCore;
 
 namespace LegacyVault.API.Controllers;
 
@@ -21,7 +15,8 @@ public abstract class VaultController : ControllerBase
     protected string SessionId => User.FindFirstValue("vault_session") ?? throw new WorkflowException(401, "Login required.");
     protected static async Task<UploadFile> ReadUpload(IFormFile file, CancellationToken ct)
     {
-        if (file.Length is <= 0 or > 10 * 1024 * 1024) throw new WorkflowException(400, "File must be between 1 byte and 10 MB.");
+        if (file.Length > 10 * 1024 * 1024) throw new WorkflowException(413, "File exceeds 10 MB.");
+        if (file.Length <= 0) throw new WorkflowException(400, "File must not be empty.");
         using var buffer = new MemoryStream(); await file.CopyToAsync(buffer, ct);
         return new UploadFile(Path.GetFileName(file.FileName), file.ContentType, buffer.ToArray());
     }
@@ -52,6 +47,11 @@ public sealed class CompletionForm
 {
     [Required] public IFormFile File { get; set; } = null!;
     [Required] public IFormFile Signature { get; set; } = null!;
+}
+public sealed class HandoverUploadForm
+{
+    [Required] public IFormFile File { get; set; } = null!;
+    public IFormFile? Signature { get; set; }
 }
 public sealed class LegalForm
 {
@@ -105,6 +105,11 @@ public sealed class ExecutorController(VaultService service) : VaultController
     {
         await service.Complete(UserId, requestId, await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct); return NoContent();
     }
+    [HttpPost("{requestId:int}/start")]
+    public async Task<IActionResult> Start(int requestId, CancellationToken ct) { await service.StartHandover(UserId, requestId, ct); return NoContent(); }
+    [HttpPost("{requestId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<DocumentDto> Upload(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) =>
+        await service.UploadHandoverDocument(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
     [HttpPost("{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) =>
         Ok(new { VerificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
@@ -130,11 +135,7 @@ public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] s
 public sealed record LoginInput([Required, EmailAddress] string Email, [Required, StringLength(1024)] string Password);
 
 [ApiController, Route("api/auth")]
-public sealed class AuthController(
-    IdentityService identity,
-    OtpService otp,
-    IJwtTokenService jwtTokenService,
-    LegacyVaultDbContext dbContext) : VaultController
+public sealed class AuthController(IdentityService identity, OtpService otp, PasswordAuthenticationService authentication) : VaultController
 {
     [HttpPost("register"), EnableRateLimiting("login")]
     [ProducesResponseType(typeof(RegistrationDto), StatusCodes.Status201Created)]
@@ -147,104 +148,13 @@ public sealed class AuthController(
     [HttpPost("login"), EnableRateLimiting("login")]
     public async Task<IActionResult> Login(LoginInput input, CancellationToken ct)
     {
-        try
-        {
-            var result = await identity.Login(input.Email, input.Password, ct);
-
-            // 1. Lấy role an toàn
-            var role = result.Roles?.FirstOrDefault() ?? "User";
-
-            // 2. Tạo cặp Token
-            var accessToken = jwtTokenService.GenerateAccessToken(result.UserId, input.Email, role);
-            var refreshTokenEntity = jwtTokenService.GenerateRefreshToken(result.UserId);
-
-            // 3. Lưu RefreshToken vào DB
-            dbContext.RefreshTokens.Add(refreshTokenEntity);
-            await dbContext.SaveChangesAsync(ct);
-
-            return Ok(new
-            {
-                UserId = result.UserId,
-                Roles = result.Roles,
-                AccessToken = accessToken,
-                RefreshToken = refreshTokenEntity.Token,
-                ExpiresAt = refreshTokenEntity.ExpiresAt
-            });
-        }
-        catch (Exception ex)
-        {
-            // Trả về thông báo lỗi chi tiết để debug
-            return StatusCode(500, new { Message = "Lỗi xử lý Login/JWT", Detail = ex.Message, Inner = ex.InnerException?.Message });
-        }
+        var result = await authentication.Login(input.Email, input.Password, ct);
+        return result is LoginChallengeDto ? Accepted(result) : Ok(result);
     }
-
+    [HttpPost("2fa/verify"), EnableRateLimiting("otp")]
+    public async Task<TokenDto> VerifyFactor(FactorInput input, CancellationToken ct) => await authentication.Verify(input, ct);
+    [Authorize, HttpGet("me")]
+    public Task<MeDto> Me(CancellationToken ct) => identity.Me(UserId, ct);
     [Authorize, HttpPost("logout")]
-    public async Task<IActionResult> Logout() { otp.Revoke(SessionId); await HttpContext.SignOutAsync(); return NoContent(); }
-
-    [HttpPost("refresh-token")]
-    public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenRequestDto request)
-    {
-        if (string.IsNullOrWhiteSpace(request.AccessToken) || string.IsNullOrWhiteSpace(request.RefreshToken))
-        {
-            return BadRequest(new { Message = "AccessToken và RefreshToken không được để trống." });
-        }
-
-        ClaimsPrincipal principal;
-        try
-        {
-            principal = jwtTokenService.GetPrincipalFromExpiredToken(request.AccessToken);
-        }
-        catch
-        {
-            return BadRequest(new { Message = "AccessToken không hợp lệ." });
-        }
-
-        var userIdClaim = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
-        {
-            return BadRequest(new { Message = "Token không chứa UserId hợp lệ." });
-        }
-
-        var storedRefreshToken = await dbContext.RefreshTokens
-            .FirstOrDefaultAsync(r => r.Token == request.RefreshToken && r.UserId == userId);
-
-        if (storedRefreshToken == null)
-        {
-            return Unauthorized(new { Message = "RefreshToken không tồn tại." });
-        }
-
-        if (storedRefreshToken.IsRevoked)
-        {
-            return Unauthorized(new { Message = "RefreshToken đã bị thu hồi." });
-        }
-
-        if (storedRefreshToken.ExpiresAt < DateTime.UtcNow)
-        {
-            return Unauthorized(new { Message = "RefreshToken đã hết hạn, vui lòng đăng nhập lại." });
-        }
-
-        storedRefreshToken.IsRevoked = true;
-
-        var email = principal.FindFirst(ClaimTypes.Email)?.Value ?? "";
-        var role = principal.FindFirst(ClaimTypes.Role)?.Value ?? "";
-
-        var newAccessToken = jwtTokenService.GenerateAccessToken(userId, email, role);
-        var newRefreshTokenEntity = jwtTokenService.GenerateRefreshToken(userId);
-
-        storedRefreshToken.ReplacedByToken = newRefreshTokenEntity.Token;
-
-        dbContext.RefreshTokens.Add(newRefreshTokenEntity);
-        await dbContext.SaveChangesAsync();
-
-        return Ok(new
-        {
-            AccessToken = newAccessToken,
-            RefreshToken = newRefreshTokenEntity.Token,
-            ExpiresAt = newRefreshTokenEntity.ExpiresAt
-        });
-    }
-
-    public sealed record RefreshTokenRequestDto(string AccessToken, string RefreshToken);
+    public IActionResult Logout() { otp.Revoke(SessionId); return NoContent(); }
 }
-
-

@@ -18,11 +18,11 @@ Phục vụ nhu cầu xác minh danh tính người dùng trong luồng đăng k
    * **`RegistrationDto`**: Đồng bộ record kết quả trả về:
      ```csharp
      public sealed record RegistrationDto(
-         int UserId, 
-         string FullName, 
-         string Email, 
-         string? Phone, 
-         string? IdentityNumber, 
+         int UserId,
+         string FullName,
+         string Email,
+         string? Phone,
+         string? IdentityNumber,
          string[] Roles
      );
      ```
