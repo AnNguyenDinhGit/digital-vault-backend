@@ -3,8 +3,6 @@ using System.Security.Claims;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
-using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -146,6 +144,7 @@ public sealed class AuthController(IdentityService identity, OtpService otp, Pas
         var result = await identity.Register(input, ct);
         return StatusCode(StatusCodes.Status201Created, result);
     }
+
     [HttpPost("login"), EnableRateLimiting("login")]
     public async Task<IActionResult> Login(LoginInput input, CancellationToken ct)
     {

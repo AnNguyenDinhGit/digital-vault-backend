@@ -5,16 +5,22 @@ using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
 using LegacyVault.DAL.Repositories;
 using LegacyVault.DAL.Storage;
-using Microsoft.AspNetCore.Authentication.Cookies;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.OpenApi.Models;
 using LegacyVault.API.Authentication;
+using LegacyVault.BLL.Interfaces;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+
+// 1. Đăng ký các Services Bảo mật & JWT
+builder.Services.AddSingleton<IAccountEncryptionService, AccountEncryptionService>();
+builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+
+// 2. Cấu hình Swagger UI hỗ trợ nút "Authorize" (Bearer Token)
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
@@ -23,20 +29,49 @@ builder.Services.AddSwaggerGen(options =>
         Version = "v1",
         Description = "Login returns a Bearer accessToken, or 202 with a mandatory 2FA challenge. Use Authorize with the JWT. Google uses temporary browser cookies only until OTP completes."
     });
+
+    // Thêm cấu hình nút Authorize trên Swagger UI
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Nhập accessToken; Swagger tự thêm tiền tố Bearer."
+    });
+
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+
     options.OperationFilter<LegacyVault.API.Swagger.MutationHeaderFilter>();
-    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme { Type = SecuritySchemeType.Http, Scheme = "bearer", BearerFormat = "JWT" });
-    options.AddSecurityRequirement(new OpenApiSecurityRequirement { [new OpenApiSecurityScheme { Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" } }] = Array.Empty<string>() });
 });
+
 var cookieKeys = builder.Services.AddDataProtection()
     .SetApplicationName("LegacyVault")
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "auth-keys")));
+
 if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
+
 builder.Services.AddScoped<IVaultRepository, VaultRepository>();
 builder.Services.AddScoped<VaultService>();
 builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
 builder.Services.AddScoped<ManagementService>();
 builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
+
 builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
 builder.Services.AddSingleton(builder.Configuration.GetSection("Mail").Get<MailOptions>() ?? new MailOptions());
 builder.Services.AddSingleton<DocumentProtection>();
@@ -56,8 +91,6 @@ builder.Services.AddRateLimiter(options =>
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 
-// Reads environment variables and Development User Secrets.
-// Startup does not open a connection or modify the database.
 builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("LegacyVault");
@@ -73,7 +106,6 @@ var app = builder.Build();
 app.UseVaultErrors();
 app.UseHttpsRedirection();
 
-// Bật Swagger cho mọi môi trường (kể cả Production khi chạy Docker)
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
@@ -85,6 +117,9 @@ app.UseRouting();
 app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.UseRateLimiter();
+
 app.MapControllers();
+
 app.Run();
