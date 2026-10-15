@@ -14,6 +14,5 @@ public class UploadDocumentInput
     [Required]
     public IFormFile File { get; set; } = null!;
 
-    [Required]
-    public int SignerId { get; set; }
+    
 }
