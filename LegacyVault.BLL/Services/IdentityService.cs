@@ -4,11 +4,67 @@ using System.ComponentModel.DataAnnotations;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
+using System.Security.Cryptography;
+using Microsoft.EntityFrameworkCore;
 
 namespace LegacyVault.BLL.Services;
 
+
+
 public sealed class IdentityService(IVaultRepository repository)
 {
+
+    public async Task<TokenDto> RefreshAccessTokenAsync(string refreshTokenStr, IAccessTokenIssuer issuer, CancellationToken ct)
+    {
+        var token = await repository.GetRefreshTokenAsync(refreshTokenStr, ct);
+        if (token is null || token.IsRevoked || token.ExpiresAt <= DateTime.UtcNow)
+        {
+            throw new WorkflowException(401, "Refresh Token không hợp lệ hoặc đã hết hạn.");
+        }
+
+        var user = await repository.User(token.UserId, ct);
+        if (user is null || user.Status != "Active")
+        {
+            throw new WorkflowException(401, "Tài khoản không khả dụng.");
+        }
+
+        // Revoke token cũ (Token Rotation)
+        token.IsRevoked = true;
+
+        // Tạo Refresh Token mới
+        var newRefreshTokenStr = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+        var newRefreshToken = new RefreshToken
+        {
+            UserId = user.UserId,
+            Token = newRefreshTokenStr,
+            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            CreatedAt = DateTime.UtcNow,
+            IsRevoked = false
+        };
+
+        repository.Add(newRefreshToken);
+        await repository.Save(ct);
+
+        // Phát hành AccessToken mới
+        var loginDto = new LoginDto(user.UserId, user.Roles.Select(r => r.RoleName).ToArray());
+        var tokenResult = issuer.Issue(loginDto);
+
+        return tokenResult with
+        {
+            RefreshToken = newRefreshTokenStr,
+            RefreshTokenExpiresAt = newRefreshToken.ExpiresAt
+        };
+    }
+
+    public async Task RevokeRefreshTokenAsync(string refreshTokenStr, CancellationToken ct)
+    {
+        var token = await repository.GetRefreshTokenAsync(refreshTokenStr, ct);
+        if (token is not null)
+        {
+            token.IsRevoked = true;
+            await repository.Save(ct);
+        }
+    }
     private static readonly Lazy<string> UnavailableAccountHash = new(() => HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))));
     public static string HashPassword(string password)
     {
