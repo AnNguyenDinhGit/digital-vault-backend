@@ -21,7 +21,11 @@ public sealed record GoogleOtpInput(
 public sealed record GoogleResendInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId);
 
 [ApiController, Route("api/auth/google")]
-public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp otp, IdentityService identity, PasswordAuthenticationService authentication) : ControllerBase
+public sealed class GoogleAuthController(
+    GoogleOptions options,
+    GoogleLoginOtp otp,
+    IdentityService identity,
+    PasswordAuthenticationService authentication) : ControllerBase
 {
     private string Browser => Request.Cookies[GoogleAuthentication.BrowserCookie] ?? "";
 
@@ -54,6 +58,7 @@ public sealed class GoogleAuthController(GoogleOptions options, GoogleLoginOtp o
             <a href="/swagger">Mở Swagger</a></html>
             """, "text/html; charset=utf-8");
     }
+
     [HttpGet("challenge"), EnableRateLimiting("otp")]
     public Task<OtpChallenge> ChallengeState(CancellationToken ct) =>
         otp.Current(Browser, Request.Cookies[GoogleAuthentication.ChallengeCookie] ?? "", ct);
