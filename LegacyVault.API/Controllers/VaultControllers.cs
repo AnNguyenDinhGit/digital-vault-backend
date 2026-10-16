@@ -136,7 +136,11 @@ public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] s
 public sealed record LoginInput([Required, EmailAddress, StringLength(150)] string Email, [Required, StringLength(1024)] string Password);
 
 [ApiController, Route("api/auth")]
-public sealed class AuthController(IdentityService identity, OtpService otp, PasswordAuthenticationService authentication, IAccessTokenIssuer issuer) : VaultController
+public sealed class AuthController(
+    IdentityService identity,
+    OtpService otp,
+    PasswordAuthenticationService authentication,
+    IAccessTokenIssuer issuer) : VaultController
 {
     [HttpPost("register"), EnableRateLimiting("login")]
     [ProducesResponseType(typeof(RegistrationDto), StatusCodes.Status201Created)]
@@ -156,6 +160,7 @@ public sealed class AuthController(IdentityService identity, OtpService otp, Pas
     }
 
     [HttpPost("refresh-token")]
+    [ProducesResponseType(typeof(TokenDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<TokenDto>> RefreshToken([FromBody] RefreshTokenInput input, CancellationToken ct)
     {
         var result = await identity.RefreshAccessTokenAsync(input.RefreshToken, issuer, ct);
@@ -163,13 +168,17 @@ public sealed class AuthController(IdentityService identity, OtpService otp, Pas
     }
 
     [HttpPost("2fa/verify"), EnableRateLimiting("otp")]
-    public async Task<TokenDto> VerifyFactor(FactorInput input, CancellationToken ct) => await authentication.Verify(input, ct);
+    [ProducesResponseType(typeof(TokenDto), StatusCodes.Status200OK)]
+    public async Task<TokenDto> VerifyFactor(FactorInput input, CancellationToken ct) =>
+        await authentication.Verify(input, ct);
 
     [HttpPost("2fa/resend"), EnableRateLimiting("otp")]
-    public Task<LoginChallengeDto> ResendFactor(FactorResendInput input, CancellationToken ct) => authentication.Resend(input, ct);
+    public Task<LoginChallengeDto> ResendFactor(FactorResendInput input, CancellationToken ct) =>
+        authentication.Resend(input, ct);
 
     [Authorize, HttpGet("me")]
-    public Task<MeDto> Me(CancellationToken ct) => identity.Me(UserId, ct);
+    public Task<MeDto> Me(CancellationToken ct) =>
+        identity.Me(UserId, ct);
 
     [Authorize, HttpPost("logout")]
     public async Task<IActionResult> Logout([FromBody] RefreshTokenInput? input, CancellationToken ct)

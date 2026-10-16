@@ -1,19 +1,45 @@
-
-using System.Security.Cryptography;
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
-using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
 
 namespace LegacyVault.BLL.Services;
 
-
-
 public sealed class IdentityService(IVaultRepository repository)
 {
+    /// <summary>
+    /// Phát hành cả AccessToken và RefreshToken (lưu vào DB) cho người dùng sau khi xác thực thành công.
+    /// </summary>
+    public async Task<TokenDto> GenerateAuthResponseAsync(User user, IAccessTokenIssuer issuer, CancellationToken ct)
+    {
+        var loginDto = new LoginDto(user.UserId, user.Roles.Select(r => r.RoleName).ToArray());
+        var tokenResult = issuer.Issue(loginDto);
 
+        var refreshTokenStr = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+        var refreshToken = new RefreshToken
+        {
+            UserId = user.UserId,
+            Token = refreshTokenStr,
+            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            CreatedAt = DateTime.UtcNow,
+            IsRevoked = false
+        };
+
+        repository.Add(refreshToken);
+        await repository.Save(ct);
+
+        return tokenResult with
+        {
+            RefreshToken = refreshTokenStr,
+            RefreshTokenExpiresAt = refreshToken.ExpiresAt
+        };
+    }
+
+    /// <summary>
+    /// Xoay vòng (Rotate) Refresh Token khi cấp lại Access Token mới.
+    /// </summary>
     public async Task<TokenDto> RefreshAccessTokenAsync(string refreshTokenStr, IAccessTokenIssuer issuer, CancellationToken ct)
     {
         var token = await repository.GetRefreshTokenAsync(refreshTokenStr, ct);
@@ -30,6 +56,7 @@ public sealed class IdentityService(IVaultRepository repository)
 
         // Revoke token cũ (Token Rotation)
         token.IsRevoked = true;
+        token.UpdatedAt = DateTime.UtcNow;
 
         // Tạo Refresh Token mới
         var newRefreshTokenStr = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
@@ -56,16 +83,22 @@ public sealed class IdentityService(IVaultRepository repository)
         };
     }
 
+    /// <summary>
+    /// Thu hồi Refresh Token khi Logout.
+    /// </summary>
     public async Task RevokeRefreshTokenAsync(string refreshTokenStr, CancellationToken ct)
     {
         var token = await repository.GetRefreshTokenAsync(refreshTokenStr, ct);
-        if (token is not null)
+        if (token is not null && !token.IsRevoked)
         {
             token.IsRevoked = true;
+            token.UpdatedAt = DateTime.UtcNow;
             await repository.Save(ct);
         }
     }
+
     private static readonly Lazy<string> UnavailableAccountHash = new(() => HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))));
+
     public static string HashPassword(string password)
     {
         var salt = RandomNumberGenerator.GetBytes(16);
@@ -274,6 +307,7 @@ public sealed class IdentityService(IVaultRepository repository)
         if (user.TwoFactorAuths.Any(x => x.IsEnabled)) throw new WorkflowException(409, "Two-factor authentication required.");
         return await CompleteLogin(login.UserId, false, ct);
     }
+
     public async Task<LoginDto> CheckPassword(string email, string password, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(email) || email.Length > 150 || string.IsNullOrEmpty(password) || password.Length > 1024)
@@ -297,7 +331,8 @@ public sealed class IdentityService(IVaultRepository repository)
                 401,
                 "Invalid credentials or account unavailable.");
         }
-        auth.FailedLoginCount = 0; auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
+        auth.FailedLoginCount = 0;
+        auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
         await repository.Save(ct);
 
         return new LoginDto(
@@ -324,6 +359,7 @@ public sealed class IdentityService(IVaultRepository repository)
 
         return user.Email;
     }
+
     public async Task<MeDto> Me(int userId, CancellationToken ct)
     {
         var user = await repository.User(userId, ct);
@@ -346,8 +382,15 @@ public sealed class IdentityService(IVaultRepository repository)
             auth.FailedLoginCount = 0;
             auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
         }
-        repository.Add(new AuditLog { UserId = userId, Action = google ? "GoogleLogin" : "PasswordLogin", EntityType = "User",
-            EntityId = userId, Timestamp = DateTime.UtcNow, Result = "Success" });
+        repository.Add(new AuditLog
+        {
+            UserId = userId,
+            Action = google ? "GoogleLogin" : "PasswordLogin",
+            EntityType = "User",
+            EntityId = userId,
+            Timestamp = DateTime.UtcNow,
+            Result = "Success"
+        });
         await repository.Save(ct);
         return new(user.UserId, user.Roles.Select(x => x.RoleName).ToArray());
     }
@@ -359,9 +402,7 @@ public sealed class IdentityService(IVaultRepository repository)
             throw new WorkflowException(403, "This account cannot use public Google sign-in.");
     }
 
-    // Google Login - merged from branch dung
-    // verifiedEmail must come from a Google token
-    // that has already been validated by the backend.
+    // Google Login
     public async Task<LoginDto> GoogleLogin(
         string verifiedEmail,
         string fullName,
@@ -379,8 +420,7 @@ public sealed class IdentityService(IVaultRepository repository)
 
         var user = await repository.LoginUser(email, ct);
 
-        // Create new account if Google email
-        // does not exist in database
+        // Create new account if Google email does not exist in database
         if (user is null)
         {
             var name = fullName.Trim();
@@ -406,8 +446,6 @@ public sealed class IdentityService(IVaultRepository repository)
                 UpdatedAt = now
             };
 
-            // Google accounts do not require a password.
-            // Assign Owner role automatically.
             try
             {
                 await repository.Register(
@@ -422,6 +460,7 @@ public sealed class IdentityService(IVaultRepository repository)
                     "Email was registered concurrently. Start Google sign-in again.");
             }
         }
+
         RequireGoogleAccount(user);
         return new LoginDto(user.UserId, user.Roles.Select(x => x.RoleName).ToArray());
     }

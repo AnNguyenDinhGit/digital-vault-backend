@@ -63,6 +63,26 @@ public partial class LegacyVaultDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        base.OnModelCreating(modelBuilder);
+
+        // Cấu hình RefreshToken
+        modelBuilder.Entity<RefreshToken>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            // Tạo Index cho Token để tăng tốc truy vấn khi Refresh
+            entity.HasIndex(e => e.Token).IsUnique();
+
+            entity.Property(e => e.Token)
+                  .IsRequired()
+                  .HasMaxLength(500);
+
+            // Thiết lập mối quan hệ với User
+            entity.HasOne(e => e.User)
+                  .WithMany()
+                  .HasForeignKey(e => e.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
         modelBuilder.Entity<AssetDocument>(entity =>
         {
             entity.HasKey(e => e.DocumentId);
