@@ -9,7 +9,7 @@ public sealed class SecurityOptions
     public Dictionary<int, string> SignerCertificates { get; set; } = new();
     public List<string> TrustedRootCertificates { get; set; } = new();
 }
-public sealed record ProtectedDocument(UploadFile File, int SignerId, byte[]? Signature);
+public sealed record ProtectedDocument(UploadFile File, int SignerId, byte[]? Signature, string? Purpose = null);
 public sealed class DocumentProtection(SecurityOptions options)
 {
     public bool Verify(byte[] content, byte[]? signature, int signer)

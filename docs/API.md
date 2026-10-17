@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # LegacyVault API
 
 Contract hiện tại: **JWT Bearer**, API → BLL → DAL. Danh sách method/path/role, DTO, multipart, status codes, pagination và giới hạn được cập nhật đầy đủ tại [Frontend-JWT-integration.md](Frontend-JWT-integration.md).
@@ -15,9 +19,16 @@ Contract hiện tại: **JWT Bearer**, API → BLL → DAL. Danh sách method/pa
 - POST `/api/auth/google/otp/resend`: cookie tạm Google + X-Vault-Request: 1, challengeId mới.
 - GET `/api/auth/google/challenge`: lấy challengeId/expiry dạng JSON cho frontend, cookie-bound; không token trong URL.
 
+## Tài liệu Owner và hồ sơ Executor
+
+- POST `/api/owner/assets/{assetId}/documents`: File + Signature, BeneficiaryId tùy chọn; không gửi OwnerAlive/DeathCertificate.
+- GET `/api/executor/assignments`: phân công hiện có của Executor.
+- POST `/api/executor/assignments/{vaultId}/handovers`: Executor được phân công khởi tạo Draft nếu chưa có hồ sơ bảo vệ.
+- POST `/api/executor/handovers/{requestId}/death-certificate`: chỉ assigned Executor, File + Signature tùy chọn; lưu HANDOVER_DOCUMENTS trước khi nộp pháp lý.
+
 ## Nghiệp vụ
 
-Owner có kho/tài sản/phân bổ/giấy tờ create/list/detail/update/close hoặc revoke, chỉ định Executor, tạo/cancel bàn giao. Executor và Staff chỉ xử lý hồ sơ được giao; Staff intake không thay Executor. LegalVerifier có list/detail/download/approve/reject/additional information. Beneficiary có OTP, di sản, hồ sơ, documents và receipt. Notifications chỉ của User hiện tại.
+Owner có kho/tài sản/phân bổ/giấy tờ create/list/detail/update/close hoặc revoke, chỉ định Executor và tạo/cancel bàn giao. Chỉ Executor được phân công xử lý hồ sơ; không còn intake hoặc fallback Staff. LegalVerifier xem/tải và thẩm định hồ sơ được giao. Beneficiary có OTP, di sản và receipt; notifications chỉ của chính mình. Xem [contract mới](Executor-evidence-update.md).
 
 Các endpoint cũ được tái sử dụng; list cũ giữ mảng, list workflow mới dùng PageDto. API nghiệp vụ không cần X-Vault-Request; chỉ Google cookie-bound POST cần header. Swagger hỗ trợ Authorize Bearer.
 

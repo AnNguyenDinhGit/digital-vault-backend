@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](docs/Executor-evidence-update.md)
+
 # LegacyVault / DigitalVault backend
 
 ASP.NET Core .NET 8, EF Core SQL Server, API → BLL → DAL. API nghiệp vụ dùng JWT Bearer; Google chỉ giữ cookies tạm để xác minh Google/OTP.
@@ -6,8 +10,8 @@ ASP.NET Core .NET 8, EF Core SQL Server, API → BLL → DAL. API nghiệp vụ 
 
 - Đăng ký Owner, password login có 2FA Email/TOTP, Google OIDC + OTP, JWT và `/api/auth/me`.
 - Owner tạo/xem/sửa/đóng kho; tạo/xem/sửa/thu hồi tài sản; phân bổ/create/update/revoke và giấy tờ mã hóa/upload/list/download/revoke.
-- Tạo/cancel hồ sơ bàn giao, chỉ định hoặc tự chọn Executor độc lập. Staff tiếp nhận kho đủ tiêu chí atomically, không thay Executor hợp lệ.
-- Executor/Staff xử lý đúng hồ sơ được giao; LegalVerifier xem tài liệu và approve/reject/request-additional-information; Beneficiary xác minh OTP, xem di sản và confirm receipt.
+- Tạo/cancel hồ sơ bàn giao; giữ Executor chỉ định hoặc random đúng tập Executor đủ điều kiện khi tạo Draft.
+- Executor xử lý đúng hồ sơ được giao; LegalVerifier xem tài liệu và approve/reject/request-additional-information; Beneficiary xác minh OTP, xem di sản và confirm receipt.
 - Notifications/audit lưu trong bảng hiện có; không trả EF entities, storage path hoặc secrets.
 
 ## Chạy và tích hợp
@@ -27,10 +31,10 @@ Console test harness, không `dotnet test`. `appsettings.json` là cấu hình m
 - [Contract login hoàn thiện và giới hạn triển khai](docs/Backend-login.md)
 - [HTTP collection](LegacyVault.http)
 - [Trạng thái và giới hạn](docs/Trang-thai-chuc-nang.md)
-- [Báo cáo bàn giao và 256 kiểm tra](docs/Backend-JWT-handover.md)
+- [Báo cáo bàn giao backend](docs/Backend-JWT-handover.md)
 
 Không có refresh token hoặc invitation persistence phù hợp; JWT hết hạn phải login lại. Logout chỉ kết thúc OTP grant và yêu cầu client bỏ token, không tuyên bố revoke JWT. Google nhận diện theo email, không lưu sub. Challenge/OTP/replay tracking nằm trong bộ nhớ một instance.
 
-Database SELECT audit đã đối chiếu tên cột của 25 bảng; ExecutorId bắt buộc int và Description kho tối đa 500. Đây chưa xác minh toàn bộ schema/SQL Server concurrency. Tests dùng SQLite relational và provider/SMTP giả lập; Google/SMTP thật, chứng thư production chưa được kiểm chứng. Role Staff chưa được thêm vào database thật: script `database/ensure-staff-role.sql` dành cho quản trị viên chạy rõ ràng, không tự gán User.
+Role Staff đã loại khỏi nghiệp vụ; không seed/xóa/chuyển dữ liệu thật. Xem [audit Staff cũ](database/review-legacy-staff.sql).
 
 File người dùng `docs/Danh-sach-API-da-lam.md` được giữ nguyên; tham khảo contract JWT mới ở trên để tránh dùng hướng dẫn cookie cũ.

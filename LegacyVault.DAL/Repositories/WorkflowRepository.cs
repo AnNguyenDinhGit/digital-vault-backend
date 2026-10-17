@@ -10,14 +10,17 @@ public interface IWorkflowRepository
     Task<DigitalAsset?> AssetGraph(int id, CancellationToken ct);
     Task<HandoverRequest?> RequestGraph(int id, CancellationToken ct);
     Task<List<HandoverRequest>> UserRequests(int user, string kind, int page, int size, string? status, CancellationToken ct);
-    Task<List<DigitalVault>> IntakeVaults(int page, int size, CancellationToken ct);
     Task<List<HandoverCase>> BeneficiaryCases(int user, int page, int size, CancellationToken ct);
     Task<HandoverCase?> Case(int id, CancellationToken ct);
     Task<List<Notification>> Notifications(int user, int page, int size, CancellationToken ct);
     Task<Notification?> Notification(int user, int id, CancellationToken ct);
+    Task<List<ExecutorAssignment>> ExecutorAssignments(int user, CancellationToken ct);
 }
 public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepository
 {
+    public Task<List<ExecutorAssignment>> ExecutorAssignments(int user, CancellationToken ct) => db.ExecutorAssignments.AsNoTracking()
+        .Where(a => a.ExecutorId == user && (a.Status == "Active" || a.Status == "AutoAssigned"))
+        .OrderByDescending(a => a.AssignedAt).ToListAsync(ct);
     private IQueryable<DigitalVault> Vaults => db.DigitalVaults.Include(v => v.Owner).Include(v => v.ExecutorAssignments).ThenInclude(a => a.Executor).ThenInclude(u => u.Roles)
         .Include(v => v.HandoverRequests).Include(v => v.DigitalAssets).ThenInclude(a => a.AssetDocuments)
         .Include(v => v.DigitalAssets).ThenInclude(a => a.BeneficiaryAssignments).ThenInclude(b => b.Beneficiary).AsSplitQuery();
@@ -39,10 +42,6 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
         if (status is not null) query = query.Where(r => r.Status == status);
         return query.OrderByDescending(r => r.RequestId).Skip((page - 1) * size).Take(size).ToListAsync(ct);
     }
-    public Task<List<DigitalVault>> IntakeVaults(int page, int size, CancellationToken ct) => Vaults.Where(v => v.Status == "Active" &&
-        !v.ExecutorAssignments.Any(a => a.Status == "Active" || a.Status == "AutoAssigned") && !v.HandoverRequests.Any(r => r.Status != "Cancelled") &&
-        v.DigitalAssets.Any(a => a.Status == "Active" && a.AssetDocuments.Any(d => d.Status == "Pending_Legal")))
-        .OrderBy(v => v.VaultId).Skip((page - 1) * size).Take(size).ToListAsync(ct);
     private IQueryable<HandoverCase> Cases => db.HandoverCases.Include(c => c.Request).ThenInclude(r => r.Vault)
         .Include(c => c.Request).ThenInclude(r => r.LegalVerifications).Include(c => c.Request).ThenInclude(r => r.HandoverDocuments)
         .Include(c => c.Assignment).ThenInclude(a => a.Asset).ThenInclude(a => a.AssetDocuments).Include(c => c.BeneficiaryReceipts).AsSplitQuery();

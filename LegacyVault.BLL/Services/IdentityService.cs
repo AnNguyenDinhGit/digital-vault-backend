@@ -299,7 +299,7 @@ public sealed class IdentityService(IVaultRepository repository)
     public static void RequireGoogleAccount(User user)
     {
         if (user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow) ||
-            user.Roles.Any(x => x.RoleName is VaultService.AdminRole or VaultService.ExecutorRole or VaultService.VerifierRole or ManagementService.StaffRole))
+            user.Roles.Any(x => x.RoleName is not (VaultService.OwnerRole or VaultService.BeneficiaryRole)))
             throw new WorkflowException(403, "This account cannot use public Google sign-in.");
     }
 

@@ -68,22 +68,23 @@ var wrong = actual == "000000" ? "000001" : "000000";
 for (var i = 0; i < 5; i++) await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, wrong); return Task.CompletedTask; }, 400, $"OTP failed attempt {i + 1}");
 await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, actual); return Task.CompletedTask; }, 400, "OTP attempt limit cannot be bypassed with valid code");
 
-var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, protection);
+var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, signedProtection);
 await Reject(() => service.OwnerAsset(2, 10, default), 404, "other owner cannot read asset");
 await Reject(() => service.OwnerAsset(3, 10, default), 403, "beneficiary cannot use owner APIs");
-await Reject(() => service.UploadOwnerDocument(1, 10, 3, true, file, null, null, default), 400, "living owner must supply verified signature");
-await Reject(() => service.UploadOwnerDocument(1, 10, 3, false, file, null, null, default), 400, "deceased branch requires death certificate");
+await Reject(() => service.UploadOwnerDocument(1, 10, null, file, null, default), 400, "owner must supply verified signature without any death declaration");
 Check(store.Files.Count == 0 && repo.Added.Count == 0, "rejected uploads write no files or records");
-var uploaded = await service.UploadOwnerDocument(1, 10, 3, false, file, null, file, default);
-Check(uploaded.IsEncrypted && store.Files.Count == 2 && repo.Added.OfType<AssetDocument>().All(x => x.Status == "Pending_Legal"), "deceased documents remain encrypted and pending legal verification");
+var uploaded = await service.UploadOwnerDocument(1, 10, null, file, signature, default);
+Check(uploaded.IsEncrypted && store.Files.Count == 1 && repo.Added.OfType<AssetDocument>().All(x => x.Status == "Active"), "owner uploads signed asset document without death certificate or beneficiary");
 repo.FailSave = true;
 var count = store.Files.Count;
-try { await service.UploadOwnerDocument(1, 10, 3, false, file, null, file, default); throw new Exception("Expected save failure"); }
+try { await service.UploadOwnerDocument(1, 10, null, file, signature, default); throw new Exception("Expected save failure"); }
 catch (RepositoryConflictException) { Check(store.Files.Count == count, "failed database save removes newly stored files"); }
 repo.FailSave = false;
 await Reject(() => service.Complete(6, 20, file, new byte[256], default), 409, "draft handover cannot be completed");
 await Reject(() => service.Request(7, 20, default), 404, "another executor cannot inspect handover");
 await Reject(() => service.RequestLegal(6, 20, 3, null, file, default), 403, "legal request requires verifier role");
+await service.UploadDeathCertificate(6, 20, file, null, default);
+repo.Handover.HandoverDocuments.Add(repo.Added.OfType<HandoverDocument>().Last());
 var verification = await service.RequestLegal(6, 20, 8, "Evidence attached", file, default);
 Check(repo.Handover.Status == "Pending_Legal" && repo.Added.OfType<LegalVerification>().Any(), "legal submission changes status and persists evidence together");
 await Reject(() => service.RequestLegal(6, 20, 8, null, file, default), 409, "duplicate legal submission rejected");
@@ -91,7 +92,7 @@ repo.Handover.Status = "Approved";
 await Reject(() => service.Complete(6, 20, file, new byte[256], default), 409, "completion requires approved legal verification and cases");
 var signedRepo = new FakeRepository(); var signedStore = new FakeStore();
 var signedService = new VaultService(signedRepo, signedStore, signedProtection);
-var signedUpload = await signedService.UploadOwnerDocument(1, 10, 3, true, file, signature, null, default);
+var signedUpload = await signedService.UploadOwnerDocument(1, 10, null, file, signature, default);
 Check(signedUpload.IsEncrypted && signedRepo.Added.OfType<AssetDocument>().Single().Status == "Active", "signed living-owner upload accepted");
 signedRepo.Handover.Status = "Approved";
 signedRepo.Handover.LegalVerifications.Add(new LegalVerification { Status = "Approved" });

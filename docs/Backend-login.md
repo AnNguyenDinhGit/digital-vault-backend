@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # Backend login: contract và kiểm chứng
 
 Backend dùng JWT Bearer, API → BLL → DAL. Không sửa frontend hoặc thêm bảng/cột/chạy migration. `JwtTokenIssuer` là implementation cấp JWT duy nhất; bỏ service JWT cũ không có caller vì dùng cấu hình khác.
@@ -56,7 +60,7 @@ Lỗi nghiệp vụ trả `{status,detail}`. Validation tự động của ASP.N
 - Đúng một factor enabled: Email hoặc TOTP Base32/SHA1/6 số/30 giây, cửa sổ ±1. Method khác/nhiều factor enabled trả 503; không bỏ qua.
 - Challenge 5 phút, tối đa 5 lần thử, dùng một lần. Resend Email chờ 60 giây, hủy challenge cũ. TOTP từ authenticator, không resend. Hết hạn/hết lượt phải login lại.
 - Challenge gắn với email, password records và factor configuration; thay đổi khiến verify/resend trả 409. Đọc lại Active/locked và quyền Google trước khi cấp token.
-- Google xác minh state, nonce, PKCE, chữ ký RS256, issuer, audience, expiration, email_verified. OTP email bắt buộc trước khi tạo Owner mới; không tạo password giả. Admin/Executor/Staff/LegalVerifier không dùng Google công khai, kể cả vừa được cấp role trong lúc chờ 2FA.
+- Google xác minh state, nonce, PKCE, chữ ký RS256, issuer, audience, expiration, email_verified. OTP email bắt buộc trước khi tạo Owner mới; không tạo password giả. Admin/Executor/LegalVerifier không dùng Google công khai, kể cả vừa được cấp role trong lúc chờ 2FA.
 - LastLoginAt và AUDIT_LOGS thành công chỉ lưu sau khi đủ factor, trước khi cấp token. Không lưu password/OTP/JWT trong audit. SMTP thất bại/timeout 30 giây trả 503, không báo thành công.
 - Mỗi Bearer request đọc lại trạng thái, khóa và roles; JWT cũ không giữ role bị thu hồi.
 

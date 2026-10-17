@@ -38,10 +38,8 @@ public abstract class VaultController : ControllerBase
 public sealed class OwnerUploadForm
 {
     [Required] public IFormFile File { get; set; } = null!;
-    public IFormFile? Signature { get; set; }
-    public IFormFile? DeathCertificate { get; set; }
-    [Range(1, int.MaxValue)] public int BeneficiaryId { get; set; }
-    [Required] public bool? OwnerAlive { get; set; }
+    [Required] public IFormFile Signature { get; set; } = null!;
+    [Range(1, int.MaxValue)] public int? BeneficiaryId { get; set; }
 }
 public sealed class CompletionForm
 {
@@ -86,16 +84,23 @@ public sealed class OwnerController(VaultService service) : VaultController
     [ProducesResponseType(typeof(BeneficiaryDto), StatusCodes.Status201Created)]
     public async Task<ActionResult<BeneficiaryDto>> AssignBeneficiary(int assetId, AssignBeneficiaryInput input, CancellationToken ct) =>
         StatusCode(StatusCodes.Status201Created, await service.AssignBeneficiary(UserId, assetId, input, ct));
-    [HttpPost("assets/{assetId:int}/documents"), RequestSizeLimit(22 * 1024 * 1024)]
-    public async Task<ActionResult<DocumentDto>> Upload(int assetId, [FromForm] OwnerUploadForm form, CancellationToken ct) =>
-        Ok(await service.UploadOwnerDocument(UserId, assetId, form.BeneficiaryId, form.OwnerAlive!.Value,
-            await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct),
-            form.DeathCertificate is null ? null : await ReadUpload(form.DeathCertificate, ct), ct));
+    [HttpPost("assets/{assetId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<ActionResult<DocumentDto>> Upload(int assetId, [FromForm] OwnerUploadForm form, CancellationToken ct)
+    {
+        var fields = await Request.ReadFormAsync(ct);
+        if (fields.Keys.Concat(fields.Files.Select(f => f.Name)).Any(k => !new[] { "File", "Signature", "BeneficiaryId" }.Contains(k, StringComparer.OrdinalIgnoreCase)))
+            throw new WorkflowException(400, "Only File, Signature and optional BeneficiaryId are accepted. Legal evidence belongs to the assigned Executor's handover.");
+        return Ok(await service.UploadOwnerDocument(UserId, assetId, form.BeneficiaryId,
+            await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct));
+    }
 }
 
 [ApiController, Authorize, Route("api/executor/handovers")]
 public sealed class ExecutorController(VaultService service) : VaultController
 {
+    [HttpPost("{requestId:int}/death-certificate"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<DocumentDto> DeathCertificate(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) =>
+        await service.UploadDeathCertificate(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
     [HttpGet] public Task<IReadOnlyList<HandoverDto>> Requests(CancellationToken ct) => service.Requests(UserId, ct);
     [HttpGet("{requestId:int}")] public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.Request(UserId, requestId, ct);
     [HttpGet("{requestId:int}/documents/{documentId:int}/content")]
