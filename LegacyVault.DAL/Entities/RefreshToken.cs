@@ -15,5 +15,9 @@ namespace LegacyVault.DAL.Entities
         public bool IsRevoked { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public string? ReplacedByToken { get; set; }
+
+        public DateTime? UpdatedAt { get; set; }
+        // Navigation property
+        public virtual User User { get; set; } = null!;
     }
 }

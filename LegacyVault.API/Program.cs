@@ -1,15 +1,15 @@
-using LegacyVault.DAL.Context;
-using Microsoft.EntityFrameworkCore;
+using System.Threading.RateLimiting;
+using LegacyVault.API.Authentication;
 using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Interfaces;
 using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
+using LegacyVault.DAL.Context;
 using LegacyVault.DAL.Repositories;
 using LegacyVault.DAL.Storage;
-using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
-using LegacyVault.API.Authentication;
-using LegacyVault.BLL.Interfaces;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,7 +29,6 @@ builder.Services.AddSwaggerGen(options =>
         Description = "Login returns a Bearer accessToken, or 202 with a mandatory 2FA challenge. Use Authorize with the JWT. Google uses temporary browser cookies only until OTP completes."
     });
 
-    // Thêm cấu hình nút Authorize trên Swagger UI
     options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
@@ -62,8 +61,12 @@ var cookieKeys = builder.Services.AddDataProtection()
     .SetApplicationName("LegacyVault")
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "auth-keys")));
 
-if (OperatingSystem.IsWindows()) cookieKeys.ProtectKeysWithDpapi();
+if (OperatingSystem.IsWindows())
+{
+    cookieKeys.ProtectKeysWithDpapi();
+}
 
+// 3. Đăng ký Repositories & Business Services
 builder.Services.AddScoped<IVaultRepository, VaultRepository>();
 builder.Services.AddScoped<VaultService>();
 builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
@@ -77,31 +80,63 @@ builder.Services.AddSingleton<DocumentProtection>();
 builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>();
 builder.Services.AddSingleton<OtpService>();
 builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
+
 builder.Services.AddVaultJwt(builder.Configuration);
-builder.Services.AddAuthentication().AddCookie("GoogleTemporary", options => { options.Cookie.SecurePolicy = CookieSecurePolicy.Always; });
+builder.Services.AddAuthentication().AddCookie("GoogleTemporary", options =>
+{
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+});
 builder.Services.AddAuthorization();
 builder.Services.AddGoogleEmailAuthentication(builder.Configuration);
 builder.Services.AddVaultCors(builder.Configuration);
+
+// 4. Rate Limiter Configuration
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
     foreach (var policy in new[] { "login", "otp" })
-        options.AddPolicy(policy, ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+    {
+        options.AddPolicy(policy, ctx => RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+    }
 });
 
+// 5. Database Context Configuration
 builder.Services.AddDbContext<LegacyVaultDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("LegacyVault");
     if (string.IsNullOrWhiteSpace(connectionString))
     {
-        throw new WorkflowException(503,
-            "Missing ConnectionStrings:LegacyVault. Configure User Secrets or ConnectionStrings__LegacyVault.");
+        throw new WorkflowException(503, "Missing ConnectionStrings:LegacyVault. Configure User Secrets or ConnectionStrings__LegacyVault.");
     }
     options.UseSqlServer(connectionString);
 });
 
+// =========================================================================
+// BỔ SUNG: Rào chắn kiểm tra Secret Key trước khi Build App
+// =========================================================================
+var encKey = builder.Configuration["Security:EncryptionKey"];
+var jwtKey = builder.Configuration["Jwt:SigningKey"];
+
+if (string.IsNullOrWhiteSpace(encKey) || System.Text.Encoding.UTF8.GetBytes(encKey).Length < 32)
+{
+    throw new InvalidOperationException("CRITICAL: Cấu hình 'Security:EncryptionKey' phải có độ dài tối thiểu 32 bytes (256-bit).");
+}
+
+if (string.IsNullOrWhiteSpace(jwtKey) || System.Text.Encoding.UTF8.GetBytes(jwtKey).Length < 32)
+{
+    throw new InvalidOperationException("CRITICAL: Cấu hình 'Jwt:SigningKey' phải có độ dài tối thiểu 32 bytes.");
+}
+
+// Build App
 var app = builder.Build();
+
 app.UseVaultErrors();
 app.UseHttpsRedirection();
 

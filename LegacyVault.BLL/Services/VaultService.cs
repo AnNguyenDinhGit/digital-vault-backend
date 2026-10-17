@@ -9,8 +9,6 @@ namespace LegacyVault.BLL.Services;
 
 public sealed class VaultService(IVaultRepository repository, IDocumentStore store, DocumentProtection protection, IWorkflowRepository? workflow = null)
 {
-
-
     public const string OwnerRole = "Owner";
     public const string ExecutorRole = "Executor";
     public const string BeneficiaryRole = "Beneficiary";
@@ -24,24 +22,30 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
             throw new WorkflowException(403, "The active user does not have the required role.");
         return user;
     }
+
     private static AssetDto Map(DigitalAsset a) => new(a.AssetId, a.AssetName, a.AssetType, a.Description, a.Status,
         a.AssetDocuments.Where(d => d.Status == "Active").Select(d => new DocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray());
+
     private static VaultDto Map(DigitalVault v) => new(v.VaultId, v.VaultName, v.Description, v.Status);
+
     private static void ValidateInput(object input)
     {
         if (!Validator.TryValidateObject(input, new ValidationContext(input), new List<ValidationResult>(), true))
             throw new WorkflowException(400, "Invalid request input.");
     }
+
     private static void Editable(DigitalVault vault)
     {
         if (vault.HandoverRequests.Any(r => r.Status != "Cancelled")) throw new WorkflowException(409, "Handover records protect this vault from mutation.");
     }
+
     private async Task OperatorRole(int user, CancellationToken ct)
     {
         var account = await repository.User(user, ct);
         if (account is null || account.Status != "Active" || account.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) || !account.Roles.Any(r => r.RoleName == ExecutorRole))
             throw new WorkflowException(403, "Active Executor role required.");
     }
+
     private async Task<DigitalVault> OwnedVault(int user, int vault, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
@@ -49,12 +53,15 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         if (v is null || v.OwnerId != user) throw new WorkflowException(404, "Vault not found.");
         return v;
     }
+
     public async Task<IReadOnlyList<VaultDto>> OwnerVaults(int user, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
         return (await repository.OwnerVaults(user, ct)).Select(Map).ToArray();
     }
+
     public async Task<VaultDto> OwnerVault(int user, int vault, CancellationToken ct) => Map(await OwnedVault(user, vault, ct));
+
     public async Task<VaultDto> CreateVault(int user, CreateVaultInput input, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
@@ -62,11 +69,11 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var now = DateTime.UtcNow;
         var vault = new DigitalVault { OwnerId = user, VaultName = input.Name.Trim(), Description = input.Description?.Trim(), Status = "Active", CreatedAt = now, UpdatedAt = now };
         repository.Add(vault);
-        // New identity is generated at save; nullable EntityId is intentional, not a fabricated ID.
         repository.Add(new AuditLog { UserId = user, Action = "CreateVault", EntityType = "DigitalVault", EntityId = null, Result = "Success", Timestamp = now });
         await repository.Save(ct);
         return Map(vault);
     }
+
     public async Task<AssetDto> CreateAsset(int user, CreateAssetInput input, CancellationToken ct)
     {
         ValidateInput(input);
@@ -80,9 +87,11 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         await repository.Save(ct);
         return Map(asset);
     }
+
     private static HandoverDto Map(HandoverRequest r) => new(r.RequestId, r.VaultId, r.RequestType, r.Status, r.InitiatedAt,
         r.HandoverDocuments.Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray(),
         r.HandoverCases.Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)).ToArray());
+
     private async Task<DigitalAsset> Owned(int user, int asset, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
@@ -107,18 +116,22 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         if (requestType != "Inheritance") throw new WorkflowException(400, "Only Inheritance request type is supported.");
         return await new ManagementService(repository, workflow ?? throw new WorkflowException(503, "Workflow persistence is not configured."), store, protection).CreateRequest(user, vaultId, ct);
     }
+
     public async Task<IReadOnlyList<AssetDto>> OwnerAssets(int user, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
         return (await repository.OwnerAssets(user, ct)).Select(Map).ToArray();
     }
+
     public async Task<AssetDto> OwnerAsset(int user, int asset, CancellationToken ct) => Map(await Owned(user, asset, ct));
+
     public async Task<IReadOnlyList<BeneficiaryDto>> Beneficiaries(int user, int? asset, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
         var assets = asset.HasValue ? new List<DigitalAsset> { await Owned(user, asset.Value, ct) } : await repository.OwnerAssets(user, ct);
         return assets.SelectMany(a => a.BeneficiaryAssignments.Select(b => new BeneficiaryDto(a.AssetId, b.BeneficiaryId, b.Beneficiary.FullName, b.Allocation, b.Status))).ToArray();
     }
+
     public async Task<BeneficiaryDto> AssignBeneficiary(int owner, int assetId, AssignBeneficiaryInput input, CancellationToken ct)
     {
         var asset = await Owned(owner, assetId, ct);
@@ -141,10 +154,16 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
             recipient.Roles.Add(role);
             recipient.UpdatedAt = RecordVersion.Next(recipient.UpdatedAt);
         }
-        var assignment = new BeneficiaryAssignment { AssetId = assetId, BeneficiaryId = recipient.UserId, Allocation = input.Allocation,
-            Status = "Active", CreatedAt = now, UpdatedAt = now };
+        var assignment = new BeneficiaryAssignment
+        {
+            AssetId = assetId,
+            BeneficiaryId = recipient.UserId,
+            Allocation = input.Allocation,
+            Status = "Active",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
         repository.Add(assignment);
-        // Updating the asset protects the allocation sum against concurrent assignments.
         asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
         Audit(owner, "AssignBeneficiary", "DigitalAsset", assetId, "Success");
         repository.Add(new Notification { UserId = recipient.UserId, Type = "Allocation", Title = "Beneficiary designated", Message = "An owner designated you as a beneficiary. Access requires a legally approved handover and identity verification.", CreatedAt = now });
@@ -152,6 +171,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Beneficiary configuration changed. Reload and retry."); }
         return new BeneficiaryDto(assetId, recipient.UserId, recipient.FullName, assignment.Allocation, assignment.Status);
     }
+
     private static void Validate(UploadFile file)
     {
         if (file.Content.Length > 10 * 1024 * 1024) throw new WorkflowException(413, "Document exceeds 10 MB.");
@@ -174,6 +194,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
             catch (System.Text.DecoderFallbackException) { throw new WorkflowException(400, "Text must be UTF-8."); }
         }
     }
+
     private void RequireSignature(UploadFile file, byte[]? signature, int signer)
     {
         if (!protection.Verify(file.Content, signature, signer)) throw new WorkflowException(400, "Invalid signature, untrusted/expired certificate, or signer certificate not configured.");
@@ -207,11 +228,13 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         }
         catch { await store.Delete(path); throw; }
     }
+
     public async Task<IReadOnlyList<HandoverDto>> Requests(int user, CancellationToken ct)
     {
         await OperatorRole(user, ct);
         return (await repository.Requests(user, ct)).Where(r => r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned"))).Select(Map).ToArray();
     }
+
     public async Task<HandoverDto> Request(int user, int request, CancellationToken ct)
     {
         var r = await Executed(user, request, ct);
@@ -223,12 +246,14 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         }
         return Map(r) with { Documents = documents };
     }
+
     public async Task<DocumentContent> RequestDocument(int user, int request, int document, CancellationToken ct)
     {
         var r = await Executed(user, request, ct);
         var d = r.HandoverDocuments.SingleOrDefault(x => x.HandoverDocumentId == document) ?? throw new WorkflowException(404, "Document not found.");
         return await Read(d.StoragePath, ct);
     }
+
     private async Task<DocumentContent> Read(string path, CancellationToken ct)
     {
         var doc = protection.Decrypt(await store.Read(path, ct));
@@ -251,6 +276,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         }
         catch { await store.Delete(path); throw; }
     }
+
     public async Task StartHandover(int user, int request, CancellationToken ct)
     {
         var r = await Executed(user, request, ct);
@@ -258,6 +284,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         r.Status = "In_Progress"; r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt);
         Audit(user, "StartHandover", "HandoverRequest", request, "Success"); await repository.Save(ct);
     }
+
     public async Task Complete(int user, int request, UploadFile file, byte[] signature, CancellationToken ct)
     {
         var r = await Executed(user, request, ct);
@@ -268,8 +295,17 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var path = await Store(file, user, signature, ct);
         try
         {
-            repository.Add(new HandoverDocument { RequestId = request, FileName = Path.GetFileName(file.FileName), FileType = file.FileType,
-                StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            repository.Add(new HandoverDocument
+            {
+                RequestId = request,
+                FileName = Path.GetFileName(file.FileName),
+                FileType = file.FileType,
+                StoragePath = path,
+                IsEncrypted = true,
+                UploadedBy = user,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            });
             r.Status = "Completed"; r.CompletedAt = DateTime.UtcNow; r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt);
             foreach (var c in r.HandoverCases) { c.Status = "Completed"; c.CompletedAt = DateTime.UtcNow; }
             foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct())
@@ -279,6 +315,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         }
         catch { await store.Delete(path); throw; }
     }
+
     public async Task<int> RequestLegal(int user, int request, int verifier, string? comment, UploadFile file, CancellationToken ct)
     {
         var r = await Executed(user, request, ct);
@@ -293,8 +330,17 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         {
             var verification = new LegalVerification { RequestId = request, VerifierId = verifier, Comment = comment, Status = "Pending", SubmittedAt = DateTime.UtcNow };
             repository.Add(verification);
-            repository.Add(new HandoverDocument { RequestId = request, FileName = Path.GetFileName(file.FileName), FileType = file.FileType,
-                StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            repository.Add(new HandoverDocument
+            {
+                RequestId = request,
+                FileName = Path.GetFileName(file.FileName),
+                FileType = file.FileType,
+                StoragePath = path,
+                IsEncrypted = true,
+                UploadedBy = user,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            });
             r.Status = "Pending_Legal"; r.SubmittedAt = DateTime.UtcNow; r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt);
             Audit(user, "RequestLegalVerification", "HandoverRequest", request, "Success");
             repository.Add(new Notification { UserId = verifier, Type = "LegalReview", Title = "Legal review assigned", Message = "A handover is awaiting your independent legal review.", CreatedAt = DateTime.UtcNow });
@@ -303,13 +349,16 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         }
         catch { await store.Delete(path); throw; }
     }
+
     public async Task<IReadOnlyList<InheritanceDto>> Inherited(int user, CancellationToken ct)
     {
         await Role(user, BeneficiaryRole, ct);
         return (await repository.Inherited(user, ct)).Select(x => new InheritanceDto(x.HandoverId, x.Assignment.Allocation, Map(x.Assignment.Asset))).ToArray();
     }
+
     public async Task<InheritanceDto> InheritedAsset(int user, int asset, CancellationToken ct) =>
         (await Inherited(user, ct)).FirstOrDefault(x => x.Asset.AssetId == asset) ?? throw new WorkflowException(404, "Inherited asset not found.");
+
     public async Task<DocumentContent> InheritedDocument(int user, int asset, int document, CancellationToken ct)
     {
         await InheritedAsset(user, asset, ct);
@@ -317,6 +366,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var d = a.AssetDocuments.SingleOrDefault(x => x.DocumentId == document && x.Status == "Active") ?? throw new WorkflowException(404, "Released document not found.");
         return await Read(d.StoragePath, ct);
     }
+
     private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
     { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
 

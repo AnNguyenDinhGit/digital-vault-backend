@@ -162,6 +162,7 @@ sealed class FakeStore : IDocumentStore
 }
 sealed class FakeRepository : IVaultRepository
 {
+    public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct) => Task.FromResult<RefreshToken?>(null);
     public List<object> Added { get; } = new();
     public bool FailSave { get; set; }
     public bool MissingRole { get; set; }

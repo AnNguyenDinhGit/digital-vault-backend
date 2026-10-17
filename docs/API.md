@@ -1,3 +1,5 @@
+> Cập nhật 17/10/2026: main đã bổ sung refresh token; xem [contract auth sau merge](Merge-main-2026-10-17.md). Các mô tả chưa có refresh token bên dưới thuộc phiên bản trước.
+
 > Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
 
 [Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)

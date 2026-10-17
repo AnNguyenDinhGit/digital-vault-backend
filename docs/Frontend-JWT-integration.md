@@ -1,3 +1,5 @@
+> Cập nhật 17/10/2026: main đã bổ sung refresh token; xem [contract auth sau merge](Merge-main-2026-10-17.md). Các mô tả chưa có refresh token bên dưới thuộc phiên bản trước.
+
 # LegacyVault: tích hợp frontend bằng JWT Bearer
 
 API → BLL → DAL, ASP.NET Core .NET 8. Các entity/context scaffold và database schema được giữ nguyên. Frontend không được chỉnh sửa trong lần triển khai này.

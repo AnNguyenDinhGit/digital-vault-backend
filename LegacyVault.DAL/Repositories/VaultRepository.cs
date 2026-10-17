@@ -6,6 +6,7 @@ using System.Data;
 namespace LegacyVault.DAL.Repositories;
 public interface IVaultRepository
 {
+    Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct);
     Task<User?> User(int id, CancellationToken ct);
     Task<User?> LoginUser(string email, CancellationToken ct);
     Task<User?> UserByEmail(string email, CancellationToken ct);
@@ -24,6 +25,8 @@ public interface IVaultRepository
 }
 public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
 {
+    public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct)
+    => db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == token, ct);
     public Task<User?> User(int id, CancellationToken ct) => db.Users.Include(x => x.Roles).Include(x => x.Authentications).Include(x => x.TwoFactorAuths).SingleOrDefaultAsync(x => x.UserId == id, ct);
     public Task<User?> LoginUser(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).Include(x => x.Authentications).Include(x => x.TwoFactorAuths).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
     public Task<User?> UserByEmail(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
