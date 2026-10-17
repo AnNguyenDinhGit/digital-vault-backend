@@ -1,3 +1,5 @@
+> Cập nhật Google login: email cũ không cần OTP đăng ký; email mới vẫn cần OTP. Xem [luồng Google hiện tại](Google-login-direct.md). Các mô tả Google luôn yêu cầu OTP bên dưới thuộc phiên bản trước.
+
 > Cập nhật 17/10/2026: main đã bổ sung refresh token; xem [contract auth sau merge](Merge-main-2026-10-17.md). Các mô tả chưa có refresh token bên dưới thuộc phiên bản trước.
 
 > Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
@@ -20,6 +22,7 @@ Backend dùng JWT Bearer, API → BLL → DAL. Không sửa frontend hoặc thê
 | GET `/api/auth/google/oidc-callback` | Google callback | Xác minh OIDC, gửi Email OTP |
 | GET `/api/auth/google/callback` | cookie Google tạm | Trang Swagger hoặc redirect frontend cố định |
 | GET `/api/auth/google/challenge` | cookie Google tạm | challengeId, expiresAt |
+| POST `/api/auth/google/complete` | challengeId, cookie Google tạm | Email đã có User: token hoặc 2FA, không OTP đăng ký |
 | POST `/api/auth/google/otp/resend` | challengeId và cookie tạm | challenge mới |
 | POST `/api/auth/google/otp/verify` | challengeId, code và cookie tạm | 200 TokenDto hoặc 202 nếu tài khoản còn 2FA |
 | GET `/api/auth/me` | Bearer | userId, fullName, email, roles, status từ DB |

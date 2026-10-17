@@ -1,3 +1,5 @@
+> Cập nhật Google login: email cũ không cần OTP đăng ký; email mới vẫn cần OTP. Xem [luồng Google hiện tại](Google-login-direct.md). Các mô tả Google luôn yêu cầu OTP bên dưới thuộc phiên bản trước.
+
 > Cập nhật 17/10/2026: main đã bổ sung refresh token; xem [contract auth sau merge](Merge-main-2026-10-17.md). Các mô tả chưa có refresh token bên dưới thuộc phiên bản trước.
 
 # LegacyVault: tích hợp frontend bằng JWT Bearer
@@ -59,7 +61,7 @@ Có 2FA → 202, **không có accessToken**:
 
 ### Google
 
-Mở `/api/auth/google/start` bằng browser navigation. Google gọi `/api/auth/google/oidc-callback`; backend xác minh OIDC, gửi OTP và chuyển tới `/api/auth/google/callback`. Trang callback cung cấp challengeId, không có OTP/token trong URL. Gọi `/api/auth/google/otp/verify` với challengeId/code → 200 TokenDto; nếu tài khoản có 2FA enabled → 202 và tiếp tục `/api/auth/2fa/verify`. Google không bỏ qua 2FA tài khoản.
+Mở `/api/auth/google/start` bằng browser navigation. Google gọi `/api/auth/google/oidc-callback`; backend xác minh OIDC và chuyển tới `/api/auth/google/callback`. GET `/api/auth/google/challenge` trả challengeId/expiresAt/requiresOtp. Email cũ: requiresOtp=false, FE tự POST `/api/auth/google/complete` chỉ với challengeId để nhận token, không gửi OTP đăng ký. Email mới: requiresOtp=true, gửi OTP trước khi tạo User; POST `/api/auth/google/otp/verify` với challengeId/code. 200 trả TokenDto; tài khoản đã bật 2FA vẫn có thể trả 202 để tiếp tục `/api/auth/2fa/verify`. Không có OTP/token trong URL.
 
 Giữ cookies **chỉ cho bước Google**: frontend fetch với `credentials: "include"`, `X-Vault-Request: 1`, origin được allowlist. Cookie tạm Secure/HttpOnly/SameSite=None. Dùng HTTPS; không gửi token qua URL. `/api/auth/google/otp/resend` trả challengeId mới, cooldown 60 giây. Không có redirect tùy ý hoặc refresh token. Chưa có UI frontend riêng; có thể dùng trang callback + Swagger cùng browser.
 

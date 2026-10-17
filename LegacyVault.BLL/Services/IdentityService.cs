@@ -403,7 +403,17 @@ public sealed class IdentityService(IVaultRepository repository)
             throw new WorkflowException(403, "This account cannot use public Google sign-in.");
     }
 
-    // Google Login
+    public async Task<LoginDto?> ExistingGoogleLogin(string verifiedEmail, CancellationToken ct)
+    {
+        var email = verifiedEmail.Trim().ToLowerInvariant();
+        if (email.Length > 150 || !new EmailAddressAttribute().IsValid(email)) throw new WorkflowException(400, "Invalid Google email.");
+        var user = await repository.LoginUser(email, ct);
+        if (user is null) return null;
+        RequireGoogleAccount(user);
+        return new(user.UserId, user.Roles.Select(r => r.RoleName).ToArray());
+    }
+
+    // Registration callers must first verify the new email's OTP.
     public async Task<LoginDto> GoogleLogin(
         string verifiedEmail,
         string fullName,

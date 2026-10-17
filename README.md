@@ -1,3 +1,5 @@
+> Cập nhật Google login: email cũ không cần OTP đăng ký; email mới vẫn cần OTP. Xem [luồng Google hiện tại](docs/Google-login-direct.md). Các mô tả Google luôn yêu cầu OTP bên dưới thuộc phiên bản trước.
+
 > Cập nhật 17/10/2026: main đã bổ sung refresh token; xem [contract auth sau merge](docs/Merge-main-2026-10-17.md). Các mô tả chưa có refresh token bên dưới thuộc phiên bản trước.
 
 > Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.

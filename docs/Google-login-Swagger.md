@@ -1,10 +1,12 @@
+> Cập nhật Google login: email cũ không cần OTP đăng ký; email mới vẫn cần OTP. Xem [luồng Google hiện tại](Google-login-direct.md). Các mô tả Google luôn yêu cầu OTP bên dưới thuộc phiên bản trước.
+
 > Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
 
 [Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
 
-# Test Google login → OTP → JWT
+# Test Google login: tài khoản cũ authorize, email mới OTP
 
-Không thay schema. Backend xác minh Google OIDC, yêu cầu OTP email rồi tìm/tạo User theo email. User mới nhận Owner, không mật khẩu giả. Không lưu Google sub; email thay đổi không tự nhận ra User cũ.
+Không thay schema. Backend xác minh Google OIDC; email có User hợp lệ không cần OTP đăng ký, email mới cần OTP trước khi tạo Owner. Không tạo mật khẩu giả hoặc lưu Google sub; email thay đổi không tự nhận ra User cũ.
 
 ## Cấu hình
 
@@ -30,8 +32,8 @@ Cần JWT signing key và connection string như [contract frontend](Frontend-JW
 
 1. Chạy backend HTTPS. Mở `/api/auth/google/start` trên thanh địa chỉ, không Execute Swagger.
 2. Chọn Google. Middleware xác minh state/signature/issuer/audience/expiration/nonce/email_verified; chưa cấp token hoặc application cookie.
-3. Trang `/api/auth/google/callback` hiển thị challengeId; OTP đến email, không đưa OTP/token vào URL.
-4. Mở Swagger cùng browser/host, POST `/api/auth/google/otp/verify`:
+3. GET `/api/auth/google/challenge` trong cùng browser: nhận challengeId/expiresAt/requiresOtp; không đưa OTP/token vào URL.
+4. Nếu requiresOtp=false, POST `/api/auth/google/complete` với `{"challengeId":"COPY_FROM_PAGE"}`, không nhập OTP. Nếu requiresOtp=true (email mới), POST `/api/auth/google/otp/verify`:
 
 ```json
 {"challengeId":"COPY_FROM_PAGE","code":"123456"}

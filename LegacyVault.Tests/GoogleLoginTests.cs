@@ -69,6 +69,21 @@ internal static class GoogleLoginTests
         check((await Task.WhenAll(Consume(), Consume())).Count(x => x) == 1, "concurrent Google OTP verification can succeed only once");
         var duplicateRepo = new FakeRepository { DuplicateOnSave = true };
         await Rejected(() => new IdentityService(duplicateRepo).GoogleLogin("concurrent@example.test", "User", default), 409, "concurrent Google account creation reports conflict without issuing login");
+        var authorizedStore = new GoogleAuthorizationStore(clock);
+        var authorized = authorizedStore.Start("browser-authorized", new(123, "existing@example.test"));
+        await Rejected(() => { authorizedStore.Consume("another-browser", authorized.ChallengeId); return Task.CompletedTask; }, 400, "Google direct authorization is browser bound");
+        check(!authorized.RequiresOtp && authorizedStore.Consume("browser-authorized", authorized.ChallengeId).UserId == 123, "verified existing Google identity does not require registration OTP");
+        await Rejected(() => { authorizedStore.Consume("browser-authorized", authorized.ChallengeId); return Task.CompletedTask; }, 400, "Google direct authorization cannot replay");
+        var authorizationExpired = authorizedStore.Start("expired-browser", new(123, "existing@example.test"));
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await Rejected(() => { authorizedStore.Consume("expired-browser", authorizationExpired.ChallengeId); return Task.CompletedTask; }, 400, "Google direct authorization expires after five minutes");
+        var singleUse = authorizedStore.Start("concurrent-browser", new(123, "existing@example.test"));
+        var exchanges = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            try { authorizedStore.Consume("concurrent-browser", singleUse.ChallengeId); return true; }
+            catch (WorkflowException) { return false; }
+        })));
+        check(exchanges.Count(x => x) == 1, "concurrent Google direct exchanges consume the authorization once");
 
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -150,6 +165,8 @@ internal static class GoogleLoginTests
         }
 
         var first = await StartGoogle();
+        check((await client.GetFromJsonAsync<GoogleSignInState>("/api/auth/google/challenge"))!.RequiresOtp, "new Google email requires registration OTP");
+        check((await client.PostAsJsonAsync("/api/auth/google/complete", new { challengeId = first.Id })).StatusCode == HttpStatusCode.BadRequest, "new Google email cannot skip OTP through direct complete endpoint");
         var googleSettings = app.Services.GetRequiredService<GoogleOptions>();
         googleSettings.FrontendCallbackUrl = "https://frontend.example.test/auth/google";
         var frontendRedirect = await client.GetAsync("/api/auth/google/callback");
@@ -177,6 +194,44 @@ internal static class GoogleLoginTests
         }
         check((await client.PostAsJsonAsync("/api/auth/login", new { email = "newgoogle@example.test", password = "Registration123!" })).StatusCode == HttpStatusCode.Unauthorized, "Google-only user cannot log in with an invented password");
         check((await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode == HttpStatusCode.NoContent, "Google session works with existing logout");
+
+        async Task<GoogleSignInState> AuthorizeExisting()
+        {
+            var start = await client.GetAsync("/api/auth/google/start");
+            var query = QueryHelpers.ParseQuery(start.Headers.Location!.Query);
+            backchannel.Nonce = query["nonce"].ToString();
+            var callback = await client.GetAsync("/api/auth/google/oidc-callback?code=test-code&state=" + Uri.EscapeDataString(query["state"].ToString()));
+            check(callback.StatusCode == HttpStatusCode.Redirect && callback.Headers.Location?.OriginalString == "/api/auth/google/callback", "existing Google identity finishes OIDC without registration OTP");
+            return (await client.GetFromJsonAsync<GoogleSignInState>("/api/auth/google/challenge"))!;
+        }
+        var sentBefore = sender.SendCount;
+        sender.Fail = true; // Existing-account Google login must not need the registration mail service.
+        var existingState = await AuthorizeExisting();
+        check(!existingState.RequiresOtp && sender.SendCount == sentBefore, "existing Google login sends no registration OTP even if SMTP is unavailable");
+        check((await client.GetStringAsync("/api/auth/google/callback")).Contains("/api/auth/google/complete"), "existing-account callback directs caller to complete without OTP");
+        check((await outsider.PostAsJsonAsync("/api/auth/google/complete", new { challengeId = existingState.ChallengeId })).StatusCode == HttpStatusCode.BadRequest, "outsider cannot exchange another browser's Google authorization");
+        check((await client.PostAsJsonAsync("/api/auth/google/complete", new { challengeId = existingState.ChallengeId, email = "other@example.test" })).StatusCode == HttpStatusCode.BadRequest, "Google complete rejects caller-supplied email");
+        client.DefaultRequestHeaders.Authorization = new("Bearer", existingState.ChallengeId);
+        check((await client.GetAsync("/api/auth/me")).StatusCode == HttpStatusCode.Unauthorized, "Google authorization ID cannot access business APIs before exchange");
+        check((await client.PostAsJsonAsync("/api/auth/google/otp/verify", new { challengeId = existingState.ChallengeId, code = "123456" })).StatusCode == HttpStatusCode.BadRequest, "existing-account authorization cannot be used as registration OTP");
+        var directLogin = await TestAuthentication.UseToken(client, await client.PostAsJsonAsync("/api/auth/google/complete", new { challengeId = existingState.ChallengeId }));
+        check(directLogin.UserId == account.UserId && !string.IsNullOrEmpty(directLogin.RefreshToken), "Google direct sign-in returns JWT and refresh token for the existing account");
+        check((await client.PostAsJsonAsync("/api/auth/google/complete", new { challengeId = existingState.ChallengeId })).StatusCode == HttpStatusCode.BadRequest, "HTTP Google complete cannot replay");
+        sender.Fail = false;
+
+        var renamedState = await AuthorizeExisting();
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+            (await db.Users.SingleAsync(x => x.UserId == account.UserId)).Email = "renamed@example.test"; await db.SaveChangesAsync();
+        }
+        check((await client.PostAsJsonAsync("/api/auth/google/complete", new { challengeId = renamedState.ChallengeId })).StatusCode == HttpStatusCode.Conflict, "Google exchange rejects email changed after authorization without recreating an account");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+            (await db.Users.SingleAsync(x => x.UserId == account.UserId)).Email = "newgoogle@example.test"; await db.SaveChangesAsync();
+            check(await db.Users.CountAsync() == 1, "failed existing-account exchange never registers a replacement user");
+        }
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();

@@ -151,7 +151,13 @@ Console.WriteLine($"{checks} checks passed.");
 sealed class FakeSender : IOtpSender
 {
     public string Code { get; private set; } = "";
-    public Task Send(string email, string code, CancellationToken ct) { Code = code; return Task.CompletedTask; }
+    public int SendCount { get; private set; }
+    public bool Fail { get; set; }
+    public Task Send(string email, string code, CancellationToken ct)
+    {
+        if (Fail) throw new WorkflowException(503, "Test SMTP unavailable.");
+        SendCount++; Code = code; return Task.CompletedTask;
+    }
 }
 sealed class FakeStore : IDocumentStore
 {

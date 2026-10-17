@@ -40,6 +40,7 @@ public static class GoogleAuthentication
         services.AddSingleton(settings);
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         services.AddSingleton<GoogleLoginOtp>();
+        services.AddSingleton<GoogleAuthorizationStore>();
         // Missing credentials must not prevent password login or Swagger startup.
         if (!settings.Configured) return services;
         services.AddAuthentication().AddOpenIdConnect(Scheme, options =>
@@ -78,10 +79,21 @@ public static class GoogleAuthentication
                 }
                 try
                 {
-                    var otp = context.HttpContext.RequestServices.GetRequiredService<GoogleLoginOtp>();
-                    var challenge = await otp.Request(browser, new GoogleEmailIdentity(email,
-                        context.Principal?.FindFirst("name")?.Value ?? ""), context.HttpContext.RequestAborted);
-                    context.Response.Cookies.Append(ChallengeCookie, challenge.ChallengeId, PendingCookie);
+                    var services = context.HttpContext.RequestServices;
+                    var existing = await services.GetRequiredService<LegacyVault.BLL.Services.IdentityService>().ExistingGoogleLogin(email, context.HttpContext.RequestAborted);
+                    string challengeId;
+                    if (existing is not null)
+                    {
+                        challengeId = services.GetRequiredService<GoogleAuthorizationStore>()
+                            .Start(browser, new(existing.UserId, email.Trim().ToLowerInvariant())).ChallengeId;
+                    }
+                    else
+                    {
+                        var challenge = await services.GetRequiredService<GoogleLoginOtp>().Request(browser, new GoogleEmailIdentity(email,
+                            context.Principal?.FindFirst("name")?.Value ?? ""), context.HttpContext.RequestAborted);
+                        challengeId = challenge.ChallengeId;
+                    }
+                    context.Response.Cookies.Append(ChallengeCookie, challengeId, PendingCookie);
                     context.Response.Redirect("/api/auth/google/callback");
                 }
                 catch (LegacyVault.BLL.DTOs.WorkflowException ex)
