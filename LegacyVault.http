@@ -44,7 +44,17 @@ Content-Type: application/json
 ### Google start: open this URL in a browser, do not follow provider redirect in this client
 GET {{baseUrl}}/api/auth/google/start
 
-### Google OTP: browser cookie from Google flow is required, not only challenge ID
+### After OIDC, get requiresOtp and challengeId using the SAME browser cookies
+GET {{baseUrl}}/api/auth/google/challenge
+
+### Existing Google account: requiresOtp=false, no registration OTP; cookie and header required
+POST {{baseUrl}}/api/auth/google/complete
+X-Vault-Request: 1
+Content-Type: application/json
+
+{"challengeId":"{{challengeId}}"}
+
+### NEW Google email only: requiresOtp=true; browser cookie is required, not only challenge ID
 POST {{baseUrl}}/api/auth/google/otp/verify
 X-Vault-Request: 1
 Content-Type: application/json

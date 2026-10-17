@@ -1,3 +1,5 @@
+> Cập nhật Google login: email cũ không cần OTP đăng ký; email mới vẫn cần OTP. Xem [luồng Google hiện tại](Google-login-direct.md). Các mô tả Google luôn yêu cầu OTP bên dưới thuộc phiên bản trước.
+
 > Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
 
 [Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
@@ -47,7 +49,7 @@ Login Beneficiary, POST otp/request rồi otp/verify bằng JWT hiện tại. GE
 
 ## 5. Google và lỗi cần thử
 
-[Google-login-Swagger.md](Google-login-Swagger.md): start mở trực tiếp trong browser; chỉ bước Google giữ cookie tạm. OTP hoàn tất trả JWT hoặc challenge 2FA. Authorize JWT cho nghiệp vụ.
+[Google-login-Swagger.md](Google-login-Swagger.md): start mở trực tiếp trong browser; chỉ bước Google giữ cookie tạm. GET challenge: requiresOtp=false thì POST complete chỉ với challengeId; requiresOtp=true thì nhập OTP email mới và POST otp/verify. Nhận JWT hoặc challenge 2FA đã bật; Authorize JWT cho nghiệp vụ.
 
 Thử 401 token sai/hết hạn, 403 role/OTP sai, 404 dữ liệu người khác, 409 duplicate/trạng thái/concurrency, 413 file quá lớn, 429 cooldown, 503 cấu hình không hỗ trợ. X-Vault-Request chỉ bắt buộc cho Google POST; Swagger tự thêm.
 

@@ -20,6 +20,7 @@ Contract hiện tại: **JWT Bearer**, API → BLL → DAL. Danh sách method/pa
 - POST `/api/auth/google/otp/verify`: 200 TokenDto hoặc 202 nếu tài khoản còn 2FA; không cấp application cookie.
 - POST `/api/auth/google/otp/resend`: cookie tạm Google + X-Vault-Request: 1, challengeId mới.
 - GET `/api/auth/google/challenge`: lấy challengeId/expiry dạng JSON cho frontend, cookie-bound; không token trong URL.
+- POST `/api/auth/google/complete`: email đã có User, dùng challengeId + cookie sau OIDC, không gửi OTP đăng ký; email mới vẫn dùng otp/verify. Xem [Google login mới](Google-login-direct.md).
 
 ## Tài liệu Owner và hồ sơ Executor
 
