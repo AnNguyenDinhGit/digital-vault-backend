@@ -18,7 +18,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     private async Task<User> Role(int userId, string role, CancellationToken ct)
     {
         var user = await repository.User(userId, ct);
-        if (user is null || user.Status != "Active" || !user.Roles.Any(x => x.RoleName == role))
+        if (user is null || user.Status != "Active" || user.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) || !user.Roles.Any(x => x.RoleName == role))
             throw new WorkflowException(403, "The active user does not have the required role.");
         return user;
     }
@@ -42,8 +42,8 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     private async Task OperatorRole(int user, CancellationToken ct)
     {
         var account = await repository.User(user, ct);
-        if (account is null || account.Status != "Active" || !account.Roles.Any(r => r.RoleName is ExecutorRole or ManagementService.StaffRole))
-            throw new WorkflowException(403, "Active Executor or Staff role required.");
+        if (account is null || account.Status != "Active" || account.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) || !account.Roles.Any(r => r.RoleName == ExecutorRole))
+            throw new WorkflowException(403, "Active Executor role required.");
     }
 
     private async Task<DigitalVault> OwnedVault(int user, int vault, CancellationToken ct)
@@ -106,6 +106,8 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var r = await repository.Request(request, ct);
         if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned")))
             throw new WorkflowException(404, "Handover request not found or executor assignment is inactive.");
+        if (r.Vault.OwnerId == user || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == user))
+            throw new WorkflowException(403, "Executor must be independent of the owner and beneficiaries.");
         return r;
     }
 
@@ -197,74 +199,34 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     {
         if (!protection.Verify(file.Content, signature, signer)) throw new WorkflowException(400, "Invalid signature, untrusted/expired certificate, or signer certificate not configured.");
     }
+    private Task<string> Store(UploadFile file, int signer, byte[]? signature, CancellationToken ct, string? purpose = null) =>
+        store.Write(protection.Encrypt(new ProtectedDocument(file, signer, signature, purpose)), ct);
 
-    private Task<string> Store(UploadFile file, int signer, byte[]? signature, CancellationToken ct) =>
-        store.Write(protection.Encrypt(new ProtectedDocument(file, signer, signature)), ct);
-
-    public async Task<DocumentDto> UploadOwnerDocument(int user, int assetId, int beneficiaryId, bool ownerAlive,
-        UploadFile file, byte[]? signature, UploadFile? deathCertificate, CancellationToken ct)
+    public async Task<DocumentDto> UploadOwnerDocument(int user, int assetId, int? beneficiaryId,
+        UploadFile file, byte[]? signature, CancellationToken ct)
     {
         var asset = await Owned(user, assetId, ct);
         if (asset.Vault.Status != "Active" || asset.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
-        Editable(asset.Vault); asset.Vault.UpdatedAt = RecordVersion.Next(asset.Vault.UpdatedAt);
-        if (beneficiaryId == user) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
-        await Role(beneficiaryId, BeneficiaryRole, ct);
-        Validate(file);
-        if (ownerAlive) RequireSignature(file, signature, user);
-        else
+        Editable(asset.Vault);
+        if (beneficiaryId is not null)
         {
-            if (deathCertificate is null) throw new WorkflowException(400, "Death certificate is required when ownerAlive is false.");
-            Validate(deathCertificate);
+            if (beneficiaryId == user) throw new WorkflowException(400, "Owner cannot inherit their own asset.");
+            await Role(beneficiaryId.Value, BeneficiaryRole, ct);
+            if (!asset.BeneficiaryAssignments.Any(a => a.BeneficiaryId == beneficiaryId && a.Status == "Active"))
+                throw new WorkflowException(409, "Select an existing active allocation; upload does not create allocations.");
         }
-        var assignment = asset.BeneficiaryAssignments.SingleOrDefault(x => x.BeneficiaryId == beneficiaryId && x.Status == "Active");
-        if (assignment is null && asset.BeneficiaryAssignments.Any(x => x.Status == "Active"))
-            throw new WorkflowException(409, "Asset already has active beneficiaries; select an existing beneficiary.");
-        var stored = new List<string>();
+        Validate(file); RequireSignature(file, signature, user);
+        var path = await Store(file, user, signature, ct);
         try
         {
-            var path = await Store(file, user, ownerAlive ? signature : null, ct); stored.Add(path);
-            var doc = new AssetDocument
-            {
-                AssetId = assetId,
-                FileName = Path.GetFileName(file.FileName),
-                FileType = file.FileType,
-                StoragePath = path,
-                IsEncrypted = true,
-                UploadedBy = user,
-                Status = ownerAlive ? "Active" : "Pending_Legal",
-                UploadedAt = DateTime.UtcNow
-            };
+            var doc = new AssetDocument { AssetId = assetId, FileName = file.FileName, FileType = file.FileType,
+                StoragePath = path, IsEncrypted = true, UploadedBy = user, Status = "Active", UploadedAt = DateTime.UtcNow };
             repository.Add(doc);
-            if (deathCertificate is not null && !ownerAlive)
-            {
-                var deathPath = await Store(deathCertificate, user, null, ct); stored.Add(deathPath);
-                repository.Add(new AssetDocument
-                {
-                    AssetId = assetId,
-                    FileName = Path.GetFileName(deathCertificate.FileName),
-                    FileType = deathCertificate.FileType,
-                    StoragePath = deathPath,
-                    IsEncrypted = true,
-                    UploadedBy = user,
-                    Status = "Pending_Legal",
-                    UploadedAt = DateTime.UtcNow
-                });
-            }
-            if (assignment is null) repository.Add(new BeneficiaryAssignment
-            {
-                AssetId = assetId,
-                BeneficiaryId = beneficiaryId,
-                Allocation = 100,
-                Status = "Active",
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            });
-            asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
-            Audit(user, "UploadAssetDocument", "DigitalAsset", assetId, ownerAlive ? "Alive_Signed" : "Pending_Legal");
-            await repository.Save(ct);
-            return new DocumentDto(doc.DocumentId, doc.FileName, doc.FileType, true);
+            asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt); asset.Vault.UpdatedAt = RecordVersion.Next(asset.Vault.UpdatedAt);
+            Audit(user, "UploadAssetDocument", "DigitalAsset", assetId, "Alive_Signed");
+            await repository.Save(ct); return new(doc.DocumentId, doc.FileName, doc.FileType, true);
         }
-        catch { foreach (var path in stored) await store.Delete(path); throw; }
+        catch { await store.Delete(path); throw; }
     }
 
     public async Task<IReadOnlyList<HandoverDto>> Requests(int user, CancellationToken ct)
@@ -297,17 +259,19 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var doc = protection.Decrypt(await store.Read(path, ct));
         return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, protection.Verify(doc.File.Content, doc.Signature, doc.SignerId));
     }
-
-    public async Task<DocumentDto> UploadHandoverDocument(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct)
+    public Task<DocumentDto> UploadDeathCertificate(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct) =>
+        UploadHandoverDocument(user, request, file, signature, ct, "DeathCertificate");
+    public async Task<DocumentDto> UploadHandoverDocument(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct, string purpose = "Evidence")
     {
         var r = await Executed(user, request, ct);
         if (r.Status is not ("Draft" or "Rejected" or "Additional_Info")) throw new WorkflowException(409, "Documents are editable only before legal submission.");
+        if (purpose is not ("DeathCertificate" or "Evidence")) throw new WorkflowException(400, "Unknown handover document purpose.");
         Validate(file); if (signature is not null) RequireSignature(file, signature, user);
-        var path = await Store(file, user, signature, ct);
+        var path = await Store(file, user, signature, ct, purpose);
         try
         {
             var d = new HandoverDocument { RequestId = request, FileName = file.FileName, FileType = file.FileType, StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-            repository.Add(d); r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt); Audit(user, "UploadHandoverDocument", "HandoverRequest", request, "Success");
+            repository.Add(d); r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt); Audit(user, purpose == "DeathCertificate" ? "UploadDeathCertificate" : "UploadHandoverDocument", "HandoverRequest", request, "Success");
             await repository.Save(ct); return new(d.HandoverDocumentId, d.FileName, d.FileType, true);
         }
         catch { await store.Delete(path); throw; }
@@ -359,6 +323,7 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         await Role(verifier, VerifierRole, ct);
         if (verifier == user || verifier == r.Vault.OwnerId || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == verifier)) throw new WorkflowException(400, "An independent legal verifier is required.");
         if (comment?.Length > 2000) throw new WorkflowException(400, "Comment exceeds 2000 characters.");
+        await HandoverEvidence.RequireDeathCertificate(r, store, protection, ct);
         Validate(file);
         var path = await Store(file, user, null, ct);
         try
@@ -405,63 +370,4 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
     private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
     { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
 
-    public async Task<DocumentDto> UploadDocumentAsync(
-        int user,
-        int assetId,
-        UploadDocumentInput input,
-        byte[]? signature,
-        CancellationToken ct)
-    {
-        if (input.File == null || input.File.Length == 0)
-            throw new WorkflowException(400, "File upload không hợp lệ.");
-
-        // 1. Kiểm tra quyền sở hữu Asset & trạng thái Vault
-        var asset = await Owned(user, assetId, ct);
-        if (asset.Vault.Status != "Active" || asset.Status != "Active")
-            throw new WorkflowException(409, "Vault or asset is not active.");
-        Editable(asset.Vault);
-
-        // 2. Chuyển IFormFile sang byte[] và tạo UploadFile
-        using var ms = new MemoryStream();
-        await input.File.CopyToAsync(ms, ct);
-        var fileBytes = ms.ToArray();
-
-        var uploadFile = new UploadFile(Path.GetFileName(input.File.FileName), input.File.ContentType, fileBytes);
-
-        // 3. Validate & Kiểm tra chữ ký số
-        Validate(uploadFile);
-        if (signature is not null) RequireSignature(uploadFile, signature, user);
-
-        // 4. Mã hóa và lưu trữ file thông qua phương thức Store
-        var documentStorageId = await Store(uploadFile, user, signature, ct);
-
-        // 5. Lưu Metadata vào DB
-        var docEntity = new AssetDocument
-        {
-            AssetId = assetId,
-            FileName = uploadFile.FileName,
-            FileType = uploadFile.FileType,
-            StoragePath = documentStorageId,
-            IsEncrypted = true,
-            UploadedBy = user,
-            Status = "Active",
-            UploadedAt = DateTime.UtcNow
-        };
-
-        try
-        {
-            repository.Add(docEntity);
-            asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
-            asset.Vault.UpdatedAt = RecordVersion.Next(asset.Vault.UpdatedAt);
-            Audit(user, "UploadAssetDocument", "DigitalAsset", assetId, "Alive_Signed");
-            await repository.Save(ct);
-        }
-        catch
-        {
-            await store.Delete(documentStorageId);
-            throw;
-        }
-
-        return new DocumentDto(docEntity.DocumentId, docEntity.FileName, docEntity.FileType, docEntity.IsEncrypted);
-    }
 }

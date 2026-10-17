@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # Test Google login → OTP → JWT
 
 Không thay schema. Backend xác minh Google OIDC, yêu cầu OTP email rồi tìm/tạo User theo email. User mới nhận Owner, không mật khẩu giả. Không lưu Google sub; email thay đổi không tự nhận ra User cũ.
@@ -46,7 +50,7 @@ Nếu nhận 202, Email 2FA có thể gửi lại qua POST `/api/auth/2fa/resend
 
 ## Quy tắc và giới hạn
 
-Email mới tạo User + Owner atomically sau OTP. Email cũ giữ tên/mật khẩu/roles; User không Active/đang khóa hoặc có Admin/Executor/Staff/LegalVerifier bị chặn khỏi Google công khai. Google không bỏ qua 2FA tài khoản; OTP beneficiary riêng vẫn bắt buộc khi xem di sản.
+Email mới tạo User + Owner atomically sau OTP. Email cũ giữ tên/mật khẩu/roles; User không Active/đang khóa hoặc có Admin/Executor/LegalVerifier bị chặn khỏi Google công khai. Google không bỏ qua 2FA tài khoản; OTP beneficiary riêng vẫn bắt buộc khi xem di sản.
 
 Không refresh token, JWT hết hạn phải login lại. Logout không revoke JWT. OTP/challenge trong bộ nhớ một instance, restart mất challenge; Google-only User chưa có API đặt mật khẩu.
 

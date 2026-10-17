@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # Luồng chính: đăng ký → JWT → kho → tài sản → người thụ hưởng
 
 ## 1. Tài khoản
@@ -24,9 +28,9 @@ Tài khoản B đăng ký bình thường. Login A bằng JWT, POST `/api/owner/
 
 ## 4. Giấy tờ và bàn giao
 
-Owner upload multipart File/BeneficiaryId/OwnerAlive/Signature/DeathCertificate. Backend AES-256-GCM, tối đa 10 MiB/file. Còn sống cần chữ ký rời; khai báo mất cần giấy chứng tử, chờ pháp lý. GET documents/content và POST revoke có ownership checks.
+Owner upload multipart File/Signature (BeneficiaryId tùy chọn, phải là phân bổ Active hiện có). Backend AES-256-GCM, tối đa 10 MiB/file. Owner luôn cần chữ ký rời. Giấy chứng tử do Executor được phân công nộp vào hồ sơ bàn giao, không gửi qua upload asset. GET documents/content và POST revoke có ownership checks.
 
-Chọn Executor độc lập bằng PUT vaults/{id}/executor hoặc để server chọn khi POST vaults/{id}/handovers. Mọi tài sản Active cần tài liệu và đúng 100% phân bổ. Executor/Staff nộp evidence cho LegalVerifier; chỉ approve mới mở bước bàn giao. Staff intake chỉ khi đủ điều kiện và không có Executor hợp lệ, không có request unassigned.
+Chỉ Executor được phân công xử lý hồ sơ; không còn intake hoặc fallback Staff. Xem [contract mới](Executor-evidence-update.md).
 
 Login B bằng JWT, xác minh OTP beneficiary riêng để xem di sản. Chỉ định B không tự mở tài sản. Confirm receipt chỉ sau Completed, không thể confirm thay người khác/lặp.
 

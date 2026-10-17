@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
 namespace LegacyVault.BLL.DTOs;
+public sealed record ExecutorAssignmentDto(int VaultId, int ExecutorId, string Status, DateTime AssignedAt);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class UpdateAssetInput
@@ -24,4 +25,3 @@ public sealed record ReviewDto(int VerificationId, int RequestId, int VerifierId
 public sealed record ReceiptDto(int ReceiptId, int HandoverId, int BeneficiaryId, string Status, string? Note, DateTime ConfirmedAt);
 public sealed record NotificationDto(int NotificationId, string Type, string Title, string Message, bool IsRead, DateTime CreatedAt);
 public sealed record PageDto<T>(int Page, int PageSize, IReadOnlyList<T> Items);
-public sealed record IntakeDto(int VaultId, string Name);

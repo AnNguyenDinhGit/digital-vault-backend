@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # Phân tích entities scaffold và kiểm thử
 
 Đã đối chiếu `LegacyVault.DAL/Entities` và mapping trong `LegacyVaultDbContext` với database được cấu hình qua User Secrets. Có **24 entity CLR và 1 bảng liên kết USER_ROLES**, tổng cộng 25 bảng. Lệnh kiểm tra SQL chỉ SELECT danh sách role và metadata; không đổi schema hoặc tạo tài khoản trong database hiện tại. Đối chiếu tên cột không phát hiện cột bị thiếu; đây không phải kiểm chứng toàn bộ kiểu dữ liệu/index/constraint trên server.
@@ -38,7 +42,7 @@ Repository đăng ký dùng navigation của các entity hiện có, lưu role (
 | Giấy tờ | AssetDocument | AssetId và UploadedBy là FK; lưu FileName/FileType/StoragePath/IsEncrypted/Status, không có cột nội dung bytes |
 | Mã hóa | EncryptionKey | Khóa gắn theo AssetId, có Algorithm/KeyVersion/Status; cơ chế hiện tại dùng khóa cấu hình và envelope mã hóa, chưa tích hợp rotation theo bảng này |
 | Người thụ hưởng | BeneficiaryAssignment | AssetId/BeneficiaryId là FK; Allocation decimal(5,2), Status; không tự cấp quyền chỉ vì user nhập ID |
-| Người thi hành | ExecutorAssignment | VaultId/ExecutorId là FK; mặc định Status=Pending; API chấp nhận Active/AutoAssigned, Staff dùng UserId hiện có |
+| Người thi hành | ExecutorAssignment | VaultId/ExecutorId là FK; mặc định Status=Pending; API chấp nhận Active/AutoAssigned, chỉ Executor được phân công hợp lệ |
 | Bàn giao | HandoverRequest, HandoverCase | Request có VaultId/ExecutorId; Case nối Request với BeneficiaryAssignment. Đơn và case là hai thực thể khác nhau |
 | Chứng cứ bàn giao | HandoverDocument | RequestId/UploadedBy là FK; nội dung file ở storage ngoài database |
 | Pháp lý | LegalVerification, DigitalSignature | Verification nối Request/Verifier; DigitalSignature.VerificationId bắt buộc, nên không dùng như bản ghi chữ ký chung cho mọi AssetDocument |
@@ -48,7 +52,7 @@ Repository đăng ký dùng navigation của các entity hiện có, lưu role (
 | Thông báo và nhật ký | Notification, AuditLog | Notification gắn User và có thể gắn HandoverCase; AuditLog.Result tối đa 20 ký tự |
 | Gói dịch vụ | SubscriptionPlan, UserSubscription, PaymentTransaction | SubscriptionPlan → UserSubscription → PaymentTransaction; chưa thuộc luồng API được yêu cầu |
 
-Đã sửa AuditLog.Result của nhánh upload khai báo đã mất thành `Pending_Legal` để vừa cột 20 ký tự; giá trị cũ `Deceased_PendingLegal` dài 21 ký tự. OwnerAlive hiện chỉ là thông tin request và được phản ánh vào trạng thái giấy tờ/audit, không thêm cột giả vào entity.
+Owner không còn khai báo OwnerAlive hoặc upload giấy chứng tử. Purpose của bằng chứng Executor lưu trong envelope AES-GCM, liên kết HANDOVER_DOCUMENTS.RequestId; không thêm cột/entity.
 
 ## Kiểm thử
 
@@ -74,6 +78,6 @@ Lệnh đọc cấu hình API/User Secrets/biến môi trường, in danh sách 
 
 Bearer JWT dùng UserId/roles hiện có; Authentications và TwoFactorAuths được đọc để chặn locked/2FA. Google nhận diện theo email, không thêm bảng/cột hoặc lưu subject. OTP Google/2FA/beneficiary tách riêng và chỉ lưu challenge tạm trong bộ nhớ. API nghiệp vụ không dùng cookie. Xem [contract JWT](Frontend-JWT-integration.md).
 
-Partial WorkflowConcurrency bổ sung tokens cho DigitalVault.UpdatedAt, DigitalAsset.UpdatedAt, HandoverRequest.Status, LegalVerification.Status, HandoverCase.Status và AssetDocument.Status; không thay cột/schema. Receipt được lưu sau Completed, chuyển case Received; không tuyên bố xác minh chữ ký số từ note. Staff dùng USERS/ROLES/USER_ROLES, không tạo entity Staff.
+Partial WorkflowConcurrency bổ sung tokens cho DigitalVault.UpdatedAt, DigitalAsset.UpdatedAt, HandoverRequest.Status, LegalVerification.Status, HandoverCase.Status và AssetDocument.Status; không thay cột/schema. Receipt được lưu sau Completed, chuyển case Received; không tuyên bố xác minh chữ ký số từ note. Staff không còn quyền xử lý; dữ liệu cũ cần quản trị audit riêng.
 
-SELECT audit gần nhất đối chiếu 25 bảng không thiếu cột và xác nhận HANDOVER_REQUESTS.ExecutorId int NOT NULL, DIGITAL_VAULTS.Description nvarchar(500). Chưa xác minh mọi loại/index/constraints hoặc transaction concurrency SQL Server. Không chạy script Staff hoặc seed trên database thật.
+SELECT audit gần nhất đối chiếu 25 bảng không thiếu cột và xác nhận HANDOVER_REQUESTS.ExecutorId int NOT NULL, DIGITAL_VAULTS.Description nvarchar(500). Chưa xác minh mọi loại/index/constraints hoặc transaction concurrency SQL Server. Không chạy migration hoặc seed trên database thật.

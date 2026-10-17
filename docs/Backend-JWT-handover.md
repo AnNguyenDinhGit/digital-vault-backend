@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # Báo cáo bàn giao backend JWT — 14/10/2026
 
 ## Kết quả
@@ -8,7 +12,7 @@
 
 - Auth: register, password login với 2FA Email/TOTP, verify factor, Google OIDC + OTP + JSON challenge, JWT, me và logout theo giới hạn JWT.
 - Owner: create/list/detail/update/close kho; create/list/detail/update/revoke tài sản; create/list/update/revoke phân bổ; upload/list/download/revoke giấy tờ; chọn Executor; create/list/detail/cancel bàn giao.
-- Executor/Staff: hồ sơ được phân công, file content/upload, nộp legal evidence, start và signed completion. Staff khám phá metadata kho đủ tiêu chí và intake assignment/request/cases atomically, không thay Executor đã được phân công.
+- Executor: hồ sơ được phân công, upload giấy chứng tử và bằng chứng, start và signed completion sau pháp lý; không còn nghiệp vụ Staff.
 - LegalVerifier: list/detail scoped, handover/asset document content chỉ trong cases của hồ sơ; approve/reject/request-additional-information, comment/reviewer/review time và kiểm tra trạng thái/xung đột.
 - Beneficiary: OTP riêng; tài sản/hồ sơ/tài liệu của mình; confirm/read receipt chỉ sau Completed, không lặp. Notifications list/read của User hiện tại và audit các mutation quan trọng.
 
@@ -24,7 +28,7 @@ Toàn bộ method/path/request/response/status/filter/pagination/multipart: [Fro
 | BLL workflow | DTOs/AssetCreationDtos.cs, ManagementDtos.cs; Services/VaultService.cs, ManagementService.cs, RecordVersion.cs, BeneficiaryService.cs, IBeneficiaryService.cs |
 | DAL | Repositories/VaultRepository.cs, WorkflowRepository.cs; Context/WorkflowConcurrency.cs (partial) |
 | Tests | JwtWorkflowTests.cs, TestAuthentication.cs, MainFlowTests.cs, GoogleLoginTests.cs, BeneficiaryAssignmentTests.cs, DatabaseAudit.cs, Program.cs, LegacyVault.Tests.csproj |
-| Tài liệu/script | README.md; docs/API.md, Google-login-Swagger.md, Huong-dan-test-API-Swagger.md, Luong-chinh-dang-ky-tao-assets.md, Entities-analysis.md, Trang-thai-chuc-nang.md; các tài liệu JWT mới; LegacyVault.http; database/ensure-staff-role.sql |
+Role Staff đã loại khỏi nghiệp vụ; không seed/xóa/chuyển dữ liệu thật. Xem [audit Staff cũ](../database/review-legacy-staff.sql).
 
 BeneficiaryService placeholder đã được thay bằng DTO/repository-backed wrapper có OTP gate và nối DI/controller. Google tests chuyển sang in-process TestServer với HTTPS scheme, không import private key bằng UserKeySet/EphemeralKeySet và không tắt xác minh production.
 
@@ -37,7 +41,7 @@ dotnet run --project LegacyVault.Tests --no-restore --property:OutDir=D:/SWP/Pro
 
 Build thành công **0 lỗi, 0 cảnh báo**. Console harness kết thúc exit 0, **256 kiểm tra đạt**, không tính skip/chưa chạy. OutDir riêng tránh ghi đè DLL của phiên API đang chạy. Lệnh thông thường vẫn là `dotnet run --project LegacyVault.Tests`, không dotnet test.
 
-Bao gồm JWT sai chữ ký/issuer/audience/algorithm/expiry, me, account inactive/locked, role revocation; Email/TOTP 2FA, Google validation/OTP/replay/browser binding; ownership và CRUD/revoke; allocation vượt tổng/concurrent update; upload MIME/>10 MiB và download scope; Staff intake repeat/race/SQL rollback; AutoAssigned consistency; legal review states và receipt gate/cross-user/repeat; CORS và Swagger.
+Chỉ Executor được phân công xử lý hồ sơ; không còn intake hoặc fallback Staff. Xem [contract mới](Executor-evidence-update.md).
 
 Google/SMTP dùng doubles trong test, persistence dùng SQLite relational cô lập. Không dùng fake persistence/external services trong production.
 
@@ -45,7 +49,7 @@ Google/SMTP dùng doubles trong test, persistence dùng SQLite relational cô l�
 
 Chỉ SELECT, không ghi dữ liệu. Kết nối audit được thực hiện ngoài sandbox sau lỗi SQL 5 trong sandbox, với quyền được cấp. Kết quả: 5 role hiện hữu, 25 bảng không thiếu cột so với scaffold; DIGITAL_VAULTS.Description nvarchar(500) nullable, HANDOVER_REQUESTS.ExecutorId int NOT NULL. Audit chưa kiểm tra toàn bộ kiểu dữ liệu/index/constraints hoặc concurrency SQL Server. Không migration/reset/EnsureCreated/seed trên SQL Server thật.
 
-Role Staff chưa có trong database thật. Script ensure-staff-role.sql được chuẩn bị để quản trị chạy rõ ràng, kiểm tra RoleId identity và chạy lại an toàn; không chạy script và không cấp role cho user nào trong công việc này.
+Role Staff đã loại khỏi nghiệp vụ; không seed/xóa/chuyển dữ liệu thật. Xem [audit Staff cũ](../database/review-legacy-staff.sql).
 
 Audit bổ sung xác nhận UpdatedAt của USERS/AUTHENTICATIONS/DIGITAL_VAULTS/DIGITAL_ASSETS là datetime2 precision 7. RecordVersion đảm bảo version tăng kể cả hai mutation trong cùng clock tick; không đổi schema. Nếu deploy database khác, phải kiểm tra precision này trước khi dựa vào token timestamp.
 
@@ -57,6 +61,6 @@ Frontend Git status trước/sau đều sạch; không tạo/sửa/xóa/format f
 - Frontend nhận TokenDto, gắn Bearer; 202 bắt buộc OTP/TOTP, dùng me thay kiểm tra cookie/owner-vaults. Google cookie tạm cần credentials include + X-Vault-Request; có endpoint JSON challenge. Xử lý 401 bằng bỏ token/login lại; 403 không tự coi là hết hạn.
 - Không có refresh-token/invitation persistence phù hợp, không tạo tài khoản giả. JWT hết hạn login lại. Logout chỉ thu hồi beneficiary OTP grant; không revoke access token đã phát.
 - OTP/challenge/TOTP replay tracking ở một instance, restart làm mất challenge/grant; Google nhận diện bằng email, không lưu sub. Chưa có API cấp tài khoản nhân viên hoặc đặt mật khẩu Google-only.
-- ExecutorId bắt buộc nên không có request unassigned; Staff intake là luồng khả thi có tiêu chí và assignment cùng transaction. Không tự chuyển hồ sơ đang xử lý sang Staff hoặc thay Executor hợp lệ.
+Chỉ Executor được phân công xử lý hồ sơ; không còn intake hoặc fallback Staff. Xem [contract mới](Executor-evidence-update.md).
 - Receipt note/status không chứng minh chữ ký số. Asset files mã hóa backend AES-256-GCM, không E2EE. HandoverDocument không có Status nên chưa có revoke endpoint cho tài liệu bàn giao; asset documents có revoke.
 - Google/SMTP thật, cert production và transaction concurrency SQL Server chưa được kiểm thử; không gọi chúng là đã pass.

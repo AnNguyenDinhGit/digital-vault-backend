@@ -24,6 +24,9 @@ public sealed record FactorInput([Required, StringLength(32, MinimumLength = 32)
 public sealed record FactorResendInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record RefreshTokenInput([Required] string RefreshToken);
+public sealed record RefreshTokenInput([Required, StringLength(500)] string RefreshToken);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record LogoutInput([StringLength(500)] string? RefreshToken = null);
 
 public interface IAccessTokenIssuer { TokenDto Issue(LoginDto login); }

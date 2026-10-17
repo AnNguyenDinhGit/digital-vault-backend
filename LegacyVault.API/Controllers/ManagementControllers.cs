@@ -26,21 +26,16 @@ public sealed class OwnerManagementController(ManagementService service) : Vault
     [HttpPost("handovers/{requestId:int}/cancel")] public async Task<IActionResult> Cancel(int requestId, CancellationToken ct) { await service.Cancel(UserId, requestId, ct); return NoContent(); }
 }
 
-[ApiController, Authorize(Roles = "Staff"), Route("api/staff")]
-public sealed class StaffController(ManagementService management, VaultService service) : VaultController
+[ApiController, Authorize(Roles = "Executor"), Route("api/executor/assignments")]
+public sealed class ExecutorAssignmentsController(ManagementService service) : VaultController
 {
-    [HttpGet("intake-vaults")] public Task<PageDto<IntakeDto>> IntakeList([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) => management.IntakeList(UserId, page, pageSize, ct);
-    [HttpPost("intake-vaults/{vaultId:int}/accept")] public async Task<IActionResult> Intake(int vaultId, CancellationToken ct) { var r = await management.Intake(UserId, vaultId, ct); return Created($"/api/staff/handovers/{r.RequestId}", r); }
-    [HttpGet("handovers")] public Task<PageDto<HandoverDto>> Requests([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null, CancellationToken ct = default) => management.Requests(UserId, "Operator", page, pageSize, status, ct);
-    [HttpGet("handovers/{requestId:int}")] public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.Request(UserId, requestId, ct);
-    [HttpGet("handovers/{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.RequestDocument(UserId, requestId, documentId, ct));
-    [HttpPost("handovers/{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
-    public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) => Ok(new { verificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
-    [HttpPost("handovers/{requestId:int}/complete"), RequestSizeLimit(11 * 1024 * 1024)]
-    public async Task<IActionResult> Complete(int requestId, [FromForm] CompletionForm form, CancellationToken ct) { await service.Complete(UserId, requestId, await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct); return NoContent(); }
-    [HttpPost("handovers/{requestId:int}/start")] public async Task<IActionResult> Start(int requestId, CancellationToken ct) { await service.StartHandover(UserId, requestId, ct); return NoContent(); }
-    [HttpPost("handovers/{requestId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
-    public async Task<DocumentDto> Upload(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) => await service.UploadHandoverDocument(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
+    [HttpGet] public Task<IReadOnlyList<ExecutorAssignmentDto>> Assignments(CancellationToken ct) => service.ExecutorAssignments(UserId, ct);
+    [HttpPost("{vaultId:int}/handovers")]
+    public async Task<IActionResult> Create(int vaultId, CancellationToken ct)
+    {
+        var request = await service.CreateAssignedRequest(UserId, vaultId, ct);
+        return Created($"/api/executor/handovers/{request.RequestId}", request);
+    }
 }
 
 [ApiController, Authorize, Route("api/legal/handovers")]

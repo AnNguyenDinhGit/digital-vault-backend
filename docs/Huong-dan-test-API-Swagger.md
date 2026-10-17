@@ -1,3 +1,7 @@
+> Cập nhật contract 15/10/2026: giấy tờ Owner và bằng chứng Executor đã tách riêng.
+
+[Upload Owner / giấy chứng tử Executor / loại bỏ Staff](Executor-evidence-update.md)
+
 # Hướng dẫn test LegacyVault bằng Swagger — JWT
 
 ## 1. Chuẩn bị
@@ -27,17 +31,17 @@ Gọi GET `/api/auth/me` để kiểm tra UserId/roles. Khi đổi tài khoản,
 2. POST `/api/owner/assets`: vaultId/name/type/description; lấy assetId.
 3. Tạo tài khoản người thụ hưởng nếu chưa có. POST `/api/owner/assets/{assetId}/beneficiaries`: email và allocation, tổng Active ≤100.
 4. GET `/api/owner/assets/{assetId}/allocations`: lấy assignmentId để PUT tỷ lệ hoặc POST revoke.
-5. Upload documents bằng multipart File/BeneficiaryId/OwnerAlive/Signature/DeathCertificate. Mỗi file ≤10 MiB; signature là chữ ký rời RSA-SHA256, không PDF ký nhúng.
+5. Upload documents bằng multipart File/Signature (BeneficiaryId tùy chọn, phải là phân bổ Active hiện có). Mỗi file ≤10 MiB; signature là chữ ký rời RSA-SHA256, không PDF ký nhúng.
 6. GET documents và content để kiểm tra download; PUT vault/asset và POST close/revoke khi chưa có hồ sơ bảo vệ.
 7. PUT `/api/owner/vaults/{vaultId}/executor` nếu chọn Executor. POST `/api/owner/vaults/{vaultId}/handovers` yêu cầu mỗi asset Active đủ 100% phân bổ và có documents.
 
-## 4. Staff/Executor → Legal → Beneficiary
+## 4. Executor → Legal → Beneficiary
 
-Staff cần tài khoản/role được cấp riêng. GET intake-vaults chỉ metadata kho đủ điều kiện; POST accept tạo assignment/request/cases cùng transaction và không thay Executor hiện có. Chưa có request unassigned vì ExecutorId bắt buộc.
+Không còn Staff. Executor xem GET /api/executor/assignments; tạo hồ sơ cho kho đã được phân công qua POST /api/executor/assignments/{vaultId}/handovers hoặc tiếp tục hồ sơ Owner đã tạo.
 
-Login Executor/Staff, dùng Bearer của người được phân công. Xem detail và documents, upload evidence, POST legal-verifications với VerifierId/Comment/Evidence. LegalVerifier được giao login riêng, xem tài liệu rồi approve/reject/request-additional-information với comment. Additional information phải nộp lại trước review; approve mới mở di sản.
+Login Executor, dùng Bearer của người được phân công. Xem detail và documents, POST `/api/executor/handovers/{requestId}/death-certificate` với File trước; sau đó nộp legal-verifications với VerifierId/Comment/Evidence. LegalVerifier được giao login riêng, chỉ xem/tải và approve/reject/request-additional-information. Additional information phải nộp lại trước review; approve mới mở di sản.
 
-Executor/Staff start hoặc complete sau approve; complete cần File và Signature hợp lệ. Không được bỏ qua pháp lý.
+Executor start hoặc complete sau approve; complete cần File và Signature hợp lệ. Không được bỏ qua pháp lý.
 
 Login Beneficiary, POST otp/request rồi otp/verify bằng JWT hiện tại. GET assets/handovers/documents sau legal approval. POST receipt chỉ khi case/request Completed và chưa confirm; receipt là xác nhận trạng thái, không chứng minh chữ ký số.
 

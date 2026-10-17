@@ -4,7 +4,7 @@
 @ownerEmail = owner@example.test
 @ownerPassword = REPLACE_LOCALLY
 @ownerToken = REPLACE_WITH_ACCESS_TOKEN
-@operatorToken = REPLACE_WITH_EXECUTOR_OR_STAFF_TOKEN
+@operatorToken = REPLACE_WITH_EXECUTOR_TOKEN
 @legalToken = REPLACE_WITH_ASSIGNED_LEGAL_TOKEN
 @beneficiaryToken = REPLACE_WITH_BENEFICIARY_TOKEN
 @challengeId = REPLACE_WITH_CHALLENGE_ID
@@ -87,29 +87,21 @@ Content-Type: application/json
 
 {"allocation":100}
 
-### Deceased declaration upload: each file <=10 MiB, proof remains pending legal review
+### Owner asset document: signed File only; no OwnerAlive/DeathCertificate
 POST {{baseUrl}}/api/owner/assets/{{assetId}}/documents
 Authorization: Bearer {{ownerToken}}
 Content-Type: multipart/form-data; boundary=VaultBoundary
 
---VaultBoundary
-Content-Disposition: form-data; name="BeneficiaryId"
-
-{{beneficiaryId}}
---VaultBoundary
-Content-Disposition: form-data; name="OwnerAlive"
-
-false
 --VaultBoundary
 Content-Disposition: form-data; name="File"; filename="instructions.txt"
 Content-Type: text/plain
 
 < {{documentPath}}
 --VaultBoundary
-Content-Disposition: form-data; name="DeathCertificate"; filename="proof.pdf"
-Content-Type: application/pdf
+Content-Disposition: form-data; name="Signature"; filename="instructions.sig"
+Content-Type: application/octet-stream
 
-< {{deathCertificatePath}}
+< {{signaturePath}}
 --VaultBoundary--
 
 ### Owner selects Executor; optional when a suitable random Executor exists
@@ -123,19 +115,31 @@ Content-Type: application/json
 POST {{baseUrl}}/api/owner/vaults/{{vaultId}}/handovers
 Authorization: Bearer {{ownerToken}}
 
-### Staff intake is an alternative, not a replacement for a valid Executor
-GET {{baseUrl}}/api/staff/intake-vaults?page=1&pageSize=20
+### Assigned Executor discovers persisted assignments
+GET {{baseUrl}}/api/executor/assignments
 Authorization: Bearer {{operatorToken}}
 
-### Staff role needed; vault must have no assigned Executor/protected request
-POST {{baseUrl}}/api/staff/intake-vaults/{{vaultId}}/accept
+### Optional: assigned Executor initiates a draft for an already assigned vault
+POST {{baseUrl}}/api/executor/assignments/{{vaultId}}/handovers
 Authorization: Bearer {{operatorToken}}
+
+### Assigned Executor uploads death certificate before legal submission
+POST {{baseUrl}}/api/executor/handovers/{{requestId}}/death-certificate
+Authorization: Bearer {{operatorToken}}
+Content-Type: multipart/form-data; boundary=DeathBoundary
+
+--DeathBoundary
+Content-Disposition: form-data; name="File"; filename="death-certificate.pdf"
+Content-Type: application/pdf
+
+< {{deathCertificatePath}}
+--DeathBoundary--
 
 ### Assigned operator detail
 GET {{baseUrl}}/api/executor/handovers/{{requestId}}
 Authorization: Bearer {{operatorToken}}
 
-### Submit legal evidence (Staff may use corresponding /api/staff/handovers path)
+### Assigned Executor submits legal evidence after death certificate upload
 POST {{baseUrl}}/api/executor/handovers/{{requestId}}/legal-verifications
 Authorization: Bearer {{operatorToken}}
 Content-Type: multipart/form-data; boundary=LegalBoundary

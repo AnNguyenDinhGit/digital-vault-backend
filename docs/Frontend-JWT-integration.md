@@ -1,3 +1,5 @@
+> Cập nhật 17/10/2026: main đã bổ sung refresh token; xem [contract auth sau merge](Merge-main-2026-10-17.md). Các mô tả chưa có refresh token bên dưới thuộc phiên bản trước.
+
 # LegacyVault: tích hợp frontend bằng JWT Bearer
 
 API → BLL → DAL, ASP.NET Core .NET 8. Các entity/context scaffold và database schema được giữ nguyên. Frontend không được chỉnh sửa trong lần triển khai này.
@@ -121,10 +123,13 @@ Asset name ≤100, type ASCII ≤50, description ≤4000. Phân bổ >0, ≤100,
 
 Mọi mutation kho/tài sản/phân bổ/giấy tờ bị chặn khi có hồ sơ chưa Cancelled, kể cả Completed. Tạo bàn giao yêu cầu mỗi asset Active có giấy tờ và đúng 100% allocation; dùng Executor hợp lệ hiện tại hoặc random Executor Active/độc lập. Không có người phù hợp → 503, không dùng ID giả. Một hồ sơ đang xử lý/hoàn tất không được tạo lặp; Draft/Rejected có thể cancel để sửa tài liệu và tạo lại. Giữ lịch sử pháp lý, không xóa bản ghi.
 
-### Executor và Staff
+### Executor
 
 | Method | Path | Contract |
 | --- | --- | --- |
+| GET | `/api/executor/assignments` | Phân công Active/AutoAssigned của mình |
+| POST | `/api/executor/assignments/{vaultId}/handovers` | Tạo Draft cho kho đã được phân công hợp lệ |
+| POST | `/api/executor/handovers/{requestId}/death-certificate` | multipart File, Signature tùy chọn; chỉ Executor được phân công |
 | GET | `/api/executor/handovers` | Mảng HandoverDto của mình; Active/AutoAssigned thống nhất |
 | GET | `/api/executor/handovers/{requestId}` | HandoverDto được phân công |
 | GET | `/api/executor/handovers/{requestId}/documents/{documentId}/content` | Bytes; X-Signature-Valid |
@@ -132,14 +137,8 @@ Mọi mutation kho/tài sản/phân bổ/giấy tờ bị chặn khi có hồ s�
 | POST | `/api/executor/handovers/{requestId}/legal-verifications` | multipart VerifierId, Comment, Evidence → `{verificationId}` |
 | POST | `/api/executor/handovers/{requestId}/start` | 204, chỉ Approved → In_Progress |
 | POST | `/api/executor/handovers/{requestId}/complete` | multipart File + Signature bắt buộc → 204 |
-| GET | `/api/staff/intake-vaults?page=1&pageSize=20` | Chỉ vaultId/name đủ tiêu chí; chưa cho đọc tài sản |
-| POST | `/api/staff/intake-vaults/{vaultId}/accept` | 201, assignment + request + cases atomically |
-| GET | `/api/staff/handovers?page=1&pageSize=20&status=Draft` | PageDto hồ sơ được phân công |
-| GET/POST | `/api/staff/handovers/{requestId}/...` | detail, documents/content, documents upload, legal-verifications, start, complete giống Executor |
 
-Staff phải có role Staff trong USER_ROLES; Staff dùng UserId ở ExecutorId, không tạo entity Staff. Chỉ tiếp nhận vault Active, chưa có hồ sơ bảo vệ/Executor Active hoặc AutoAssigned, có giấy tờ Pending_Legal và phân bổ hoàn chỉnh. Staff phải độc lập với Owner/beneficiary. Pending_Legal chỉ là khai báo cần kiểm tra, không tự chứng minh Owner đã mất. Staff phải qua pháp lý, không được thay Executor hợp lệ. `ExecutorId NOT NULL` nên không có hàng đợi request unassigned; intake tạo người phụ trách và request cùng transaction. Concurrent intake chỉ một bên thắng.
-
-Script [ensure-staff-role.sql](../database/ensure-staff-role.sql) tạo role chạy lại an toàn; chỉ quản trị viên chạy rõ ràng, chưa chạy trên database thật. Script không tạo user hoặc cấp role cho ai. Chưa có API cấp tài khoản nhân viên.
+Không còn role/nghiệp vụ Staff. Chỉ Executor Active được phân công hợp lệ được upload giấy chứng tử/bằng chứng vào hồ sơ Draft/Rejected/Additional_Info. Giấy chứng tử bắt buộc trước khi nộp và duyệt pháp lý, không tự chứng minh tính hợp lệ hoặc hoàn tất bàn giao. Xem [contract upload và phân công](Executor-evidence-update.md).
 
 ### LegalVerifier
 
@@ -176,7 +175,7 @@ ReceiptDto có receiptId/handoverId/beneficiaryId/status/note/confirmedAt. Confi
 
 ## 4. Multipart, lỗi và pagination
 
-Owner upload fields: **File**, **BeneficiaryId**, **OwnerAlive**, **Signature** (khi còn sống), **DeathCertificate** (khi mất). Mỗi file ≤10 MiB. MIME hỗ trợ PDF/PNG/JPEG/text UTF-8, kiểm tra nội dung/header thực tế; không tin MIME/filename. Filename được chuẩn hóa ở API; storage GUID nằm ngoài web root. Chữ ký rời RSA-SHA256 PKCS#1 v1.5, RSA ≥2048, cert tin cậy/chưa hết hạn; chưa hỗ trợ PDF embedded/CMS. AES-256-GCM mã hóa **tại backend**, không E2EE/client-side encryption. Download có Content-Disposition và X-Signature-Valid, không lộ đường dẫn.
+Owner upload fields: **File**, **Signature** bắt buộc; **BeneficiaryId** tùy chọn, phải là phân bổ Active hiện có. Không gửi OwnerAlive/DeathCertificate. Giấy chứng tử dùng endpoint riêng của Executor và HANDOVER_DOCUMENTS. Mỗi file ≤10 MiB. MIME hỗ trợ PDF/PNG/JPEG/text UTF-8, kiểm tra nội dung/header thực tế; không tin MIME/filename. Filename được chuẩn hóa ở API; storage GUID nằm ngoài web root. Chữ ký rời RSA-SHA256 PKCS#1 v1.5, RSA ≥2048, cert tin cậy/chưa hết hạn; chưa hỗ trợ PDF embedded/CMS. AES-256-GCM mã hóa **tại backend**, không E2EE/client-side encryption. Download có Content-Disposition và X-Signature-Valid, không lộ đường dẫn.
 
 PageDto: `{"page":1,"pageSize":20,"items":[]}`, page ≥1, pageSize 1–100; chưa trả total. Handover status filter nhận Draft/Cancelled/Pending_Legal/Additional_Info/Rejected/Approved/In_Progress/Completed. Các list cũ giữ mảng và chưa có pagination; frontend không tự giả định list đó là PageDto.
 

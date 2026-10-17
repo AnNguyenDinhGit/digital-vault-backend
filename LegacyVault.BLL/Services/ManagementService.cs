@@ -9,8 +9,12 @@ namespace LegacyVault.BLL.Services;
 
 public sealed class ManagementService(IVaultRepository repository, IWorkflowRepository workflow, IDocumentStore store, DocumentProtection protection)
 {
-    public const string StaffRole = "Staff";
     private static bool Assigned(ExecutorAssignment a) => a.Status is "Active" or "AutoAssigned";
+    public async Task<IReadOnlyList<ExecutorAssignmentDto>> ExecutorAssignments(int user, CancellationToken ct)
+    {
+        await Require(user, ct, VaultService.ExecutorRole);
+        return (await workflow.ExecutorAssignments(user, ct)).Select(a => new ExecutorAssignmentDto(a.VaultId, user, a.Status, a.AssignedAt)).ToArray();
+    }
     private static void Validate(object input)
     {
         if (!Validator.TryValidateObject(input, new ValidationContext(input), new List<ValidationResult>(), true)) throw new WorkflowException(400, "Invalid input.");
@@ -128,7 +132,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private static void Ready(DigitalVault v)
     {
         var assets = v.DigitalAssets.Where(a => a.Status == "Active").ToArray();
-        if (assets.Length == 0 || assets.Any(a => a.BeneficiaryAssignments.Where(b => b.Status == "Active").Sum(b => b.Allocation) != 100 || !a.AssetDocuments.Any(d => d.Status is "Active" or "Pending_Legal")))
+        if (assets.Length == 0 || assets.Any(a => a.BeneficiaryAssignments.Where(b => b.Status == "Active").Sum(b => b.Allocation) != 100 || !a.AssetDocuments.Any(d => d.Status == "Active")))
             throw new WorkflowException(409, "Every active asset needs documents and exactly 100 percent active allocation.");
         if (assets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.Beneficiary.Status != "Active"))) throw new WorkflowException(409, "Beneficiary unavailable.");
     }
@@ -148,42 +152,41 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var existing = v.ExecutorAssignments.Where(Assigned).ToArray();
         if (existing.Length > 1) throw new WorkflowException(409, "Multiple active executors require administrative correction.");
         int executor;
-        if (existing.Length == 1) { executor = existing[0].ExecutorId; await Require(executor, ct, VaultService.ExecutorRole, StaffRole); }
+        if (existing.Length == 1) { executor = existing[0].ExecutorId; await Require(executor, ct, VaultService.ExecutorRole); }
         else
         {
-            var candidates = (await repository.UsersByRole(VaultService.ExecutorRole, ct)).Where(u => u.UserId != user && !v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == u.UserId))).ToArray();
-            if (candidates.Length == 0) throw new WorkflowException(503, "No independent active Executor available. An eligible deceased-owner vault can be received by Staff.");
-            executor = candidates[Random.Shared.Next(candidates.Length)].UserId;
+            var candidates = (await repository.UsersByRole(VaultService.ExecutorRole, ct)).Where(u => u.Status == "Active" && u.Roles.Any(r => r.RoleName == VaultService.ExecutorRole) && !u.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) && u.UserId != user && !v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == u.UserId))).ToArray();
+            if (candidates.Length == 0) throw new WorkflowException(503, "No independent active Executor is available. Provision an eligible Executor before retrying.");
+            executor = candidates[System.Security.Cryptography.RandomNumberGenerator.GetInt32(candidates.Length)].UserId;
             await Require(executor, ct, VaultService.ExecutorRole);
             repository.Add(new ExecutorAssignment { VaultId = vault, ExecutorId = executor, Status = "AutoAssigned", AssignedAt = DateTime.UtcNow });
+            Audit(user, "AutoAssignExecutor", "DigitalVault", vault);
         }
+        if (executor == v.OwnerId || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == executor)))
+            throw new WorkflowException(409, "Assigned Executor must be independent of the owner and beneficiaries.");
         var r = NewRequest(user, v, executor); await repository.Save(ct); return Map(r);
     }
-    public async Task<PageDto<IntakeDto>> IntakeList(int user, int page, int size, CancellationToken ct)
+    public async Task<HandoverDto> CreateAssignedRequest(int user, int vault, CancellationToken ct)
     {
-        await Require(user, ct, StaffRole); Paging(page, size);
-        // Discovery exposes only vault ID/name; no asset/file content before assignment.
-        return new(page, size, (await workflow.IntakeVaults(page, size, ct)).Where(v => v.OwnerId != user && !v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == user))).Select(v => new IntakeDto(v.VaultId, v.VaultName)).ToArray());
-    }
-    public async Task<HandoverDto> Intake(int user, int vault, CancellationToken ct)
-    {
-        await Require(user, ct, StaffRole);
-        var v = await workflow.VaultGraph(vault, ct) ?? throw new WorkflowException(404, "Vault not found."); Mutable(v); Ready(v);
-        if (v.ExecutorAssignments.Any(Assigned) || v.OwnerId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == user)) ||
-            !v.DigitalAssets.Any(a => a.AssetDocuments.Any(d => d.Status == "Pending_Legal"))) throw new WorkflowException(409, "Vault is not eligible for independent Staff intake; existing Executor cannot be replaced.");
-        repository.Add(new ExecutorAssignment { VaultId = vault, ExecutorId = user, Status = "Active", AssignedAt = DateTime.UtcNow });
-        var r = NewRequest(user, v, user); await repository.Save(ct); return Map(r);
+        await Require(user, ct, VaultService.ExecutorRole);
+        var v = await workflow.VaultGraph(vault, ct) ?? throw new WorkflowException(404, "Assigned vault not found.");
+        var assignments = v.ExecutorAssignments.Where(Assigned).ToArray();
+        if (assignments.Length != 1 || assignments[0].ExecutorId != user) throw new WorkflowException(404, "Assigned vault not found.");
+        if (v.OwnerId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == user)))
+            throw new WorkflowException(403, "Executor must be independent.");
+        Mutable(v); Ready(v);
+        var request = NewRequest(user, v, user); await repository.Save(ct); return Map(request);
     }
     public static void Paging(int page, int size) { if (page < 1 || page > 100000 || size is < 1 or > 100) throw new WorkflowException(400, "page >= 1; pageSize must be 1-100."); }
     public async Task<PageDto<HandoverDto>> Requests(int user, string kind, int page, int size, string? status, CancellationToken ct)
     {
-        await Require(user, ct, kind == "Operator" ? new[] { VaultService.ExecutorRole, StaffRole } : new[] { kind }); Paging(page, size);
+        await Require(user, ct, kind == "Operator" ? new[] { VaultService.ExecutorRole } : new[] { kind }); Paging(page, size);
         if (status is not null && status is not ("Draft" or "Cancelled" or "Pending_Legal" or "Additional_Info" or "Rejected" or "Approved" or "In_Progress" or "Completed")) throw new WorkflowException(400, "Unknown handover status filter.");
         return new(page, size, (await workflow.UserRequests(user, kind, page, size, status, ct)).Select(Map).ToArray());
     }
     public async Task<HandoverRequest> OperatorRequest(int user, int id, CancellationToken ct)
     {
-        await Require(user, ct, VaultService.ExecutorRole, StaffRole);
+        await Require(user, ct, VaultService.ExecutorRole);
         var r = await workflow.RequestGraph(id, ct);
         return r is not null && r.ExecutorId == user && r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && Assigned(a)) ? r : throw new WorkflowException(404, "Assigned request not found.");
     }
@@ -231,6 +234,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         if (r.Status != "Pending_Legal" || v.Status != "Pending" || r.LegalVerifications.Where(x => x.Status == "Pending").Any(x => x.VerifierId != user)) throw new WorkflowException(409, "Verification is not pending exclusively for this reviewer.");
         if (decision == "Approved")
         {
+            await HandoverEvidence.RequireDeathCertificate(r, store, protection, ct);
             if (r.Vault.Status != "Active" || r.HandoverCases.Count == 0 || !r.HandoverDocuments.Any() || r.HandoverCases.Any(c => c.Assignment.Status != "Active" || c.Assignment.Beneficiary.Status != "Active")) throw new WorkflowException(409, "Handover evidence and active cases are required.");
             foreach (var d in r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).Where(d => d.Status is "Active" or "Pending_Legal"))
             {

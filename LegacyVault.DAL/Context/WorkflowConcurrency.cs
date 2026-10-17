@@ -5,6 +5,7 @@ public partial class LegacyVaultDbContext
 {
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<RefreshToken>().Property(x => x.IsRevoked).IsConcurrencyToken();
         modelBuilder.Entity<HandoverRequest>().Property(x => x.Status).IsConcurrencyToken();
         modelBuilder.Entity<DigitalAsset>().Property(x => x.UpdatedAt).IsConcurrencyToken();
         modelBuilder.Entity<Authentication>().Property(x => x.UpdatedAt).IsConcurrencyToken();

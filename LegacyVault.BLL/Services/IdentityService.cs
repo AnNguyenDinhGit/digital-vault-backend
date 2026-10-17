@@ -15,7 +15,6 @@ public sealed class IdentityService(IVaultRepository repository)
     public async Task<TokenDto> GenerateAuthResponseAsync(User user, IAccessTokenIssuer issuer, CancellationToken ct)
     {
         var loginDto = new LoginDto(user.UserId, user.Roles.Select(r => r.RoleName).ToArray());
-        var tokenResult = issuer.Issue(loginDto);
 
         var refreshTokenStr = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
         var refreshToken = new RefreshToken
@@ -30,7 +29,7 @@ public sealed class IdentityService(IVaultRepository repository)
         repository.Add(refreshToken);
         await repository.Save(ct);
 
-        return tokenResult with
+        return issuer.Issue(loginDto) with
         {
             RefreshToken = refreshTokenStr,
             RefreshTokenExpiresAt = refreshToken.ExpiresAt
@@ -49,7 +48,7 @@ public sealed class IdentityService(IVaultRepository repository)
         }
 
         var user = await repository.User(token.UserId, ct);
-        if (user is null || user.Status != "Active")
+        if (user is null || user.Status != "Active" || user.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow))
         {
             throw new WorkflowException(401, "Tài khoản không khả dụng.");
         }
@@ -68,6 +67,8 @@ public sealed class IdentityService(IVaultRepository repository)
             CreatedAt = DateTime.UtcNow,
             IsRevoked = false
         };
+
+        token.ReplacedByToken = newRefreshTokenStr;
 
         repository.Add(newRefreshToken);
         await repository.Save(ct);
@@ -398,7 +399,7 @@ public sealed class IdentityService(IVaultRepository repository)
     public static void RequireGoogleAccount(User user)
     {
         if (user.Status != "Active" || user.Authentications.Any(x => x.LockedUntil > DateTime.UtcNow) ||
-            user.Roles.Any(x => x.RoleName is VaultService.AdminRole or VaultService.ExecutorRole or VaultService.VerifierRole or ManagementService.StaffRole))
+            user.Roles.Any(x => x.RoleName is not (VaultService.OwnerRole or VaultService.BeneficiaryRole)))
             throw new WorkflowException(403, "This account cannot use public Google sign-in.");
     }
 
