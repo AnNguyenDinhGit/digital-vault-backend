@@ -14,20 +14,51 @@ public sealed class MailOptions
     public string Password { get; set; } = "";
     public string From { get; set; } = "";
 }
-public interface IOtpSender { Task Send(string email, string code, CancellationToken ct); }
+public interface IOtpSender
+{
+    Task Send(string email, string code, CancellationToken ct);
+    Task SendEmail(string email, string subject, string body, CancellationToken ct); // BỔ SUNG
+}
 public sealed class SmtpOtpSender(MailOptions options) : IOtpSender
 {
     public async Task Send(string email, string code, CancellationToken ct)
     {
+        await SendEmail(
+            email,
+            "LegacyVault identity verification",
+            $"Your code is {code}. It expires in 5 minutes. Do not share this code.",
+            ct
+        );
+    }
+
+    // BỔ SUNG HÀM NÀY
+    public async Task SendEmail(string email, string subject, string body, CancellationToken ct)
+    {
         if (string.IsNullOrWhiteSpace(options.Host) || !MailAddress.TryCreate(options.From, out _) || options.Port is < 1 or > 65535)
             throw new WorkflowException(503, "OTP email delivery is not configured.");
-        using var client = new SmtpClient(options.Host, options.Port) { EnableSsl = true, Credentials = new NetworkCredential(options.Username, options.Password) };
-        using var message = new MailMessage(options.From, email, "LegacyVault identity verification", $"Your code is {code}. It expires in 5 minutes. Do not share this code.");
+
+        using var client = new SmtpClient(options.Host, options.Port)
+        {
+            EnableSsl = true,
+            Credentials = new NetworkCredential(options.Username, options.Password)
+        };
+
+        using var message = new MailMessage(options.From, email, subject, body);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        try { await client.SendMailAsync(message, timeout.Token); }
-        catch (SmtpException) { throw new WorkflowException(503, "OTP email delivery failed. Please retry later."); }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new WorkflowException(503, "OTP email delivery timed out. Please retry later."); }
+
+        try
+        {
+            await client.SendMailAsync(message, timeout.Token);
+        }
+        catch (SmtpException)
+        {
+            throw new WorkflowException(503, "Email delivery failed. Please retry later.");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new WorkflowException(503, "Email delivery timed out. Please retry later.");
+        }
     }
 }
 public sealed record OtpChallenge(string ChallengeId, DateTime ExpiresAt);
@@ -90,4 +121,6 @@ public sealed class OtpService(IOtpSender sender)
         verified.TryRemove(session, out _);
         foreach (var entry in challenges.Where(x => x.Value.Session == session).ToArray()) challenges.TryRemove(entry.Key, out _);
     }
+
+
 }
