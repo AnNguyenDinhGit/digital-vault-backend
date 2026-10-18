@@ -7,7 +7,12 @@ using System.ComponentModel.DataAnnotations;
 
 namespace LegacyVault.BLL.Services;
 
-public sealed class VaultService(IVaultRepository repository, IDocumentStore store, DocumentProtection protection, IWorkflowRepository? workflow = null)
+public sealed class VaultService(
+    IVaultRepository repository,
+    IDocumentStore store,
+    DocumentProtection protection,
+    IOtpSender mailSender,
+    IWorkflowRepository? workflow = null)
 {
     public const string OwnerRole = "Owner";
     public const string ExecutorRole = "Executor";
@@ -167,7 +172,15 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
         Audit(owner, "AssignBeneficiary", "DigitalAsset", assetId, "Success");
         repository.Add(new Notification { UserId = recipient.UserId, Type = "Allocation", Title = "Beneficiary designated", Message = "An owner designated you as a beneficiary. Access requires a legally approved handover and identity verification.", CreatedAt = now });
-        try { await repository.Save(ct); }
+        try
+        {
+            await repository.Save(ct);
+
+            // Gửi email thông báo cho Người thụ hưởng
+            var emailSubject = "AeternaVault - Bạn vừa được chỉ định làm Người thụ hưởng";
+            var emailBody = $"Xin chào {recipient.FullName},\n\nBạn đã được chỉ định làm Người thụ hưởng cho tài sản '{asset.AssetName}' với tỷ lệ là {input.Allocation}%.\n\nVui lòng đăng nhập vào ứng dụng AeternaVault để kiểm tra chi tiết.";
+            await mailSender.SendEmail(recipient.Email, emailSubject, emailBody, ct);
+        }
         catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Beneficiary configuration changed. Reload and retry."); }
         return new BeneficiaryDto(assetId, recipient.UserId, recipient.FullName, assignment.Allocation, assignment.Status);
     }
@@ -219,8 +232,17 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var path = await Store(file, user, signature, ct);
         try
         {
-            var doc = new AssetDocument { AssetId = assetId, FileName = file.FileName, FileType = file.FileType,
-                StoragePath = path, IsEncrypted = true, UploadedBy = user, Status = "Active", UploadedAt = DateTime.UtcNow };
+            var doc = new AssetDocument
+            {
+                AssetId = assetId,
+                FileName = file.FileName,
+                FileType = file.FileType,
+                StoragePath = path,
+                IsEncrypted = true,
+                UploadedBy = user,
+                Status = "Active",
+                UploadedAt = DateTime.UtcNow
+            };
             repository.Add(doc);
             asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt); asset.Vault.UpdatedAt = RecordVersion.Next(asset.Vault.UpdatedAt);
             Audit(user, "UploadAssetDocument", "DigitalAsset", assetId, "Alive_Signed");
@@ -259,8 +281,10 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
         var doc = protection.Decrypt(await store.Read(path, ct));
         return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, protection.Verify(doc.File.Content, doc.Signature, doc.SignerId));
     }
+
     public Task<DocumentDto> UploadDeathCertificate(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct) =>
         UploadHandoverDocument(user, request, file, signature, ct, "DeathCertificate");
+
     public async Task<DocumentDto> UploadHandoverDocument(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct, string purpose = "Evidence")
     {
         var r = await Executed(user, request, ct);
@@ -369,5 +393,4 @@ public sealed class VaultService(IVaultRepository repository, IDocumentStore sto
 
     private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
     { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
-
 }
