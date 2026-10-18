@@ -147,8 +147,8 @@ public sealed class VaultService(
         var recipient = await repository.UserByEmail(input.Email.Trim().ToLowerInvariant(), ct);
         if (recipient is null || recipient.Status != "Active") throw new WorkflowException(404, "Active recipient account not found. Ask the recipient to register first.");
         if (recipient.UserId == owner) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
-        if (asset.BeneficiaryAssignments.Any(x => x.BeneficiaryId == recipient.UserId && x.Status == "Active"))
-            throw new WorkflowException(409, "This user is already an active beneficiary of the asset.");
+        if (asset.BeneficiaryAssignments.Any(x => x.BeneficiaryId == recipient.UserId && (x.Status == "Active" || x.Status == "Pending")))
+            throw new WorkflowException(409, "This user is already a pending or active beneficiary of the asset.");
         if (asset.BeneficiaryAssignments.Where(x => x.Status == "Active").Sum(x => x.Allocation) + input.Allocation > 100m)
             throw new WorkflowException(409, "Total active beneficiary allocation cannot exceed 100 percent.");
         var now = DateTime.UtcNow;
@@ -164,7 +164,7 @@ public sealed class VaultService(
             AssetId = assetId,
             BeneficiaryId = recipient.UserId,
             Allocation = input.Allocation,
-            Status = "Active",
+            Status = "Pending", // Đặt là Pending để chờ người thụ hưởng phản hồi/xác nhận
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -176,9 +176,15 @@ public sealed class VaultService(
         {
             await repository.Save(ct);
 
-            // Gửi email thông báo cho Người thụ hưởng
-            var emailSubject = "AeternaVault - Bạn vừa được chỉ định làm Người thụ hưởng";
-            var emailBody = $"Xin chào {recipient.FullName},\n\nBạn đã được chỉ định làm Người thụ hưởng cho tài sản '{asset.AssetName}' với tỷ lệ là {input.Allocation}%.\n\nVui lòng đăng nhập vào ứng dụng AeternaVault để kiểm tra chi tiết.";
+            // Gửi email yêu cầu XÁC NHẬN cho Người thụ hưởng
+            var confirmUrl = $"http://localhost:3000/beneficiary/accept?assetId={assetId}&assignmentId={assignment.AssignmentId}";
+            var emailSubject = "AeternaVault - Yêu cầu xác nhận nhận chỉ định Di sản";
+            var emailBody = $"Xin chào {recipient.FullName},\n\n" +
+                            $"Bạn vừa nhận được lời mời làm Người thụ hưởng cho tài sản '{asset.AssetName}' với tỷ lệ phân bổ là {input.Allocation}%.\n\n" +
+                            $"Hiện tại chỉ định này đang ở trạng thái 'Đợi phản hồi'. Vui lòng truy cập đường dẫn sau hoặc đăng nhập vào ứng dụng để XÁC NHẬN đồng ý nhận di sản:\n" +
+                            $"{confirmUrl}\n\n" +
+                            $"Trân trọng,\nĐội ngũ LegacyVault";
+
             await mailSender.SendEmail(recipient.Email, emailSubject, emailBody, ct);
         }
         catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Beneficiary configuration changed. Reload and retry."); }
@@ -393,4 +399,36 @@ public sealed class VaultService(
 
     private void Audit(int user, string action, string type, int id, string result) => repository.Add(new AuditLog
     { UserId = user, Action = action, EntityType = type, EntityId = id, Result = result, Timestamp = DateTime.UtcNow });
+
+    public async Task AcceptBeneficiary(int beneficiaryUserId, int assetId, CancellationToken ct)
+    {
+        await Role(beneficiaryUserId, BeneficiaryRole, ct);
+        var asset = await repository.Asset(assetId, ct) ?? throw new WorkflowException(404, "Asset not found.");
+
+        var assignment = asset.BeneficiaryAssignments.FirstOrDefault(x => x.BeneficiaryId == beneficiaryUserId && x.Status == "Pending")
+            ?? throw new WorkflowException(404, "Pending beneficiary assignment not found.");
+
+        assignment.Status = "Active";
+        assignment.UpdatedAt = DateTime.UtcNow;
+        asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
+
+        Audit(beneficiaryUserId, "AcceptBeneficiaryAssignment", "DigitalAsset", assetId, "Success");
+        await repository.Save(ct);
+    }
+
+    public async Task RejectBeneficiary(int beneficiaryUserId, int assetId, CancellationToken ct)
+    {
+        await Role(beneficiaryUserId, BeneficiaryRole, ct);
+        var asset = await repository.Asset(assetId, ct) ?? throw new WorkflowException(404, "Asset not found.");
+
+        var assignment = asset.BeneficiaryAssignments.FirstOrDefault(x => x.BeneficiaryId == beneficiaryUserId && x.Status == "Pending")
+            ?? throw new WorkflowException(404, "Pending beneficiary assignment not found.");
+
+        assignment.Status = "Rejected";
+        assignment.UpdatedAt = DateTime.UtcNow;
+        asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
+
+        Audit(beneficiaryUserId, "RejectBeneficiaryAssignment", "DigitalAsset", assetId, "Success");
+        await repository.Save(ct);
+    }
 }
