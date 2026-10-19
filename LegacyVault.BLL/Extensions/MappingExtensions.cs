@@ -34,7 +34,11 @@ public static class MappingExtensions
             r.HandoverCases
                 .Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status))
                 .ToArray()
-        );
+        )
+        {
+            Owner = new(r.Vault.OwnerId, r.Vault.Owner?.FullName ?? ""), ExecutorId = r.ExecutorId,
+            SubmittedAt = r.SubmittedAt, CompletedAt = r.CompletedAt
+        };
 
     public static AssignmentDto ToDto(this BeneficiaryAssignment a)
         => new(a.AssignmentId, a.AssetId, a.BeneficiaryId, a.Beneficiary.FullName, a.Allocation, a.Status);

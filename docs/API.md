@@ -6,6 +6,10 @@
 
 # LegacyVault API
 
+## Executor và LegalVerifier (19/10/2026)
+
+Xem [contract và hướng dẫn test đầy đủ](Executor-Legal-workflow.md): tổng quan tất cả đơn kèm Owner, chi tiết theo phân công, giấy chứng tử, lịch sử pháp lý, tài liệu và trạng thái Owner có nguồn bằng chứng. Endpoint cũ được giữ; `GET /api/executor/handovers/overview` là danh sách tổng quan phân trang mới.
+
 Contract hiện tại: **JWT Bearer**, API → BLL → DAL. Danh sách method/path/role, DTO, multipart, status codes, pagination và giới hạn được cập nhật đầy đủ tại [Frontend-JWT-integration.md](Frontend-JWT-integration.md).
 
 ## Authentication

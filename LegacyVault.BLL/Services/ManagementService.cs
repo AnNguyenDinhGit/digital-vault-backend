@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Extensions;
 using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
@@ -10,6 +11,20 @@ namespace LegacyVault.BLL.Services;
 public sealed class ManagementService(IVaultRepository repository, IWorkflowRepository workflow, IDocumentStore store, DocumentProtection protection)
 {
     private static bool Assigned(ExecutorAssignment a) => a.Status is "Active" or "AutoAssigned";
+    public async Task<PageDto<HandoverOverviewDto>> ExecutorOverview(int user, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct)
+    {
+        await Require(user, ct, VaultService.ExecutorRole); Paging(page, size); ValidateStatus(status);
+        if (ownerId is <= 0) throw new WorkflowException(400, "ownerId must be positive.");
+        var rows = await workflow.Overview(user, page, size, status, ownerId, assignedOnly, ct);
+        return new(page, size, rows.Select(r => new HandoverOverviewDto(r.RequestId, r.VaultId, r.VaultName,
+            new(r.OwnerId, r.OwnerName), r.ExecutorId, r.ExecutorName, r.RequestType, r.Status, r.InitiatedAt,
+            r.SubmittedAt, r.CompletedAt, r.IsAssignedToMe)).ToArray());
+    }
+    private static void ValidateStatus(string? status)
+    {
+        if (status is not null && status is not ("Draft" or "Cancelled" or "Pending_Legal" or "Additional_Info" or "Rejected" or "Approved" or "In_Progress" or "Completed"))
+            throw new WorkflowException(400, "Unknown handover status filter.");
+    }
     public async Task<IReadOnlyList<ExecutorAssignmentDto>> ExecutorAssignments(int user, CancellationToken ct)
     {
         await Require(user, ct, VaultService.ExecutorRole);
@@ -51,9 +66,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private static void Touch(DigitalVault v) => v.UpdatedAt = RecordVersion.Next(v.UpdatedAt);
     private void Audit(int user, string action, string type, int id) => repository.Add(new AuditLog { UserId = user, Action = action, EntityType = type, EntityId = id, Result = "Success", Timestamp = DateTime.UtcNow });
     private void Notify(int user, string type, string title, string message) => repository.Add(new Notification { UserId = user, Type = type, Title = title, Message = message, CreatedAt = DateTime.UtcNow });
-    private static HandoverDto Map(HandoverRequest r) => new(r.RequestId, r.VaultId, r.RequestType, r.Status, r.InitiatedAt,
-        r.HandoverDocuments.Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray(),
-        r.HandoverCases.Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)).ToArray());
+    private static HandoverDto Map(HandoverRequest r) => r.ToDto();
     private static AssignmentDto Map(BeneficiaryAssignment a) => new(a.AssignmentId, a.AssetId, a.BeneficiaryId, a.Beneficiary.FullName, a.Allocation, a.Status);
     private static ReceiptDto Map(BeneficiaryReceipt r) => new(r.ReceiptId, r.HandoverId, r.BeneficiaryId, r.Status, r.ConfirmationNote, r.ConfirmedAt);
     public async Task<VaultDto> UpdateVault(int user, int id, CreateVaultInput input, CancellationToken ct)
@@ -117,8 +130,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     private async Task<DocumentContent> Read(string path, CancellationToken ct)
     {
-        var content = protection.Decrypt(await store.Read(path, ct));
-        return new(content.File.FileName, content.File.FileType, content.File.Content, protection.Verify(content.File.Content, content.Signature, content.SignerId));
+        var content = await protection.Read(store, path, ct);
+        return new(content.File.FileName, content.File.FileType, content.File.Content, protection.Verify(content.File.Content, content.Signature, content.SignerId), content.Purpose);
     }
     public async Task AssignExecutor(int user, int vault, ExecutorInput input, CancellationToken ct)
     {
@@ -181,14 +194,55 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task<PageDto<HandoverDto>> Requests(int user, string kind, int page, int size, string? status, CancellationToken ct)
     {
         await Require(user, ct, kind == "Operator" ? new[] { VaultService.ExecutorRole } : new[] { kind }); Paging(page, size);
-        if (status is not null && status is not ("Draft" or "Cancelled" or "Pending_Legal" or "Additional_Info" or "Rejected" or "Approved" or "In_Progress" or "Completed")) throw new WorkflowException(400, "Unknown handover status filter.");
+        ValidateStatus(status);
         return new(page, size, (await workflow.UserRequests(user, kind, page, size, status, ct)).Select(Map).ToArray());
     }
     public async Task<HandoverRequest> OperatorRequest(int user, int id, CancellationToken ct)
     {
         await Require(user, ct, VaultService.ExecutorRole);
         var r = await workflow.RequestGraph(id, ct);
-        return r is not null && r.ExecutorId == user && r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && Assigned(a)) ? r : throw new WorkflowException(404, "Assigned request not found.");
+        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && Assigned(a))) throw new WorkflowException(404, "Assigned request not found.");
+        if (r.Vault.OwnerId == user || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == user)) throw new WorkflowException(403, "Executor must be independent.");
+        return r;
+    }
+    public async Task<OwnerLifeStatusDto> ExecutorOwnerStatus(int user, int id, CancellationToken ct) => await OwnerStatus(await OperatorRequest(user, id, ct), ct);
+    public async Task<OwnerLifeStatusDto> LegalOwnerStatus(int user, int id, CancellationToken ct) => await OwnerStatus((await Legal(user, id, ct)).Request, ct);
+    private async Task<OwnerLifeStatusDto> OwnerStatus(HandoverRequest request, CancellationToken ct)
+    {
+        var ownerId = request.Vault.OwnerId; var ownerName = request.Vault.Owner?.FullName ?? "";
+        foreach (var verified in await workflow.ApprovedOwnerRequests(ownerId, ct))
+        {
+            var death = await HandoverEvidence.FindDeathCertificate(verified, store, protection, ct);
+            if (death is null) continue;
+            var approval = verified.LegalVerifications.Where(v => v.Status == "Approved" && v.ReviewedAt != null).OrderByDescending(v => v.ReviewedAt).First();
+            return new(ownerId, ownerName, "ConfirmedDeceased", request.RequestId, verified.RequestId, death.HandoverDocumentId, approval.VerifierId, approval.ReviewedAt);
+        }
+        var evidence = request.Status == "Cancelled" ? null : await HandoverEvidence.FindDeathCertificate(request, store, protection, ct);
+        var state = evidence is null ? "NotConfirmed" : request.Status == "Rejected" ? "Rejected" : "ReportedDeceased";
+        return new(ownerId, ownerName, state, request.RequestId, evidence is null ? null : request.RequestId, evidence?.HandoverDocumentId, null, null);
+    }
+    private static IReadOnlyList<LegalHistoryDto> History(HandoverRequest r) => r.LegalVerifications.OrderByDescending(v => v.SubmittedAt).ThenByDescending(v => v.VerificationId)
+        .Select(v => new LegalHistoryDto(v.VerificationId, r.RequestId, v.VerifierId, v.Verifier?.FullName ?? "", v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt)).ToArray();
+    public async Task<IReadOnlyList<LegalHistoryDto>> ExecutorHistory(int user, int id, CancellationToken ct) => History(await OperatorRequest(user, id, ct));
+    public async Task<IReadOnlyList<LegalHistoryDto>> LegalHistory(int user, int id, CancellationToken ct) => History((await Legal(user, id, ct)).Request);
+    private async Task<IReadOnlyList<DocumentDto>> EvidenceMetadata(HandoverRequest request, CancellationToken ct)
+    {
+        var result = new List<DocumentDto>();
+        foreach (var d in request.HandoverDocuments)
+        {
+            var content = await Read(d.StoragePath, ct);
+            result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+        }
+        return result;
+    }
+    public async Task<IReadOnlyList<DocumentDto>> ExecutorDocuments(int user, int id, CancellationToken ct) => await EvidenceMetadata(await OperatorRequest(user, id, ct), ct);
+    public async Task<IReadOnlyList<DocumentDto>> LegalDocuments(int user, int id, CancellationToken ct) => await EvidenceMetadata((await Legal(user, id, ct)).Request, ct);
+    public async Task<IReadOnlyList<VerifierOptionDto>> LegalVerifiers(int user, int id, CancellationToken ct)
+    {
+        var r = await OperatorRequest(user, id, ct);
+        return (await repository.UsersByRole(VaultService.VerifierRole, ct)).Where(v => v.UserId != user && v.UserId != r.Vault.OwnerId &&
+            !r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == v.UserId))
+            .Select(v => new VerifierOptionDto(v.UserId, v.FullName)).ToArray();
     }
     public async Task<HandoverDto> OwnerRequest(int user, int id, CancellationToken ct)
     {
@@ -230,12 +284,18 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task<ReviewDto> Review(int user, int id, string decision, ReviewInput input, CancellationToken ct)
     {
         Validate(input); if (string.IsNullOrWhiteSpace(input.Comment)) throw new WorkflowException(400, "Review comment required.");
+        if (decision is not ("Approved" or "Rejected" or "Additional_Info")) throw new WorkflowException(400, "Unsupported legal decision.");
         var (r, v) = await Legal(user, id, ct);
         if (r.Status != "Pending_Legal" || v.Status != "Pending" || r.LegalVerifications.Where(x => x.Status == "Pending").Any(x => x.VerifierId != user)) throw new WorkflowException(409, "Verification is not pending exclusively for this reviewer.");
         if (decision == "Approved")
         {
+            await Require(r.ExecutorId, ct, VaultService.ExecutorRole);
+            if (!r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == r.ExecutorId && Assigned(a))) throw new WorkflowException(409, "Executor assignment is no longer active.");
             await HandoverEvidence.RequireDeathCertificate(r, store, protection, ct);
             if (r.Vault.Status != "Active" || r.HandoverCases.Count == 0 || !r.HandoverDocuments.Any() || r.HandoverCases.Any(c => c.Assignment.Status != "Active" || c.Assignment.Beneficiary.Status != "Active")) throw new WorkflowException(409, "Handover evidence and active cases are required.");
+            var caseAssets = r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).ToArray();
+            if (caseAssets.Length != r.HandoverCases.Select(c => c.Assignment.AssetId).Distinct().Count() || caseAssets.Any(a => a.Status != "Active" || !a.AssetDocuments.Any(d => d.Status == "Active")))
+                throw new WorkflowException(409, "Every handover asset needs an active asset record and signed document.");
             foreach (var d in r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).Where(d => d.Status is "Active" or "Pending_Legal"))
             {
                 var content = await Read(d.StoragePath, ct);
@@ -243,6 +303,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             }
             foreach (var d in r.HandoverDocuments) _ = await Read(d.StoragePath, ct);
             r.Status = "Approved";
+            Audit(user, "ConfirmOwnerDeceased", "User", r.Vault.OwnerId);
             foreach (var c in r.HandoverCases) c.Status = "In_Progress";
             foreach (var d in r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).Where(d => d.Status == "Pending_Legal")) d.Status = "Active";
             foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct()) Notify(recipient, "Inheritance", "Inheritance available", "Verify your identity to review the assigned inheritance.");

@@ -206,3 +206,6 @@ SELECT audit đã đối chiếu 25 bảng không thiếu cột; ExecutorId bắ
 Chạy `dotnet run --project LegacyVault.Tests` (console harness, không dotnet test). Các luồng chính có [LegacyVault.http](../LegacyVault.http).
 
 Build/test cuối: 0 lỗi/0 cảnh báo, **256 kiểm tra đạt**. Xem [báo cáo bàn giao](Backend-JWT-handover.md). Tham khảo thuật toán: [ASP.NET Core JWT validation](https://learn.microsoft.com/en-us/aspnet/core/security/authentication/configure-jwt-bearer-authentication), [RFC 6238 TOTP](https://www.rfc-editor.org/rfc/rfc6238).
+# Bổ sung contract Executor/LegalVerifier — 19/10/2026
+
+[Contract mới](Executor-Legal-workflow.md): dùng GET `/api/executor/handovers/overview` cho màn hình tất cả đơn; `owner.userId`, `owner.fullName`, `isAssignedToMe` phục vụ hiển thị. Danh sách cũ vẫn chỉ trả phân công của người gọi. Các API history/documents/owner-status giữ quyền theo hồ sơ; giao diện phải phân biệt khai báo đã mất với xác nhận pháp lý. Đây là field/endpoint bổ sung, không thay token contract.

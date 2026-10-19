@@ -62,3 +62,6 @@ dotnet run --project LegacyVault.Tests
 ```
 
 SQLite relational cô lập và external doubles; không seed test trên SQL Server thật. Google test chạy TestServer với scheme HTTPS, token RSA, không import private key vào Windows và không tắt TLS production. Đây không thay thế Google/SMTP/certificates thật.
+# Bổ sung test Executor và LegalVerifier — 19/10/2026
+
+Làm theo [luồng Swagger Executor/LegalVerifier](Executor-Legal-workflow.md). Có hướng dẫn xem tất cả đơn kèm Owner, giới hạn phân công, nộp giấy chứng tử, bổ sung/duyệt/từ chối, bắt đầu/hoàn tất và kiểm tra trạng thái Owner. Request mẫu mới ở cuối [LegacyVault.http](../LegacyVault.http).
