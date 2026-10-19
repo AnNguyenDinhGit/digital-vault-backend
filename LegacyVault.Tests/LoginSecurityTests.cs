@@ -176,16 +176,27 @@ internal static class LoginSecurityTests
         public override DateTimeOffset GetUtcNow() => now;
         public void Advance(TimeSpan value) => now += value;
     }
+
     private sealed class LoginSender : IOtpSender
     {
         public string Code { get; private set; } = "";
         public bool Fail { get; set; }
+
         public Task Send(string email, string code, CancellationToken ct)
         {
             if (Fail) throw new WorkflowException(503, "Test email unavailable.");
-            Code = code; return Task.CompletedTask;
+            Code = code;
+            return Task.CompletedTask;
+        }
+
+        public Task SendEmail(string email, string subject, string body, CancellationToken ct)
+        {
+            if (Fail) throw new WorkflowException(503, "Test email unavailable.");
+            Code = body;
+            return Task.CompletedTask;
         }
     }
+
     private sealed class CountingIssuer : IAccessTokenIssuer
     {
         public int Count { get; private set; }

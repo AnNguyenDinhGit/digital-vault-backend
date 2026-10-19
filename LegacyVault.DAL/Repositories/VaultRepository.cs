@@ -3,9 +3,13 @@ using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.SqlClient;
 using System.Data;
+
 namespace LegacyVault.DAL.Repositories;
+
 public interface IVaultRepository
 {
+    IQueryable<User> QueryUsers();
+    IQueryable<AuditLog> QueryAuditLogs();
     Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct);
     Task<User?> User(int id, CancellationToken ct);
     Task<User?> LoginUser(string email, CancellationToken ct);
@@ -23,24 +27,41 @@ public interface IVaultRepository
     void Add<T>(T entity) where T : class;
     Task Save(CancellationToken ct);
 }
+
 public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
 {
+    public IQueryable<User> QueryUsers() => db.Users.Include(x => x.Roles).AsNoTracking();
+    // Thêm phương thức này bên dưới QueryUsers()
+    public IQueryable<AuditLog> QueryAuditLogs() => db.AuditLogs.Include(a => a.User).AsNoTracking();
+
     public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct)
-    => db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == token, ct);
-    public Task<User?> User(int id, CancellationToken ct) => db.Users.Include(x => x.Roles).Include(x => x.Authentications).Include(x => x.TwoFactorAuths).SingleOrDefaultAsync(x => x.UserId == id, ct);
-    public Task<User?> LoginUser(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).Include(x => x.Authentications).Include(x => x.TwoFactorAuths).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
-    public Task<User?> UserByEmail(string email, CancellationToken ct) => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
+        => db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == token, ct);
+
+    public Task<User?> User(int id, CancellationToken ct)
+        => db.Users.Include(x => x.Roles).Include(x => x.Authentications).Include(x => x.TwoFactorAuths).SingleOrDefaultAsync(x => x.UserId == id, ct);
+
+    public Task<User?> LoginUser(string email, CancellationToken ct)
+        => db.Users.Include(x => x.Roles).Include(x => x.Authentications).Include(x => x.TwoFactorAuths).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
+
+    public Task<User?> UserByEmail(string email, CancellationToken ct)
+        => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
 
     public Task<List<User>> UsersByRole(string role, CancellationToken ct) =>
-    db.Users
-      .Include(x => x.Roles)
-      .Include(x => x.Authentications)
-      .Where(x => x.Status == "Active" && !x.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) && x.Roles.Any(r => r.RoleName == role))
-      .ToListAsync(ct);
+        db.Users
+          .Include(x => x.Roles)
+          .Include(x => x.Authentications)
+          .Where(x => x.Status == "Active" && !x.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) && x.Roles.Any(r => r.RoleName == role))
+          .ToListAsync(ct);
 
-    public Task<Role?> Role(string name, CancellationToken ct) => db.Roles.SingleOrDefaultAsync(x => x.RoleName == name, ct);
-    public Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct) => db.DigitalVaults.AsNoTracking().Where(x => x.OwnerId == owner).OrderBy(x => x.VaultId).ToListAsync(ct);
-    public Task<DigitalVault?> Vault(int id, CancellationToken ct) => db.DigitalVaults.Include(x => x.HandoverRequests).Include(x => x.ExecutorAssignments).SingleOrDefaultAsync(x => x.VaultId == id, ct);
+    public Task<Role?> Role(string name, CancellationToken ct)
+        => db.Roles.SingleOrDefaultAsync(x => x.RoleName == name, ct);
+
+    public Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct)
+        => db.DigitalVaults.AsNoTracking().Where(x => x.OwnerId == owner).OrderBy(x => x.VaultId).ToListAsync(ct);
+
+    public Task<DigitalVault?> Vault(int id, CancellationToken ct)
+        => db.DigitalVaults.Include(x => x.HandoverRequests).Include(x => x.ExecutorAssignments).SingleOrDefaultAsync(x => x.VaultId == id, ct);
+
     public async Task Register(User user, string defaultRole, CancellationToken ct)
     {
         // The scaffold maps User.Roles to USER_ROLES and User.Authentications to AUTHENTICATIONS.
@@ -73,6 +94,7 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
             }
         }
     }
+
     private void ResetRegistrationForRetry(User user)
     {
         db.ChangeTracker.Clear();
@@ -80,14 +102,28 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
         foreach (var auth in user.Authentications) { auth.AuthId = 0; auth.UserId = 0; }
         user.Roles.Clear();
     }
+
     private IQueryable<DigitalAsset> Assets => db.DigitalAssets.Include(x => x.Vault).ThenInclude(x => x.HandoverRequests).Include(x => x.AssetDocuments).Include(x => x.BeneficiaryAssignments).ThenInclude(x => x.Beneficiary).AsSplitQuery();
-    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct) => Assets.Where(x => x.Vault.OwnerId == owner).OrderBy(x => x.AssetId).ToListAsync(ct);
-    public Task<DigitalAsset?> Asset(int id, CancellationToken ct) => Assets.SingleOrDefaultAsync(x => x.AssetId == id, ct);
+
+    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct)
+        => Assets.Where(x => x.Vault.OwnerId == owner).OrderBy(x => x.AssetId).ToListAsync(ct);
+
+    public Task<DigitalAsset?> Asset(int id, CancellationToken ct)
+        => Assets.SingleOrDefaultAsync(x => x.AssetId == id, ct);
+
     private IQueryable<HandoverRequest> Handovers => db.HandoverRequests.Include(x => x.Vault).ThenInclude(x => x.ExecutorAssignments).Include(x => x.HandoverDocuments).Include(x => x.LegalVerifications).Include(x => x.HandoverCases).ThenInclude(x => x.Assignment).ThenInclude(x => x.Asset).AsSplitQuery();
-    public Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct) => Handovers.Where(x => x.ExecutorId == executor).OrderByDescending(x => x.InitiatedAt).ToListAsync(ct);
-    public Task<HandoverRequest?> Request(int id, CancellationToken ct) => Handovers.SingleOrDefaultAsync(x => x.RequestId == id, ct);
-    public Task<List<HandoverCase>> Inherited(int beneficiary, CancellationToken ct) => db.HandoverCases.Include(x => x.Request).ThenInclude(x => x.LegalVerifications).Include(x => x.Assignment).ThenInclude(x => x.Asset).ThenInclude(x => x.AssetDocuments).Where(x => x.Assignment.BeneficiaryId == beneficiary && x.Assignment.Status == "Active" && x.Request.LegalVerifications.Any(v => v.Status == "Approved") && (x.Status == "In_Progress" || x.Status == "Completed" || x.Status == "Received")).OrderBy(x => x.HandoverId).AsSplitQuery().ToListAsync(ct);
+
+    public Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct)
+        => Handovers.Where(x => x.ExecutorId == executor).OrderByDescending(x => x.InitiatedAt).ToListAsync(ct);
+
+    public Task<HandoverRequest?> Request(int id, CancellationToken ct)
+        => Handovers.SingleOrDefaultAsync(x => x.RequestId == id, ct);
+
+    public Task<List<HandoverCase>> Inherited(int beneficiary, CancellationToken ct)
+        => db.HandoverCases.Include(x => x.Request).ThenInclude(x => x.LegalVerifications).Include(x => x.Assignment).ThenInclude(x => x.Asset).ThenInclude(x => x.AssetDocuments).Where(x => x.Assignment.BeneficiaryId == beneficiary && x.Assignment.Status == "Active" && x.Request.LegalVerifications.Any(v => v.Status == "Approved") && (x.Status == "In_Progress" || x.Status == "Completed" || x.Status == "Received")).OrderBy(x => x.HandoverId).AsSplitQuery().ToListAsync(ct);
+
     public void Add<T>(T entity) where T : class => db.Add(entity);
+
     public async Task Save(CancellationToken ct)
     {
         try { await db.SaveChangesAsync(ct); }
@@ -95,5 +131,6 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
         catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2601 or 2627 }) { throw new RepositoryDuplicateException(); }
     }
 }
+
 public sealed class RepositoryConflictException : Exception;
 public sealed class RepositoryDuplicateException : Exception;
