@@ -10,7 +10,8 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 
 internal static class BeneficiaryAssignmentTests
 {
-    private static VaultService Service(LegacyVaultDbContext db) => new(new VaultRepository(db), new FakeStore(), new DocumentProtection(new SecurityOptions()));
+    private static VaultService Service(LegacyVaultDbContext db) =>
+    new(new VaultRepository(db), new FakeStore(), new DocumentProtection(new SecurityOptions()), new FakeSender(), new WorkflowRepository(db));
     private static async Task<(int Owner, int Asset)> Seed(DbContextOptions<LegacyVaultDbContext> options)
     {
         await using var db = new LegacyVaultDbContext(options);

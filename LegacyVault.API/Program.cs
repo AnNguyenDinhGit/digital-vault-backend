@@ -15,6 +15,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddScoped<AdminService>();
 
 // 1. Đăng ký các Services Bảo mật & JWT
 builder.Services.AddSingleton<IAccountEncryptionService, AccountEncryptionService>();
@@ -73,20 +74,17 @@ builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
 builder.Services.AddScoped<ManagementService>();
 builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
-
 builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
 
-// SỬA TẠI ĐÂY: Đọc đúng section "MailOptions" (hoặc "Mail" nếu fallback) từ appsettings/secrets.json
 var mailOptions = builder.Configuration.GetSection("MailOptions").Get<MailOptions>()
     ?? builder.Configuration.GetSection("Mail").Get<MailOptions>()
     ?? new MailOptions();
-builder.Services.AddSingleton(mailOptions);
 
+builder.Services.AddSingleton(mailOptions);
 builder.Services.AddSingleton<DocumentProtection>();
 builder.Services.AddSingleton<IOtpSender, SmtpOtpSender>(); // Đăng ký 1 lần duy nhất
 builder.Services.AddSingleton<OtpService>();
 builder.Services.AddSingleton<IDocumentStore>(new DocumentStore(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "documents")));
-
 builder.Services.AddVaultJwt(builder.Configuration);
 
 builder.Services.AddAuthentication().AddCookie("GoogleTemporary", options =>
@@ -143,6 +141,14 @@ if (string.IsNullOrWhiteSpace(jwtKey) || System.Text.Encoding.UTF8.GetBytes(jwtK
 // Build App
 var app = builder.Build();
 
+// 6. Tự động Migration & Seed Data khi ứng dụng khởi động
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<LegacyVaultDbContext>();
+    await db.Database.EnsureCreatedAsync(); // Hoặc MigrateAsync() tùy dự án
+    await DbInitializer.SeedAsync(db);
+}
+
 app.UseVaultErrors();
 app.UseHttpsRedirection();
 app.UseSwagger();
@@ -157,6 +163,7 @@ app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
+
 app.MapControllers();
 
 app.Run();

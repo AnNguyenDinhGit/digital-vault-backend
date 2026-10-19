@@ -68,7 +68,7 @@ var wrong = actual == "000000" ? "000001" : "000000";
 for (var i = 0; i < 5; i++) await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, wrong); return Task.CompletedTask; }, 400, $"OTP failed attempt {i + 1}");
 await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, actual); return Task.CompletedTask; }, 400, "OTP attempt limit cannot be bypassed with valid code");
 
-var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, signedProtection);
+var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, signedProtection, sender);
 await Reject(() => service.OwnerAsset(2, 10, default), 404, "other owner cannot read asset");
 await Reject(() => service.OwnerAsset(3, 10, default), 403, "beneficiary cannot use owner APIs");
 await Reject(() => service.UploadOwnerDocument(1, 10, null, file, null, default), 400, "owner must supply verified signature without any death declaration");
@@ -91,7 +91,7 @@ await Reject(() => service.RequestLegal(6, 20, 8, null, file, default), 409, "du
 repo.Handover.Status = "Approved";
 await Reject(() => service.Complete(6, 20, file, new byte[256], default), 409, "completion requires approved legal verification and cases");
 var signedRepo = new FakeRepository(); var signedStore = new FakeStore();
-var signedService = new VaultService(signedRepo, signedStore, signedProtection);
+var signedService = new VaultService(signedRepo, signedStore, signedProtection, sender);
 var signedUpload = await signedService.UploadOwnerDocument(1, 10, null, file, signature, default);
 Check(signedUpload.IsEncrypted && signedRepo.Added.OfType<AssetDocument>().Single().Status == "Active", "signed living-owner upload accepted");
 signedRepo.Handover.Status = "Approved";
@@ -153,12 +153,20 @@ sealed class FakeSender : IOtpSender
     public string Code { get; private set; } = "";
     public int SendCount { get; private set; }
     public bool Fail { get; set; }
+
     public Task Send(string email, string code, CancellationToken ct)
     {
         if (Fail) throw new WorkflowException(503, "Test SMTP unavailable.");
         SendCount++; Code = code; return Task.CompletedTask;
     }
+
+    public Task SendEmail(string email, string subject, string body, CancellationToken ct)
+    {
+        if (Fail) throw new WorkflowException(503, "Test SMTP unavailable.");
+        SendCount++; Code = body; return Task.CompletedTask;
+    }
 }
+
 sealed class FakeStore : IDocumentStore
 {
     public Dictionary<string, byte[]> Files { get; } = new();
@@ -166,8 +174,11 @@ sealed class FakeStore : IDocumentStore
     public Task<byte[]> Read(string id, CancellationToken ct) => Task.FromResult(Files[id]);
     public Task Delete(string id) { Files.Remove(id); return Task.CompletedTask; }
 }
+
 sealed class FakeRepository : IVaultRepository
 {
+    public IQueryable<User> QueryUsers() => new List<User>().AsQueryable();
+    public IQueryable<AuditLog> QueryAuditLogs() => new List<AuditLog>().AsQueryable();
     public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct) => Task.FromResult<RefreshToken?>(null);
     public List<object> Added { get; } = new();
     public bool FailSave { get; set; }
@@ -177,6 +188,7 @@ sealed class FakeRepository : IVaultRepository
     public List<Role> CreatedRoles { get; } = new();
     public HandoverRequest Handover { get; } = new() { RequestId = 20, ExecutorId = 6, Status = "Draft", Vault = new DigitalVault { OwnerId = 1, ExecutorAssignments = new List<ExecutorAssignment> { new() { ExecutorId = 6, Status = "Active" } } } };
     private readonly DigitalAsset asset = new() { AssetId = 10, AssetName = "Account", AssetType = "Account", Status = "Active", Vault = new DigitalVault { OwnerId = 1, Status = "Active" } };
+
     public Task<User?> User(int id, CancellationToken ct)
     {
         var role = id switch { 1 or 2 => VaultService.OwnerRole, 3 => VaultService.BeneficiaryRole, 6 or 7 => VaultService.ExecutorRole, 8 => VaultService.VerifierRole, _ => "None" };
