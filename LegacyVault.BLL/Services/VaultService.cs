@@ -164,7 +164,7 @@ public sealed class VaultService(
             AssetId = assetId,
             BeneficiaryId = recipient.UserId,
             Allocation = input.Allocation,
-            Status = "Pending", // Đặt là Pending để chờ người thụ hưởng phản hồi/xác nhận
+            Status = "Active", // Đặt là Pending để chờ người thụ hưởng phản hồi/xác nhận
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -175,17 +175,6 @@ public sealed class VaultService(
         try
         {
             await repository.Save(ct);
-
-            // Gửi email yêu cầu XÁC NHẬN cho Người thụ hưởng
-            var confirmUrl = $"http://localhost:3000/beneficiary/accept?assetId={assetId}&assignmentId={assignment.AssignmentId}";
-            var emailSubject = "AeternaVault - Yêu cầu xác nhận nhận chỉ định Di sản";
-            var emailBody = $"Xin chào {recipient.FullName},\n\n" +
-                            $"Bạn vừa nhận được lời mời làm Người thụ hưởng cho tài sản '{asset.AssetName}' với tỷ lệ phân bổ là {input.Allocation}%.\n\n" +
-                            $"Hiện tại chỉ định này đang ở trạng thái 'Đợi phản hồi'. Vui lòng truy cập đường dẫn sau hoặc đăng nhập vào ứng dụng để XÁC NHẬN đồng ý nhận di sản:\n" +
-                            $"{confirmUrl}\n\n" +
-                            $"Trân trọng,\nĐội ngũ LegacyVault";
-
-            await mailSender.SendEmail(recipient.Email, emailSubject, emailBody, ct);
         }
         catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Beneficiary configuration changed. Reload and retry."); }
         return new BeneficiaryDto(assetId, recipient.UserId, recipient.FullName, assignment.Allocation, assignment.Status);
