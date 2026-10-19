@@ -61,8 +61,13 @@ public sealed class LegalForm
 [ApiController, Authorize, Route("api/owner")]
 public sealed class OwnerController(VaultService service) : VaultController
 {
-    [HttpGet("vaults")] public Task<IReadOnlyList<VaultDto>> Vaults(CancellationToken ct) => service.OwnerVaults(UserId, ct);
-    [HttpGet("vaults/{vaultId:int}")] public Task<VaultDto> Vault(int vaultId, CancellationToken ct) => service.OwnerVault(UserId, vaultId, ct);
+    [HttpGet("vaults")]
+    public Task<PageDto<VaultDto>> Vaults([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.OwnerVaults(UserId, page, pageSize, ct);
+
+    [HttpGet("vaults/{vaultId:int}")]
+    public Task<VaultDto> Vault(int vaultId, CancellationToken ct) => service.OwnerVault(UserId, vaultId, ct);
+
     [HttpPost("vaults")]
     [ProducesResponseType(typeof(VaultDto), StatusCodes.Status201Created)]
     public async Task<ActionResult<VaultDto>> CreateVault(CreateVaultInput input, CancellationToken ct)
@@ -70,6 +75,7 @@ public sealed class OwnerController(VaultService service) : VaultController
         var vault = await service.CreateVault(UserId, input, ct);
         return CreatedAtAction(nameof(Vault), new { vaultId = vault.VaultId }, vault);
     }
+
     [HttpPost("assets")]
     [ProducesResponseType(typeof(AssetDto), StatusCodes.Status201Created)]
     public async Task<ActionResult<AssetDto>> CreateAsset(CreateAssetInput input, CancellationToken ct)
@@ -77,13 +83,23 @@ public sealed class OwnerController(VaultService service) : VaultController
         var asset = await service.CreateAsset(UserId, input, ct);
         return CreatedAtAction(nameof(Asset), new { assetId = asset.AssetId }, asset);
     }
-    [HttpGet("assets")] public Task<IReadOnlyList<AssetDto>> Assets(CancellationToken ct) => service.OwnerAssets(UserId, ct);
-    [HttpGet("assets/{assetId:int}")] public Task<AssetDto> Asset(int assetId, CancellationToken ct) => service.OwnerAsset(UserId, assetId, ct);
-    [HttpGet("beneficiaries")] public Task<IReadOnlyList<BeneficiaryDto>> Beneficiaries([FromQuery] int? assetId, CancellationToken ct) => service.Beneficiaries(UserId, assetId, ct);
+
+    [HttpGet("assets")]
+    public Task<PageDto<AssetDto>> Assets([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.OwnerAssets(UserId, page, pageSize, ct);
+
+    [HttpGet("assets/{assetId:int}")]
+    public Task<AssetDto> Asset(int assetId, CancellationToken ct) => service.OwnerAsset(UserId, assetId, ct);
+
+    [HttpGet("beneficiaries")]
+    public Task<PageDto<BeneficiaryDto>> Beneficiaries([FromQuery] int? assetId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+    service.Beneficiaries(UserId, assetId, page, pageSize, ct);
+
     [HttpPost("assets/{assetId:int}/beneficiaries")]
     [ProducesResponseType(typeof(BeneficiaryDto), StatusCodes.Status201Created)]
     public async Task<ActionResult<BeneficiaryDto>> AssignBeneficiary(int assetId, AssignBeneficiaryInput input, CancellationToken ct) =>
         StatusCode(StatusCodes.Status201Created, await service.AssignBeneficiary(UserId, assetId, input, ct));
+
     [HttpPost("assets/{assetId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<ActionResult<DocumentDto>> Upload(int assetId, [FromForm] OwnerUploadForm form, CancellationToken ct)
     {
@@ -101,20 +117,30 @@ public sealed class ExecutorController(VaultService service) : VaultController
     [HttpPost("{requestId:int}/death-certificate"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<DocumentDto> DeathCertificate(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) =>
         await service.UploadDeathCertificate(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
-    [HttpGet] public Task<IReadOnlyList<HandoverDto>> Requests(CancellationToken ct) => service.Requests(UserId, ct);
-    [HttpGet("{requestId:int}")] public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.Request(UserId, requestId, ct);
+
+    [HttpGet]
+    public Task<PageDto<HandoverDto>> Requests([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+    service.Requests(UserId, page, pageSize, ct);
+
+    [HttpGet("{requestId:int}")]
+    public Task<HandoverDto> Detail(int requestId, CancellationToken ct) => service.Request(UserId, requestId, ct);
+
     [HttpGet("{requestId:int}/documents/{documentId:int}/content")]
     public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.RequestDocument(UserId, requestId, documentId, ct));
+
     [HttpPost("{requestId:int}/complete"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<IActionResult> Complete(int requestId, [FromForm] CompletionForm form, CancellationToken ct)
     {
         await service.Complete(UserId, requestId, await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct); return NoContent();
     }
+
     [HttpPost("{requestId:int}/start")]
     public async Task<IActionResult> Start(int requestId, CancellationToken ct) { await service.StartHandover(UserId, requestId, ct); return NoContent(); }
+
     [HttpPost("{requestId:int}/documents"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<DocumentDto> Upload(int requestId, [FromForm] HandoverUploadForm form, CancellationToken ct) =>
         await service.UploadHandoverDocument(UserId, requestId, await ReadUpload(form.File, ct), await ReadSignature(form.Signature, ct), ct);
+
     [HttpPost("{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) =>
         Ok(new { VerificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
@@ -125,18 +151,37 @@ public sealed class BeneficiaryController(VaultService service, IdentityService 
 {
     [HttpPost("otp/request"), EnableRateLimiting("otp")]
     public async Task<OtpChallenge> RequestOtp(CancellationToken ct) => await otp.Request(UserId, SessionId, await identity.BeneficiaryEmail(UserId, ct), ct);
+
     [HttpPost("otp/verify"), EnableRateLimiting("otp")]
     public async Task<IActionResult> VerifyOtp(OtpInput input, CancellationToken ct)
     {
         await identity.BeneficiaryEmail(UserId, ct); otp.Verify(UserId, SessionId, input.ChallengeId, input.Code); return Ok(new { Verified = true, ValidForSeconds = 900 });
     }
-    [HttpGet("assets")] public Task<IReadOnlyList<InheritanceDto>> Assets(CancellationToken ct) { otp.RequireVerified(SessionId); return service.Inherited(UserId, ct); }
-    [HttpGet("assets/{assetId:int}")] public Task<InheritanceDto> Asset(int assetId, CancellationToken ct) { otp.RequireVerified(SessionId); return service.InheritedAsset(UserId, assetId, ct); }
+
+    [HttpGet("assets")]
+    public Task<PageDto<InheritanceDto>> Assets([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    {
+        otp.RequireVerified(SessionId);
+        return service.Inherited(UserId, page, pageSize, ct);
+    }
+
+    [HttpGet("assets/{assetId:int}")]
+    public Task<InheritanceDto> Asset(int assetId, CancellationToken ct)
+    {
+        otp.RequireVerified(SessionId);
+        return service.InheritedAsset(UserId, assetId, ct);
+    }
+
     [HttpGet("assets/{assetId:int}/documents/{documentId:int}/content")]
     public async Task<IActionResult> Document(int assetId, int documentId, CancellationToken ct)
-    { otp.RequireVerified(SessionId); return ContentFile(await service.InheritedDocument(UserId, assetId, documentId, ct)); }
+    {
+        otp.RequireVerified(SessionId);
+        return ContentFile(await service.InheritedDocument(UserId, assetId, documentId, ct));
+    }
 }
+
 public sealed record OtpInput([Required, StringLength(32, MinimumLength = 32)] string ChallengeId, [Required, RegularExpression("^[0-9]{6}$")] string Code);
+
 [System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
 public sealed record LoginInput([Required, EmailAddress, StringLength(150)] string Email, [Required, StringLength(1024)] string Password);
 

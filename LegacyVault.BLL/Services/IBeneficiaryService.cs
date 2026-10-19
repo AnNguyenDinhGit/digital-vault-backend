@@ -1,5 +1,6 @@
 using LegacyVault.BLL.DTOs;
 namespace LegacyVault.BLL.Services;
+
 public interface IBeneficiaryService
 {
     Task<PageDto<CaseDto>> Cases(int user, string session, int page, int size, CancellationToken ct);

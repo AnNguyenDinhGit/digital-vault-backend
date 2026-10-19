@@ -10,10 +10,13 @@ namespace LegacyVault.BLL.Services;
 public sealed class ManagementService(IVaultRepository repository, IWorkflowRepository workflow, IDocumentStore store, DocumentProtection protection)
 {
     private static bool Assigned(ExecutorAssignment a) => a.Status is "Active" or "AutoAssigned";
-    public async Task<IReadOnlyList<ExecutorAssignmentDto>> ExecutorAssignments(int user, CancellationToken ct)
+    public async Task<PageDto<ExecutorAssignmentDto>> ExecutorAssignments(int user, int page, int size, CancellationToken ct)
     {
         await Require(user, ct, VaultService.ExecutorRole);
-        return (await workflow.ExecutorAssignments(user, ct)).Select(a => new ExecutorAssignmentDto(a.VaultId, user, a.Status, a.AssignedAt)).ToArray();
+        Paging(page, size);
+        var all = (await workflow.ExecutorAssignments(user, ct)).Select(a => new ExecutorAssignmentDto(a.VaultId, user, a.Status, a.AssignedAt)).ToArray();
+        var items = all.Skip((page - 1) * size).Take(size).ToArray();
+        return new PageDto<ExecutorAssignmentDto>(page, size, items);
     }
     private static void Validate(object input)
     {
@@ -79,7 +82,13 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var a = await Asset(user, id, ct); Active(a); a.Status = "Revoked"; a.UpdatedAt = RecordVersion.Next(a.UpdatedAt); Touch(a.Vault);
         Audit(user, "RevokeAsset", "DigitalAsset", id); await repository.Save(ct);
     }
-    public async Task<IReadOnlyList<AssignmentDto>> Allocations(int user, int id, CancellationToken ct) => (await Asset(user, id, ct)).BeneficiaryAssignments.Select(Map).ToArray();
+    public async Task<PageDto<AssignmentDto>> Allocations(int user, int id, int page, int size, CancellationToken ct)
+    {
+        Paging(page, size);
+        var all = (await Asset(user, id, ct)).BeneficiaryAssignments.Select(Map).ToArray();
+        var items = all.Skip((page - 1) * size).Take(size).ToArray();
+        return new PageDto<AssignmentDto>(page, size, items);
+    }
     public async Task<AssignmentDto> ChangeAllocation(int user, int id, int assignmentId, AllocationInput? input, CancellationToken ct)
     {
         var a = await Asset(user, id, ct); Active(a);
@@ -100,7 +109,13 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         Notify(b.BeneficiaryId, "Allocation", "Allocation changed", "Your asset allocation was changed by its owner.");
         await repository.Save(ct); return Map(b);
     }
-    public async Task<IReadOnlyList<ManagedDocumentDto>> Documents(int user, int asset, CancellationToken ct) => (await Asset(user, asset, ct)).AssetDocuments.Select(d => new ManagedDocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted, d.Status)).ToArray();
+    public async Task<PageDto<ManagedDocumentDto>> Documents(int user, int asset, int page, int size, CancellationToken ct)
+    {
+        Paging(page, size);
+        var all = (await Asset(user, asset, ct)).AssetDocuments.Select(d => new ManagedDocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted, d.Status)).ToArray();
+        var items = all.Skip((page - 1) * size).Take(size).ToArray();
+        return new PageDto<ManagedDocumentDto>(page, size, items);
+    }
     public async Task<DocumentContent> OwnerDocument(int user, int asset, int document, CancellationToken ct)
     {
         var a = await Asset(user, asset, ct);
