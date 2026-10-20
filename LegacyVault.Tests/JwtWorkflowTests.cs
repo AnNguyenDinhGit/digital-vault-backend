@@ -110,10 +110,14 @@ internal static class JwtWorkflowTests
         var me = (await client.GetFromJsonAsync<MeDto>("/api/auth/me"))!;
         check(me.UserId == ids["owner"] && me.FullName == "owner" && me.Roles.Contains("Owner"), "me exposes public profile and current DB roles");
         await EditUser("owner", u => u.Status = "Inactive"); await Expect(await client.GetAsync("/api/auth/me"), HttpStatusCode.Unauthorized, "JWT with inactive account is rejected before expiry");
+        await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Unauthorized, "inactive Owner cannot confirm alive");
         await EditUser("owner", u => { u.Status = "Active"; u.Authentications.Single().LockedUntil = DateTime.UtcNow.AddMinutes(5); }); await Expect(await client.GetAsync("/api/auth/me"), HttpStatusCode.Unauthorized, "JWT with locked account is rejected before expiry");
+        await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Unauthorized, "locked Owner cannot confirm alive");
         await EditUser("owner", u => { u.Authentications.Single().LockedUntil = null; u.Roles.Clear(); }); await Expect(await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Forbidden" }), HttpStatusCode.Forbidden, "old JWT cannot retain revoked Owner role");
+        await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Forbidden, "revoked Owner role cannot confirm alive with old token");
         await using (var db = new LegacyVaultDbContext(dbOptions)) { (await db.Users.SingleAsync(u => u.UserId == ids["owner"])).Roles.Add(await db.Roles.SingleAsync(r => r.RoleName == "Owner")); await db.SaveChangesAsync(); }
         client.DefaultRequestHeaders.Authorization = null;
+        await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Unauthorized, "life confirmation requires Bearer authentication");
         var login = await client.PostAsJsonAsync("/api/auth/login", new { email = "owner@example.test", password = "Registration123!" });
         await Expect(await client.PostAsJsonAsync("/api/auth/login", new { email = "owner@example.test", password = "Registration123!", role = "Admin" }), HttpStatusCode.BadRequest, "password login rejects role selection");
         await Expect(await client.PostAsJsonAsync("/api/auth/refresh-token", new { refreshToken = "unused" }), HttpStatusCode.Unauthorized, "refresh endpoint from main rejects unknown persisted token");
@@ -178,6 +182,38 @@ internal static class JwtWorkflowTests
 
         As("owner");
         await Expect(await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Too long", description = new string('a', 501) }), HttpStatusCode.BadRequest, "vault description is limited to scaffold 500 characters");
+        var initialLife = (await client.GetFromJsonAsync<LifeConfirmationDto>("/api/owner/life-confirmation"))!;
+        check(initialLife.OwnerId == ids["owner"] && initialLife.LastConfirmedAliveAt is null, "Owner without confirmation sees null instead of profile UpdatedAt");
+        var beforeConfirmation = DateTime.UtcNow;
+        var lifeResponse = await client.PostAsync("/api/owner/life-confirmation", null);
+        await Expect(lifeResponse, HttpStatusCode.OK, "Owner confirms alive without body or client timestamp");
+        var firstLife = (await lifeResponse.Content.ReadFromJsonAsync<LifeConfirmationDto>())!;
+        check(firstLife.OwnerId == ids["owner"] && firstLife.LastConfirmedAliveAt >= beforeConfirmation && firstLife.LastConfirmedAliveAt <= DateTime.UtcNow && firstLife.LastConfirmedAliveAt.Value.Kind == DateTimeKind.Utc, "confirmation uses server UTC time and authenticated Owner");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            var proof = await db.ProofOfLives.SingleAsync(p => p.UserId == ids["owner"]);
+            check(proof.LastPingAt == firstLife.LastConfirmedAliveAt && proof.NextPingDue == proof.LastPingAt.AddDays(30) && proof.GracePeriodDays == 14, "first confirmation persists in scaffolded PROOF_OF_LIFE with default schedule");
+            proof.FrequencyDays = 45; proof.GracePeriodDays = 7; proof.MissedCount = 2; proof.Status = "Overdue";
+            await db.SaveChangesAsync();
+        }
+        await Expect(await client.PostAsJsonAsync("/api/owner/life-confirmation", new { ownerId = ids["other"], lastConfirmedAliveAt = "2099-01-01T00:00:00Z" }), HttpStatusCode.OK, "client cannot choose another Owner or forge confirmation timestamp");
+        var lastLife = (await client.GetFromJsonAsync<LifeConfirmationDto>("/api/owner/life-confirmation"))!;
+        check(lastLife.LastConfirmedAliveAt >= firstLife.LastConfirmedAliveAt && lastLife.LastConfirmedAliveAt <= DateTime.UtcNow, "GET returns latest persisted confirmation after repeat click");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            var events = await db.AuditLogs.Where(a => a.Action == "ConfirmAlive").ToListAsync();
+            check(events.Count == 2 && events.All(a => a.UserId == ids["owner"] && a.EntityId == ids["owner"] && a.EntityType == "User" && a.Result == "Success"), "confirmation audit is persisted without overwriting earlier events or spoofing identity");
+            var proof = await db.ProofOfLives.SingleAsync(p => p.UserId == ids["owner"]);
+            check(proof.FrequencyDays == 45 && proof.GracePeriodDays == 7 && proof.NextPingDue == proof.LastPingAt.AddDays(45) && proof.MissedCount == 0 && proof.Status == "Active", "repeat click updates existing proof, preserves schedule and resets missed checks");
+        }
+        As("other"); check((await client.GetFromJsonAsync<LifeConfirmationDto>("/api/owner/life-confirmation"))!.LastConfirmedAliveAt is null, "another Owner cannot read caller confirmation through client input");
+        foreach (var actor in new[] { "executor", "legal", "recipient" })
+        {
+            As(actor);
+            await Expect(await client.GetAsync("/api/owner/life-confirmation"), HttpStatusCode.Forbidden, "non-Owner cannot read private confirmation: " + actor);
+            await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Forbidden, "non-Owner cannot confirm alive: " + actor);
+        }
+        As("owner");
         async Task<(int Vault, int Asset)> CreateFixture(string name, string actor = "owner")
         {
             As(actor); var vResponse = await client.PostAsJsonAsync("/api/owner/vaults", new { name }); var v = (await vResponse.Content.ReadFromJsonAsync<VaultDto>())!;
@@ -271,6 +307,7 @@ internal static class JwtWorkflowTests
         var enriched = (await client.GetFromJsonAsync<HandoverDto>($"/api/executor/handovers/{request.RequestId}"))!;
         check(enriched.Owner?.UserId == ids["owner"] && enriched.Owner.FullName == "owner" && enriched.ExecutorId == ids["executor"], "assigned detail includes Owner identity and responsible Executor");
         check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{request.RequestId}/owner-status"))!.Status == "NotConfirmed", "no death evidence does not assert Owner is deceased or alive");
+        check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{request.RequestId}/owner-status"))!.LastConfirmedAliveAt == lastLife.LastConfirmedAliveAt, "assigned Executor sees last Owner self-confirmation separately from death status");
         As("owner"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Forbidden, "Owner cannot upload a handover death certificate");
         As("recipient"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Forbidden, "Beneficiary cannot upload a death certificate");
         As("legal"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Forbidden, "LegalVerifier cannot upload a death certificate");
@@ -300,6 +337,9 @@ internal static class JwtWorkflowTests
         As("executor"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.OK, "assigned multi-role Executor uploads death certificate before legal submission");
         var reported = (await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{request.RequestId}/owner-status"))!;
         check(reported.Status == "ReportedDeceased" && reported.VerifierId is null && reported.DeathCertificateDocumentId is not null, "Executor evidence reports death without legally confirming it");
+        As("owner"); await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Conflict, "Owner cannot overwrite an outstanding death report with self-confirmation");
+        check((await client.GetFromJsonAsync<LifeConfirmationDto>("/api/owner/life-confirmation"))!.LastConfirmedAliveAt == lastLife.LastConfirmedAliveAt, "conflicting confirmation does not replace last persisted time");
+        As("executor");
         var evidenceMetadata = (await client.GetFromJsonAsync<DocumentDto[]>($"/api/executor/handovers/{request.RequestId}/documents"))!;
         check(evidenceMetadata.Single().Purpose == "DeathCertificate", "Executor document list identifies death certificate purpose from authenticated envelope");
         var verifiers = (await client.GetFromJsonAsync<VerifierOptionDto[]>($"/api/executor/handovers/{request.RequestId}/legal-verifiers"))!;
@@ -345,6 +385,9 @@ internal static class JwtWorkflowTests
         await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Evidence reviewed" }), HttpStatusCode.OK, "legal approves validated handover with review time");
         var confirmed = (await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/legal/handovers/{request.RequestId}/owner-status"))!;
         check(confirmed.Status == "ConfirmedDeceased" && confirmed.VerifierId == ids["legal"] && confirmed.VerifiedAt is not null && confirmed.EvidenceRequestId == request.RequestId, "legal approval confirms Owner death using persisted evidence and reviewer provenance");
+        check(confirmed.LastConfirmedAliveAt == lastLife.LastConfirmedAliveAt, "legal reviewer sees historical life confirmation without cancelling legal outcome");
+        As("owner"); await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Conflict, "legally confirmed death cannot be reversed by life-confirmation button");
+        As("legal");
         var history = (await client.GetFromJsonAsync<LegalHistoryDto[]>($"/api/legal/handovers/{request.RequestId}/history"))!;
         check(history.Length == 2 && history.Any(h => h.Status == "Additional_Info") && history.Any(h => h.Status == "Approved" && h.VerifierName == "legal"), "legal history retains additional-info and final decision with reviewer identity");
         await using (var db = new LegacyVaultDbContext(dbOptions))
@@ -489,6 +532,7 @@ internal static class JwtWorkflowTests
         await SubmitReview(otherRequest.RequestId);
         As("legal"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{otherRequest.RequestId}/reject", new { comment = "Certificate not sufficient" }), HttpStatusCode.OK, "legal rejection is persisted for separate Owner");
         check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/legal/handovers/{otherRequest.RequestId}/owner-status"))!.Status == "Rejected", "rejected death evidence does not mark Owner confirmed deceased");
+        As("other"); await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.OK, "rejected death report does not permanently block Owner life confirmation");
         As("executor"); await Expect(await client.PutAsJsonAsync($"/api/executor/handovers/{otherRequest.RequestId}/owner-status", new { status = "ConfirmedDeceased" }), HttpStatusCode.MethodNotAllowed, "Executor cannot force confirmed death through arbitrary status input");
         var raceRequest = await NewOtherOwnerRequest("Concurrent legal review");
         As("executor"); await UploadCertificate(raceRequest.RequestId); await SubmitReview(raceRequest.RequestId);

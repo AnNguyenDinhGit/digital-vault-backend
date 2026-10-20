@@ -9,6 +9,10 @@ namespace LegacyVault.API.Controllers;
 [ApiController, Authorize, Route("api/owner")]
 public sealed class OwnerManagementController(ManagementService service) : VaultController
 {
+    [HttpGet("life-confirmation"), Authorize(Roles = "Owner")]
+    public Task<LifeConfirmationDto> LifeConfirmation(CancellationToken ct) => service.LifeConfirmation(UserId, ct);
+    [HttpPost("life-confirmation"), Authorize(Roles = "Owner")]
+    public Task<LifeConfirmationDto> ConfirmAlive(CancellationToken ct) => service.ConfirmAlive(UserId, ct);
     [HttpPut("vaults/{vaultId:int}")] public Task<VaultDto> UpdateVault(int vaultId, CreateVaultInput input, CancellationToken ct) => service.UpdateVault(UserId, vaultId, input, ct);
     [HttpPost("vaults/{vaultId:int}/close")] public async Task<IActionResult> Close(int vaultId, CancellationToken ct) { await service.CloseVault(UserId, vaultId, ct); return NoContent(); }
     [HttpPut("assets/{assetId:int}")] public Task<AssetDto> UpdateAsset(int assetId, UpdateAssetInput input, CancellationToken ct) => service.UpdateAsset(UserId, assetId, input, ct);

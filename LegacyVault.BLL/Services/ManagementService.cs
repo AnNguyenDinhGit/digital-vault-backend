@@ -11,6 +11,31 @@ namespace LegacyVault.BLL.Services;
 public sealed class ManagementService(IVaultRepository repository, IWorkflowRepository workflow, IDocumentStore store, DocumentProtection protection)
 {
     private static bool Assigned(ExecutorAssignment a) => a.Status is "Active" or "AutoAssigned";
+    public async Task<LifeConfirmationDto> LifeConfirmation(int user, CancellationToken ct)
+    {
+        await Require(user, ct, VaultService.OwnerRole);
+        return new(user, await LastConfirmedAlive(user, ct));
+    }
+
+    public async Task<LifeConfirmationDto> ConfirmAlive(int user, CancellationToken ct)
+    {
+        await Require(user, ct, VaultService.OwnerRole);
+        if ((await workflow.ApprovedOwnerRequests(user, ct)).Count != 0)
+            throw new WorkflowException(409, "A legally confirmed handover exists. Resolve the conflicting legal record before confirming alive.");
+        foreach (var request in await workflow.OwnerDeathReports(user, ct))
+            if (await HandoverEvidence.FindDeathCertificate(request, store, protection, ct) is not null)
+                throw new WorkflowException(409, "A death report or legally confirmed handover exists. Resolve the conflicting report before confirming alive.");
+
+        var now = await workflow.ConfirmLife(user, DateTime.UtcNow, ct);
+        return new(user, DateTime.SpecifyKind(now, DateTimeKind.Utc));
+    }
+
+    private async Task<DateTime?> LastConfirmedAlive(int ownerId, CancellationToken ct)
+    {
+        var timestamp = await workflow.LastLifeConfirmation(ownerId, ct);
+        return timestamp is null ? null : DateTime.SpecifyKind(timestamp.Value, DateTimeKind.Utc);
+    }
+
     public async Task<PageDto<HandoverOverviewDto>> ExecutorOverview(int user, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct)
     {
         await Require(user, ct, VaultService.ExecutorRole); Paging(page, size); ValidateStatus(status);
@@ -210,16 +235,17 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private async Task<OwnerLifeStatusDto> OwnerStatus(HandoverRequest request, CancellationToken ct)
     {
         var ownerId = request.Vault.OwnerId; var ownerName = request.Vault.Owner?.FullName ?? "";
+        var lastConfirmedAlive = await LastConfirmedAlive(ownerId, ct);
         foreach (var verified in await workflow.ApprovedOwnerRequests(ownerId, ct))
         {
             var death = await HandoverEvidence.FindDeathCertificate(verified, store, protection, ct);
             if (death is null) continue;
             var approval = verified.LegalVerifications.Where(v => v.Status == "Approved" && v.ReviewedAt != null).OrderByDescending(v => v.ReviewedAt).First();
-            return new(ownerId, ownerName, "ConfirmedDeceased", request.RequestId, verified.RequestId, death.HandoverDocumentId, approval.VerifierId, approval.ReviewedAt);
+            return new(ownerId, ownerName, "ConfirmedDeceased", request.RequestId, verified.RequestId, death.HandoverDocumentId, approval.VerifierId, approval.ReviewedAt) { LastConfirmedAliveAt = lastConfirmedAlive };
         }
         var evidence = request.Status == "Cancelled" ? null : await HandoverEvidence.FindDeathCertificate(request, store, protection, ct);
         var state = evidence is null ? "NotConfirmed" : request.Status == "Rejected" ? "Rejected" : "ReportedDeceased";
-        return new(ownerId, ownerName, state, request.RequestId, evidence is null ? null : request.RequestId, evidence?.HandoverDocumentId, null, null);
+        return new(ownerId, ownerName, state, request.RequestId, evidence is null ? null : request.RequestId, evidence?.HandoverDocumentId, null, null) { LastConfirmedAliveAt = lastConfirmedAlive };
     }
     private static IReadOnlyList<LegalHistoryDto> History(HandoverRequest r) => r.LegalVerifications.OrderByDescending(v => v.SubmittedAt).ThenByDescending(v => v.VerificationId)
         .Select(v => new LegalHistoryDto(v.VerificationId, r.RequestId, v.VerifierId, v.Verifier?.FullName ?? "", v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt)).ToArray();

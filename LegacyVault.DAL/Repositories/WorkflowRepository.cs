@@ -1,6 +1,7 @@
 using LegacyVault.DAL.Context;
 using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
+using System.Data;
 
 namespace LegacyVault.DAL.Repositories;
 
@@ -10,6 +11,9 @@ public sealed record HandoverOverviewRow(int RequestId, int VaultId, string Vaul
 
 public interface IWorkflowRepository
 {
+    Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct);
+    Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct);
+    Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct);
     Task<List<HandoverOverviewRow>> Overview(int executor, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct);
     Task<List<HandoverRequest>> ApprovedOwnerRequests(int ownerId, CancellationToken ct);
     Task<DigitalVault?> VaultGraph(int id, CancellationToken ct);
@@ -24,6 +28,40 @@ public interface IWorkflowRepository
 }
 public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepository
 {
+    public Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct) => db.ProofOfLives.AsNoTracking()
+        .Where(p => p.UserId == ownerId).OrderByDescending(p => p.LastPingAt)
+        .Select(p => (DateTime?)p.LastPingAt).FirstOrDefaultAsync(ct);
+
+    public async Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        // Serialize clicks for the same Owner, including first-row creation on SQL Server.
+        if (db.Database.IsSqlServer())
+            _ = await db.Users.FromSqlInterpolated($"SELECT * FROM [USERS] WITH (UPDLOCK, HOLDLOCK) WHERE [UserId] = {ownerId}").SingleAsync(ct);
+        var proof = await db.ProofOfLives.Where(p => p.UserId == ownerId)
+            .OrderByDescending(p => p.LastPingAt).ThenByDescending(p => p.CheckId).FirstOrDefaultAsync(ct);
+        if (proof is null)
+        {
+            proof = new ProofOfLife { UserId = ownerId, FrequencyDays = 30, GracePeriodDays = 14, CreatedAt = now };
+            db.ProofOfLives.Add(proof);
+        }
+        if (proof.FrequencyDays is < 1 or > 3650 || proof.GracePeriodDays is < 0 or > 3650)
+            throw new InvalidOperationException("Proof-of-life schedule is invalid.");
+        // A request that waited for the lock must not move the clock backwards.
+        if (proof.LastPingAt > now) now = proof.LastPingAt;
+        proof.LastPingAt = now; proof.NextPingDue = now.AddDays(proof.FrequencyDays);
+        proof.Status = "Active"; proof.MissedCount = 0; proof.UpdatedAt = now;
+        db.AuditLogs.Add(new AuditLog { UserId = ownerId, Action = "ConfirmAlive", EntityType = "User", EntityId = ownerId, Result = "Success", Timestamp = now });
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+        return now;
+    }
+
+    public Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()
+        .Include(r => r.HandoverDocuments).AsSplitQuery()
+        .Where(r => r.Vault.OwnerId == ownerId && r.Status != "Cancelled" && r.Status != "Rejected" && r.HandoverDocuments.Any())
+        .ToListAsync(ct);
+
     public Task<List<HandoverOverviewRow>> Overview(int executor, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct)
     {
         var query = db.HandoverRequests.AsNoTracking().AsQueryable();

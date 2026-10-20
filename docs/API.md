@@ -6,6 +6,10 @@
 
 # LegacyVault API
 
+## Owner xác nhận còn sống (20/10/2026)
+
+GET/POST `/api/owner/life-confirmation`: đọc lần gần nhất/bấm xác nhận bằng JWT Owner; POST không body. Response có `ownerId`, `lastConfirmedAliveAt` (UTC hoặc null). Chi tiết frontend, persistence và test: [Owner-life-confirmation.md](Owner-life-confirmation.md).
+
 ## Executor và LegalVerifier (19/10/2026)
 
 Xem [contract và hướng dẫn test đầy đủ](Executor-Legal-workflow.md): tổng quan tất cả đơn kèm Owner, chi tiết theo phân công, giấy chứng tử, lịch sử pháp lý, tài liệu và trạng thái Owner có nguồn bằng chứng. Endpoint cũ được giữ; `GET /api/executor/handovers/overview` là danh sách tổng quan phân trang mới.

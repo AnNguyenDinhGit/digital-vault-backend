@@ -269,3 +269,10 @@ Authorization: Bearer {{legalToken}}
 ### LegalVerifier: review history
 GET {{baseUrl}}/api/legal/handovers/{{requestId}}/history
 Authorization: Bearer {{legalToken}}
+### Owner: read last server-persisted life confirmation (null if none)
+GET {{baseUrl}}/api/owner/life-confirmation
+Authorization: Bearer {{ownerToken}}
+
+### Owner: click "I am still alive"; no body, no ownerId or client timestamp
+POST {{baseUrl}}/api/owner/life-confirmation
+Authorization: Bearer {{ownerToken}}

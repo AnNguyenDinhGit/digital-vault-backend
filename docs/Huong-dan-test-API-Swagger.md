@@ -65,3 +65,6 @@ SQLite relational cô lập và external doubles; không seed test trên SQL Ser
 # Bổ sung test Executor và LegalVerifier — 19/10/2026
 
 Làm theo [luồng Swagger Executor/LegalVerifier](Executor-Legal-workflow.md). Có hướng dẫn xem tất cả đơn kèm Owner, giới hạn phân công, nộp giấy chứng tử, bổ sung/duyệt/từ chối, bắt đầu/hoàn tất và kiểm tra trạng thái Owner. Request mẫu mới ở cuối [LegacyVault.http](../LegacyVault.http).
+# Test nút “Tôi vẫn còn sống”
+
+Xem [hướng dẫn Owner life confirmation](Owner-life-confirmation.md): GET/POST `/api/owner/life-confirmation`, xác minh thời gian UTC được lưu, giới hạn quyền và lỗi 409 khi xung đột hồ sơ pháp lý. POST không cần body.
