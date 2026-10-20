@@ -13,10 +13,18 @@ public sealed class OwnerManagementController(ManagementService service) : Vault
     [HttpPost("vaults/{vaultId:int}/close")] public async Task<IActionResult> Close(int vaultId, CancellationToken ct) { await service.CloseVault(UserId, vaultId, ct); return NoContent(); }
     [HttpPut("assets/{assetId:int}")] public Task<AssetDto> UpdateAsset(int assetId, UpdateAssetInput input, CancellationToken ct) => service.UpdateAsset(UserId, assetId, input, ct);
     [HttpPost("assets/{assetId:int}/revoke")] public async Task<IActionResult> RevokeAsset(int assetId, CancellationToken ct) { await service.RevokeAsset(UserId, assetId, ct); return NoContent(); }
-    [HttpGet("assets/{assetId:int}/allocations")] public Task<IReadOnlyList<AssignmentDto>> Allocations(int assetId, CancellationToken ct) => service.Allocations(UserId, assetId, ct);
+
+    [HttpGet("assets/{assetId:int}/allocations")]
+    public Task<PageDto<AssignmentDto>> Allocations(int assetId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.Allocations(UserId, assetId, page, pageSize, ct);
+
     [HttpPut("assets/{assetId:int}/allocations/{assignmentId:int}")] public Task<AssignmentDto> Allocation(int assetId, int assignmentId, AllocationInput input, CancellationToken ct) => service.ChangeAllocation(UserId, assetId, assignmentId, input, ct);
     [HttpPost("assets/{assetId:int}/allocations/{assignmentId:int}/revoke")] public Task<AssignmentDto> RevokeAllocation(int assetId, int assignmentId, CancellationToken ct) => service.ChangeAllocation(UserId, assetId, assignmentId, null, ct);
-    [HttpGet("assets/{assetId:int}/documents")] public Task<IReadOnlyList<ManagedDocumentDto>> Documents(int assetId, CancellationToken ct) => service.Documents(UserId, assetId, ct);
+
+    [HttpGet("assets/{assetId:int}/documents")]
+    public Task<PageDto<ManagedDocumentDto>> Documents(int assetId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.Documents(UserId, assetId, page, pageSize, ct);
+
     [HttpGet("assets/{assetId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int assetId, int documentId, CancellationToken ct) => ContentFile(await service.OwnerDocument(UserId, assetId, documentId, ct));
     [HttpPost("assets/{assetId:int}/documents/{documentId:int}/revoke")] public async Task<IActionResult> RevokeDocument(int assetId, int documentId, CancellationToken ct) { await service.RevokeDocument(UserId, assetId, documentId, ct); return NoContent(); }
     [HttpPut("vaults/{vaultId:int}/executor")] public async Task<IActionResult> Executor(int vaultId, ExecutorInput input, CancellationToken ct) { await service.AssignExecutor(UserId, vaultId, input, ct); return NoContent(); }
@@ -29,7 +37,10 @@ public sealed class OwnerManagementController(ManagementService service) : Vault
 [ApiController, Authorize(Roles = "Executor"), Route("api/executor/assignments")]
 public sealed class ExecutorAssignmentsController(ManagementService service) : VaultController
 {
-    [HttpGet] public Task<IReadOnlyList<ExecutorAssignmentDto>> Assignments(CancellationToken ct) => service.ExecutorAssignments(UserId, ct);
+    [HttpGet]
+    public Task<PageDto<ExecutorAssignmentDto>> Assignments([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.ExecutorAssignments(UserId, page, pageSize, ct);
+
     [HttpPost("{vaultId:int}/handovers")]
     public async Task<IActionResult> Create(int vaultId, CancellationToken ct)
     {

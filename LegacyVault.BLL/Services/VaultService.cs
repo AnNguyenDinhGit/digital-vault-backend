@@ -1,9 +1,11 @@
+using Azure;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
 using LegacyVault.DAL.Storage;
 using System.ComponentModel.DataAnnotations;
+using System.Drawing.Printing;
 
 namespace LegacyVault.BLL.Services;
 
@@ -59,10 +61,14 @@ public sealed class VaultService(
         return v;
     }
 
-    public async Task<IReadOnlyList<VaultDto>> OwnerVaults(int user, CancellationToken ct)
+    public async Task<PageDto<VaultDto>> OwnerVaults(int user, int page, int pageSize, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
-        return (await repository.OwnerVaults(user, ct)).Select(Map).ToArray();
+        ManagementService.Paging(page, pageSize);
+        var allVaults = await repository.OwnerVaults(user, ct);
+        var total = allVaults.Count;
+        var items = allVaults.Skip((page - 1) * pageSize).Take(pageSize).Select(Map).ToArray();
+        return new PageDto<VaultDto>(page, pageSize, items);
     }
 
     public async Task<VaultDto> OwnerVault(int user, int vault, CancellationToken ct) => Map(await OwnedVault(user, vault, ct));
@@ -122,19 +128,26 @@ public sealed class VaultService(
         return await new ManagementService(repository, workflow ?? throw new WorkflowException(503, "Workflow persistence is not configured."), store, protection).CreateRequest(user, vaultId, ct);
     }
 
-    public async Task<IReadOnlyList<AssetDto>> OwnerAssets(int user, CancellationToken ct)
+    public async Task<PageDto<AssetDto>> OwnerAssets(int user, int page, int pageSize, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
-        return (await repository.OwnerAssets(user, ct)).Select(Map).ToArray();
+        ManagementService.Paging(page, pageSize);
+        var allAssets = await repository.OwnerAssets(user, ct);
+        var total = allAssets.Count;
+        var items = allAssets.Skip((page - 1) * pageSize).Take(pageSize).Select(Map).ToArray();
+        return new PageDto<AssetDto>(page, pageSize, items);
     }
 
     public async Task<AssetDto> OwnerAsset(int user, int asset, CancellationToken ct) => Map(await Owned(user, asset, ct));
 
-    public async Task<IReadOnlyList<BeneficiaryDto>> Beneficiaries(int user, int? asset, CancellationToken ct)
+    public async Task<PageDto<BeneficiaryDto>> Beneficiaries(int user, int? asset, int page, int pageSize, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
+        ManagementService.Paging(page, pageSize);
         var assets = asset.HasValue ? new List<DigitalAsset> { await Owned(user, asset.Value, ct) } : await repository.OwnerAssets(user, ct);
-        return assets.SelectMany(a => a.BeneficiaryAssignments.Select(b => new BeneficiaryDto(a.AssetId, b.BeneficiaryId, b.Beneficiary.FullName, b.Allocation, b.Status))).ToArray();
+        var allItems = assets.SelectMany(a => a.BeneficiaryAssignments.Select(b => new BeneficiaryDto(a.AssetId, b.BeneficiaryId, b.Beneficiary.FullName, b.Allocation, b.Status))).ToArray();
+        var items = allItems.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
+        return new PageDto<BeneficiaryDto>(page, pageSize, items);
     }
 
     public async Task<BeneficiaryDto> AssignBeneficiary(int owner, int assetId, AssignBeneficiaryInput input, CancellationToken ct)
@@ -246,10 +259,16 @@ public sealed class VaultService(
         catch { await store.Delete(path); throw; }
     }
 
-    public async Task<IReadOnlyList<HandoverDto>> Requests(int user, CancellationToken ct)
+    public async Task<PageDto<HandoverDto>> Requests(int user, int page, int pageSize, CancellationToken ct)
     {
         await OperatorRole(user, ct);
-        return (await repository.Requests(user, ct)).Where(r => r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned"))).Select(Map).ToArray();
+        ManagementService.Paging(page, pageSize);
+        var allRequests = (await repository.Requests(user, ct))
+            .Where(r => r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned")))
+            .Select(Map)
+            .ToArray();
+        var items = allRequests.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
+        return new PageDto<HandoverDto>(page, pageSize, items);
     }
 
     public async Task<HandoverDto> Request(int user, int request, CancellationToken ct)
@@ -369,14 +388,21 @@ public sealed class VaultService(
         catch { await store.Delete(path); throw; }
     }
 
-    public async Task<IReadOnlyList<InheritanceDto>> Inherited(int user, CancellationToken ct)
+    public async Task<PageDto<InheritanceDto>> Inherited(int user, int page, int pageSize, CancellationToken ct)
     {
         await Role(user, BeneficiaryRole, ct);
-        return (await repository.Inherited(user, ct)).Select(x => new InheritanceDto(x.HandoverId, x.Assignment.Allocation, Map(x.Assignment.Asset))).ToArray();
+        ManagementService.Paging(page, pageSize);
+        var allItems = (await repository.Inherited(user, ct)).Select(x => new InheritanceDto(x.HandoverId, x.Assignment.Allocation, Map(x.Assignment.Asset))).ToArray();
+        var items = allItems.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
+        return new PageDto<InheritanceDto>(page, pageSize, items);
     }
 
-    public async Task<InheritanceDto> InheritedAsset(int user, int asset, CancellationToken ct) =>
-        (await Inherited(user, ct)).FirstOrDefault(x => x.Asset.AssetId == asset) ?? throw new WorkflowException(404, "Inherited asset not found.");
+    public async Task<InheritanceDto> InheritedAsset(int user, int asset, CancellationToken ct)
+    {
+        // Gọi Inherited với phân trang mặc định (ví dụ trang 1, lấy tối đa 100 kết quả để tìm asset)
+        var result = await Inherited(user, 1, 100, ct);
+        return result.Items.FirstOrDefault(x => x.Asset.AssetId == asset) ?? throw new WorkflowException(404, "Inherited asset not found.");
+    }
 
     public async Task<DocumentContent> InheritedDocument(int user, int asset, int document, CancellationToken ct)
     {
