@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using LegacyVault.BLL.DTOs;
+using LegacyVault.DAL.Storage;
 namespace LegacyVault.BLL.Security;
 public sealed class SecurityOptions
 {
@@ -12,6 +13,13 @@ public sealed class SecurityOptions
 public sealed record ProtectedDocument(UploadFile File, int SignerId, byte[]? Signature, string? Purpose = null);
 public sealed class DocumentProtection(SecurityOptions options)
 {
+    public async Task<ProtectedDocument> Read(IDocumentStore store, string path, CancellationToken ct)
+    {
+        try { return Decrypt(await store.Read(path, ct)); }
+        catch (Exception ex) when (ex is CryptographicException or InvalidDataException or JsonException)
+        { throw new WorkflowException(409, "Stored document failed integrity validation."); }
+        catch (IOException) { throw new WorkflowException(503, "Stored document is unavailable. Retry after storage is restored."); }
+    }
     public bool Verify(byte[] content, byte[]? signature, int signer)
     {
         if (signature is null || !options.SignerCertificates.TryGetValue(signer, out var pem)) return false;

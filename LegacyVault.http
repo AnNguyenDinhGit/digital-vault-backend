@@ -238,3 +238,41 @@ Authorization: Bearer {{beneficiaryToken}}
 ### Logout: discard JWT locally; this endpoint cannot revoke JWT without persistence
 POST {{baseUrl}}/api/auth/logout
 Authorization: Bearer {{ownerToken}}
+### Executor: all handovers with Owner summary (detail still requires assignment)
+GET {{baseUrl}}/api/executor/handovers/overview?page=1&pageSize=20&assignedOnly=false
+Authorization: Bearer {{operatorToken}}
+
+### Executor: persisted Owner life-status evidence
+GET {{baseUrl}}/api/executor/handovers/{{requestId}}/owner-status
+Authorization: Bearer {{operatorToken}}
+
+### Executor: evidence metadata
+GET {{baseUrl}}/api/executor/handovers/{{requestId}}/documents
+Authorization: Bearer {{operatorToken}}
+
+### Executor: independent eligible legal reviewers
+GET {{baseUrl}}/api/executor/handovers/{{requestId}}/legal-verifiers
+Authorization: Bearer {{operatorToken}}
+
+### Executor: complete legal review history
+GET {{baseUrl}}/api/executor/handovers/{{requestId}}/history
+Authorization: Bearer {{operatorToken}}
+
+### LegalVerifier: evidence metadata for assigned case
+GET {{baseUrl}}/api/legal/handovers/{{requestId}}/documents
+Authorization: Bearer {{legalToken}}
+
+### LegalVerifier: Owner life status after legal decision
+GET {{baseUrl}}/api/legal/handovers/{{requestId}}/owner-status
+Authorization: Bearer {{legalToken}}
+
+### LegalVerifier: review history
+GET {{baseUrl}}/api/legal/handovers/{{requestId}}/history
+Authorization: Bearer {{legalToken}}
+### Owner: read last server-persisted life confirmation (null if none)
+GET {{baseUrl}}/api/owner/life-confirmation
+Authorization: Bearer {{ownerToken}}
+
+### Owner: click "I am still alive"; no body, no ownerId or client timestamp
+POST {{baseUrl}}/api/owner/life-confirmation
+Authorization: Bearer {{ownerToken}}

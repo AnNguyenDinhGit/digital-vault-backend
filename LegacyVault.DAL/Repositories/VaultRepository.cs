@@ -111,7 +111,7 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
     public Task<DigitalAsset?> Asset(int id, CancellationToken ct)
         => Assets.SingleOrDefaultAsync(x => x.AssetId == id, ct);
 
-    private IQueryable<HandoverRequest> Handovers => db.HandoverRequests.Include(x => x.Vault).ThenInclude(x => x.ExecutorAssignments).Include(x => x.HandoverDocuments).Include(x => x.LegalVerifications).Include(x => x.HandoverCases).ThenInclude(x => x.Assignment).ThenInclude(x => x.Asset).AsSplitQuery();
+    private IQueryable<HandoverRequest> Handovers => db.HandoverRequests.Include(x => x.Vault).ThenInclude(x => x.Owner).Include(x => x.Vault).ThenInclude(x => x.ExecutorAssignments).Include(x => x.HandoverDocuments).Include(x => x.LegalVerifications).Include(x => x.HandoverCases).ThenInclude(x => x.Assignment).ThenInclude(x => x.Asset).AsSplitQuery();
 
     public Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct)
         => Handovers.Where(x => x.ExecutorId == executor).OrderByDescending(x => x.InitiatedAt).ToListAsync(ct);

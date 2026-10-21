@@ -206,3 +206,12 @@ SELECT audit đã đối chiếu 25 bảng không thiếu cột; ExecutorId bắ
 Chạy `dotnet run --project LegacyVault.Tests` (console harness, không dotnet test). Các luồng chính có [LegacyVault.http](../LegacyVault.http).
 
 Build/test cuối: 0 lỗi/0 cảnh báo, **256 kiểm tra đạt**. Xem [báo cáo bàn giao](Backend-JWT-handover.md). Tham khảo thuật toán: [ASP.NET Core JWT validation](https://learn.microsoft.com/en-us/aspnet/core/security/authentication/configure-jwt-bearer-authentication), [RFC 6238 TOTP](https://www.rfc-editor.org/rfc/rfc6238).
+# Bổ sung contract Executor/LegalVerifier — 19/10/2026
+
+[Contract mới](Executor-Legal-workflow.md): dùng GET `/api/executor/handovers/overview` cho màn hình tất cả đơn; `owner.userId`, `owner.fullName`, `isAssignedToMe` phục vụ hiển thị. Danh sách cũ vẫn chỉ trả phân công của người gọi. Các API history/documents/owner-status giữ quyền theo hồ sơ; giao diện phải phân biệt khai báo đã mất với xác nhận pháp lý. Đây là field/endpoint bổ sung, không thay token contract.
+# Nút xác nhận còn sống của Owner
+
+GET `/api/owner/life-confirmation` khi mở trang; POST cùng path khi bấm nút, không body. Dùng Bearer Owner và hiển thị `lastConfirmedAliveAt` trả về (UTC, null khi chưa có record). Không cập nhật UI thành công trước response; xử lý 409 khi có hồ sơ khai báo mất. Xem [contract đầy đủ](Owner-life-confirmation.md).
+# Contract phân trang sau merge 21/10/2026
+
+List Owner, Executor assignments/handovers và beneficiary assets nay trả `{ page, pageSize, items }`. Frontend đọc `items`, không coi response là mảng trực tiếp. Xem [endpoint và query cụ thể](Merge-pagination-2026-10-21.md). JWT và life-confirmation không đổi.

@@ -9,6 +9,10 @@ namespace LegacyVault.API.Controllers;
 [ApiController, Authorize, Route("api/owner")]
 public sealed class OwnerManagementController(ManagementService service) : VaultController
 {
+    [HttpGet("life-confirmation"), Authorize(Roles = "Owner")]
+    public Task<LifeConfirmationDto> LifeConfirmation(CancellationToken ct) => service.LifeConfirmation(UserId, ct);
+    [HttpPost("life-confirmation"), Authorize(Roles = "Owner")]
+    public Task<LifeConfirmationDto> ConfirmAlive(CancellationToken ct) => service.ConfirmAlive(UserId, ct);
     [HttpPut("vaults/{vaultId:int}")] public Task<VaultDto> UpdateVault(int vaultId, CreateVaultInput input, CancellationToken ct) => service.UpdateVault(UserId, vaultId, input, ct);
     [HttpPost("vaults/{vaultId:int}/close")] public async Task<IActionResult> Close(int vaultId, CancellationToken ct) { await service.CloseVault(UserId, vaultId, ct); return NoContent(); }
     [HttpPut("assets/{assetId:int}")] public Task<AssetDto> UpdateAsset(int assetId, UpdateAssetInput input, CancellationToken ct) => service.UpdateAsset(UserId, assetId, input, ct);
@@ -49,9 +53,32 @@ public sealed class ExecutorAssignmentsController(ManagementService service) : V
     }
 }
 
+[ApiController, Authorize(Roles = "Executor"), Route("api/executor/handovers")]
+public sealed class ExecutorWorkflowController(ManagementService service) : VaultController
+{
+    [HttpGet("overview")]
+    public Task<PageDto<HandoverOverviewDto>> Overview([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null, [FromQuery] int? ownerId = null, [FromQuery] bool assignedOnly = false, CancellationToken ct = default) =>
+        service.ExecutorOverview(UserId, page, pageSize, status, ownerId, assignedOnly, ct);
+    [HttpGet("{requestId:int}/owner-status")]
+    public Task<OwnerLifeStatusDto> OwnerStatus(int requestId, CancellationToken ct) => service.ExecutorOwnerStatus(UserId, requestId, ct);
+    [HttpGet("{requestId:int}/history")]
+    public Task<IReadOnlyList<LegalHistoryDto>> History(int requestId, CancellationToken ct) => service.ExecutorHistory(UserId, requestId, ct);
+    [HttpGet("{requestId:int}/documents")]
+    public Task<IReadOnlyList<DocumentDto>> Documents(int requestId, CancellationToken ct) => service.ExecutorDocuments(UserId, requestId, ct);
+    [HttpGet("{requestId:int}/legal-verifiers")]
+    public Task<IReadOnlyList<VerifierOptionDto>> Verifiers(int requestId, CancellationToken ct) => service.LegalVerifiers(UserId, requestId, ct);
+}
+
 [ApiController, Authorize, Route("api/legal/handovers")]
 public sealed class LegalController(ManagementService service) : VaultController
 {
+    [HttpGet("{requestId:int}/owner-status")]
+    public Task<OwnerLifeStatusDto> OwnerStatus(int requestId, CancellationToken ct) => service.LegalOwnerStatus(UserId, requestId, ct);
+    [HttpGet("{requestId:int}/history")]
+    public Task<IReadOnlyList<LegalHistoryDto>> History(int requestId, CancellationToken ct) => service.LegalHistory(UserId, requestId, ct);
+    [HttpGet("{requestId:int}/documents")]
+    public Task<IReadOnlyList<DocumentDto>> Documents(int requestId, CancellationToken ct) => service.LegalDocuments(UserId, requestId, ct);
     [HttpGet] public Task<PageDto<HandoverDto>> Requests([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null, CancellationToken ct = default) => service.Requests(UserId, "LegalVerifier", page, pageSize, status, ct);
     [HttpGet("{requestId:int}")] public async Task<IActionResult> Detail(int requestId, CancellationToken ct) { var value = await service.LegalDetail(UserId, requestId, ct); return Ok(new { request = value.Request, verification = value.Verification }); }
     [HttpGet("{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, false, ct));

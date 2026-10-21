@@ -170,7 +170,7 @@ app.UseRateLimiter();
 
 app.MapControllers();
 
-// 2. Map Hub Endpoint 
+// 2. Map Hub Endpoint
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat"); // Đường dẫn Hub cho Frontend kết nối
 
