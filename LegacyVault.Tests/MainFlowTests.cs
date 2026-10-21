@@ -78,12 +78,12 @@ internal static class MainFlowTests
         var vault = (await vaultResponse.Content.ReadFromJsonAsync<VaultDto>())!;
         check(vaultResponse.StatusCode == HttpStatusCode.Created && vault.VaultId > 0 && vault.Name == "My Vault" && vault.Status == "Active" && vaultResponse.Headers.Location is not null, "HTTP main flow creates a vault with a usable Location");
         check((await client.GetAsync(vaultResponse.Headers.Location)).StatusCode == HttpStatusCode.OK, "created vault Location resolves to owner detail");
-        check((await client.GetFromJsonAsync<VaultDto[]>("/api/owner/vaults"))!.Single().VaultId == vault.VaultId, "HTTP owner can list created vault");
+        check((await client.GetFromJsonAsync<PageDto<VaultDto>>("/api/owner/vaults"))!.Items.Single().VaultId == vault.VaultId, "HTTP owner can list created vault");
         var assetResponse = await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = " Savings Account ", type = "BankAccount", description = "Asset description" });
         var asset = (await assetResponse.Content.ReadFromJsonAsync<AssetDto>())!;
         check(assetResponse.StatusCode == HttpStatusCode.Created && asset.AssetId > 0 && asset.Name == "Savings Account" && asset.Status == "Active" && asset.Documents.Count == 0 && assetResponse.Headers.Location is not null, "HTTP main flow creates asset inside owned vault");
         check((await client.GetFromJsonAsync<AssetDto>(assetResponse.Headers.Location))!.AssetId == asset.AssetId, "created asset Location resolves to asset detail");
-        check((await client.GetFromJsonAsync<AssetDto[]>("/api/owner/assets"))!.Single().AssetId == asset.AssetId, "HTTP main flow lists persisted asset");
+        check((await client.GetFromJsonAsync<PageDto<AssetDto>>("/api/owner/assets"))!.Items.Single().AssetId == asset.AssetId, "HTTP main flow lists persisted asset");
         check((await client.PostAsJsonAsync("/api/beneficiary/otp/request", new { })).StatusCode == HttpStatusCode.Forbidden, "publicly registered owner does not silently gain beneficiary role");
         check((await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = " ", type = "BankAccount" })).StatusCode == HttpStatusCode.BadRequest, "HTTP asset creation validates required name");
         check((await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Example", type = new string('X', 51) })).StatusCode == HttpStatusCode.BadRequest, "HTTP asset type respects scaffolded length");
@@ -94,7 +94,7 @@ internal static class MainFlowTests
         await other.PostAsJsonAsync("/api/auth/register", new { fullName = "Other Owner", email = "otherflow@example.test", password = "Registration123!", confirmPassword = "Registration123!" });
         await TestAuthentication.UseToken(other, await other.PostAsJsonAsync("/api/auth/login", new { email = "otherflow@example.test", password = "Registration123!" }));
         check((await other.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Unauthorized", type = "Other" })).StatusCode == HttpStatusCode.NotFound, "another owner cannot create an asset in this vault");
-        check((await other.GetAsync($"/api/owner/assets/{asset.AssetId}")).StatusCode == HttpStatusCode.NotFound && (await other.GetFromJsonAsync<AssetDto[]>("/api/owner/assets"))!.Length == 0, "another owner cannot read or list this asset");
+        check((await other.GetAsync($"/api/owner/assets/{asset.AssetId}")).StatusCode == HttpStatusCode.NotFound && (await other.GetFromJsonAsync<PageDto<AssetDto>>("/api/owner/assets"))!.Items.Count == 0, "another owner cannot read or list this asset");
         var selectionPath = $"/api/owner/assets/{asset.AssetId}/beneficiaries";
         check((await other.PostAsJsonAsync(selectionPath, new { email = "mainflow@example.test", allocation = 100 })).StatusCode == HttpStatusCode.NotFound, "only the asset owner can designate a beneficiary");
         check((await client.PostAsJsonAsync(selectionPath, new { email = "mainflow@example.test", allocation = 100 })).StatusCode == HttpStatusCode.BadRequest, "beneficiary selection rejects self-inheritance");
@@ -105,14 +105,14 @@ internal static class MainFlowTests
         var chosenResponse = await client.PostAsJsonAsync(selectionPath, new { email = " OTHERFLOW@EXAMPLE.TEST ", allocation = 60 });
         var chosen = (await chosenResponse.Content.ReadFromJsonAsync<BeneficiaryDto>())!;
         check(chosenResponse.StatusCode == HttpStatusCode.Created && chosen.Allocation == 60 && chosen.Status == "Active", "owner can select a registered owner as beneficiary by normalized email");
-        check((await client.GetFromJsonAsync<BeneficiaryDto[]>($"/api/owner/beneficiaries?assetId={asset.AssetId}"))!.Single().BeneficiaryId == chosen.BeneficiaryId, "owner beneficiary list returns the selected user ID for subsequent upload");
+        check((await client.GetFromJsonAsync<PageDto<BeneficiaryDto>>($"/api/owner/beneficiaries?assetId={asset.AssetId}"))!.Items.Single().BeneficiaryId == chosen.BeneficiaryId, "owner beneficiary list returns the selected user ID for subsequent upload");
         check((await client.PostAsJsonAsync(selectionPath, new { email = "otherflow@example.test", allocation = 10 })).StatusCode == HttpStatusCode.Conflict, "duplicate active beneficiary assignment is rejected");
         var otpResponse = await other.PostAsJsonAsync("/api/beneficiary/otp/request", new { });
         var challenge = (await otpResponse.Content.ReadFromJsonAsync<OtpChallenge>())!;
         check(otpResponse.StatusCode == HttpStatusCode.OK, "designated user can request beneficiary OTP without losing owner session");
         var code = ((FakeSender)app.Services.GetRequiredService<IOtpSender>()).Code;
         check((await other.PostAsJsonAsync("/api/beneficiary/otp/verify", new { challengeId = challenge.ChallengeId, code })).StatusCode == HttpStatusCode.OK, "designated beneficiary verifies identity using OTP");
-        check((await other.GetFromJsonAsync<InheritanceDto[]>("/api/beneficiary/assets"))!.Length == 0, "designation and OTP do not prematurely release assets without legal handover");
+        check((await other.GetFromJsonAsync<PageDto<InheritanceDto>>("/api/beneficiary/assets"))!.Items.Count == 0, "designation and OTP do not prematurely release assets without legal handover");
         check((await other.GetAsync($"/api/owner/assets/{asset.AssetId}")).StatusCode == HttpStatusCode.NotFound, "beneficiary role does not grant ownership of someone else's asset");
         await client.PostAsJsonAsync("/api/auth/register", new { fullName = "Third User", email = "thirdflow@example.test", password = "Registration123!", confirmPassword = "Registration123!" });
         check((await client.PostAsJsonAsync(selectionPath, new { email = "thirdflow@example.test", allocation = 50 })).StatusCode == HttpStatusCode.Conflict, "combined beneficiary allocation cannot exceed 100 percent");
@@ -132,8 +132,8 @@ internal static class MainFlowTests
             await db.SaveChangesAsync();
         }
         check((await client.PostAsJsonAsync(selectionPath, new { email = "thirdflow@example.test", allocation = 40 })).StatusCode == HttpStatusCode.Created, "second beneficiary can receive the remaining allocation");
-        var allocations = (await client.GetFromJsonAsync<BeneficiaryDto[]>($"/api/owner/beneficiaries?assetId={asset.AssetId}"))!;
-        check(allocations.Length == 2 && allocations.Sum(x => x.Allocation) == 100, "multiple beneficiary assignments persist with a total allocation of 100 percent");
+        var allocations = (await client.GetFromJsonAsync<PageDto<BeneficiaryDto>>($"/api/owner/beneficiaries?assetId={asset.AssetId}"))!.Items;
+        check(allocations.Count == 2 && allocations.Sum(x => x.Allocation) == 100, "multiple beneficiary assignments persist with a total allocation of 100 percent");
         var secondAssetResponse = await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = vault.VaultId, name = "Second Asset", type = "Other" });
         var secondAsset = (await secondAssetResponse.Content.ReadFromJsonAsync<AssetDto>())!;
         check((await client.PostAsJsonAsync($"/api/owner/assets/{secondAsset.AssetId}/beneficiaries", new { email = "otherflow@example.test", allocation = 100 })).StatusCode == HttpStatusCode.Created, "same beneficiary can be designated for a second asset");

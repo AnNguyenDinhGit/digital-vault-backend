@@ -6,6 +6,16 @@
 
 # LegacyVault API
 
+> Contract sau merge 21/10/2026: các list từ main đã áp dụng phân trang `{ page, pageSize, items }`. Xem [danh sách endpoint thay đổi](Merge-pagination-2026-10-21.md); mô tả mảng trực tiếp ở tài liệu cũ không còn áp dụng cho các endpoint này.
+
+## Owner xác nhận còn sống (20/10/2026)
+
+GET/POST `/api/owner/life-confirmation`: đọc lần gần nhất/bấm xác nhận bằng JWT Owner; POST không body. Response có `ownerId`, `lastConfirmedAliveAt` (UTC hoặc null). Chi tiết frontend, persistence và test: [Owner-life-confirmation.md](Owner-life-confirmation.md).
+
+## Executor và LegalVerifier (19/10/2026)
+
+Xem [contract và hướng dẫn test đầy đủ](Executor-Legal-workflow.md): tổng quan tất cả đơn kèm Owner, chi tiết theo phân công, giấy chứng tử, lịch sử pháp lý, tài liệu và trạng thái Owner có nguồn bằng chứng. Endpoint cũ được giữ; `GET /api/executor/handovers/overview` là danh sách tổng quan phân trang mới.
+
 Contract hiện tại: **JWT Bearer**, API → BLL → DAL. Danh sách method/path/role, DTO, multipart, status codes, pagination và giới hạn được cập nhật đầy đủ tại [Frontend-JWT-integration.md](Frontend-JWT-integration.md).
 
 ## Authentication

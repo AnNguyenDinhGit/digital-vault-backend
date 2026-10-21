@@ -1,5 +1,6 @@
 using Azure;
 using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Extensions;
 using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
@@ -99,9 +100,7 @@ public sealed class VaultService(
         return Map(asset);
     }
 
-    private static HandoverDto Map(HandoverRequest r) => new(r.RequestId, r.VaultId, r.RequestType, r.Status, r.InitiatedAt,
-        r.HandoverDocuments.Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray(),
-        r.HandoverCases.Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)).ToArray());
+    private static HandoverDto Map(HandoverRequest r) => r.ToDto();
 
     private async Task<DigitalAsset> Owned(int user, int asset, CancellationToken ct)
     {
@@ -278,7 +277,7 @@ public sealed class VaultService(
         foreach (var d in r.HandoverDocuments)
         {
             var content = await Read(d.StoragePath, ct);
-            documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid));
+            documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
         }
         return Map(r) with { Documents = documents };
     }
@@ -292,8 +291,8 @@ public sealed class VaultService(
 
     private async Task<DocumentContent> Read(string path, CancellationToken ct)
     {
-        var doc = protection.Decrypt(await store.Read(path, ct));
-        return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, protection.Verify(doc.File.Content, doc.Signature, doc.SignerId));
+        var doc = await protection.Read(store, path, ct);
+        return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, protection.Verify(doc.File.Content, doc.Signature, doc.SignerId), doc.Purpose);
     }
 
     public Task<DocumentDto> UploadDeathCertificate(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct) =>
@@ -310,6 +309,7 @@ public sealed class VaultService(
         {
             var d = new HandoverDocument { RequestId = request, FileName = file.FileName, FileType = file.FileType, StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
             repository.Add(d); r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt); Audit(user, purpose == "DeathCertificate" ? "UploadDeathCertificate" : "UploadHandoverDocument", "HandoverRequest", request, "Success");
+            if (purpose == "DeathCertificate") Audit(user, "ReportOwnerDeceased", "User", r.Vault.OwnerId, "ReportedDeceased");
             await repository.Save(ct); return new(d.HandoverDocumentId, d.FileName, d.FileType, true);
         }
         catch { await store.Delete(path); throw; }
