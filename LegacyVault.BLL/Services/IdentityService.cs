@@ -16,7 +16,7 @@ public sealed class IdentityService(IVaultRepository repository)
     {
         var loginDto = new LoginDto(user.UserId, user.Roles.Select(r => r.RoleName).ToArray());
 
-        var refreshTokenStr = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+        var refreshTokenStr = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));   
         var refreshToken = new RefreshToken
         {
             UserId = user.UserId,
