@@ -212,3 +212,6 @@ Build/test cuối: 0 lỗi/0 cảnh báo, **256 kiểm tra đạt**. Xem [báo c
 # Nút xác nhận còn sống của Owner
 
 GET `/api/owner/life-confirmation` khi mở trang; POST cùng path khi bấm nút, không body. Dùng Bearer Owner và hiển thị `lastConfirmedAliveAt` trả về (UTC, null khi chưa có record). Không cập nhật UI thành công trước response; xử lý 409 khi có hồ sơ khai báo mất. Xem [contract đầy đủ](Owner-life-confirmation.md).
+# Contract phân trang sau merge 21/10/2026
+
+List Owner, Executor assignments/handovers và beneficiary assets nay trả `{ page, pageSize, items }`. Frontend đọc `items`, không coi response là mảng trực tiếp. Xem [endpoint và query cụ thể](Merge-pagination-2026-10-21.md). JWT và life-confirmation không đổi.

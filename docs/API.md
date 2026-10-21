@@ -6,6 +6,8 @@
 
 # LegacyVault API
 
+> Contract sau merge 21/10/2026: các list từ main đã áp dụng phân trang `{ page, pageSize, items }`. Xem [danh sách endpoint thay đổi](Merge-pagination-2026-10-21.md); mô tả mảng trực tiếp ở tài liệu cũ không còn áp dụng cho các endpoint này.
+
 ## Owner xác nhận còn sống (20/10/2026)
 
 GET/POST `/api/owner/life-confirmation`: đọc lần gần nhất/bấm xác nhận bằng JWT Owner; POST không body. Response có `ownerId`, `lastConfirmedAliveAt` (UTC hoặc null). Chi tiết frontend, persistence và test: [Owner-life-confirmation.md](Owner-life-confirmation.md).

@@ -229,17 +229,17 @@ internal static class JwtWorkflowTests
         await using (var db = new LegacyVaultDbContext(dbOptions)) check((await db.DigitalVaults.SingleAsync(v => v.VaultId == editable.Vault)).UpdatedAt > futureVersion, "concurrency timestamp advances even if clock has not advanced past stored version");
         await Expect(await client.PutAsJsonAsync($"/api/owner/assets/{editable.Asset}", new { name = "Updated asset", type = "Document" }), HttpStatusCode.OK, "owner updates asset");
         As("other"); await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{editable.Vault}", new { name = "Other" }), HttpStatusCode.NotFound, "another owner cannot update vault");
-        As("owner"); var allocations = (await client.GetFromJsonAsync<AssignmentDto[]>($"/api/owner/assets/{editable.Asset}/allocations"))!; var assignment = allocations.Single().AssignmentId;
+        As("owner"); var allocations = (await client.GetFromJsonAsync<PageDto<AssignmentDto>>($"/api/owner/assets/{editable.Asset}/allocations"))!.Items; var assignment = allocations.Single().AssignmentId;
         await Expect(await client.PutAsJsonAsync($"/api/owner/assets/{editable.Asset}/allocations/{assignment}", new { allocation = 50 }), HttpStatusCode.OK, "owner updates allocation");
         await Expect(await client.PutAsJsonAsync($"/api/owner/assets/{editable.Asset}/allocations/{assignment}", new { allocation = 50.001 }), HttpStatusCode.BadRequest, "updated allocation rejects precision loss");
         await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{editable.Asset}/allocations/{assignment}/revoke", new { }), HttpStatusCode.OK, "owner revokes allocation without deleting history");
         await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{editable.Asset}/revoke", new { }), HttpStatusCode.NoContent, "owner revokes asset");
         await Expect(await client.PostAsJsonAsync($"/api/owner/vaults/{editable.Vault}/close", new { }), HttpStatusCode.NoContent, "owner closes unprocessed vault");
         var concurrentAllocation = await CreateFixture("Concurrent allocation");
-        var initialAllocation = (await client.GetFromJsonAsync<AssignmentDto[]>($"/api/owner/assets/{concurrentAllocation.Asset}/allocations"))!.Single();
+        var initialAllocation = (await client.GetFromJsonAsync<PageDto<AssignmentDto>>($"/api/owner/assets/{concurrentAllocation.Asset}/allocations"))!.Items.Single();
         await client.PutAsJsonAsync($"/api/owner/assets/{concurrentAllocation.Asset}/allocations/{initialAllocation.AssignmentId}", new { allocation = 40 });
         await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{concurrentAllocation.Asset}/beneficiaries", new { email = "other@example.test", allocation = 40 }), HttpStatusCode.Created, "second allocation persists below total cap");
-        var allocationRows = (await client.GetFromJsonAsync<AssignmentDto[]>($"/api/owner/assets/{concurrentAllocation.Asset}/allocations"))!;
+        var allocationRows = (await client.GetFromJsonAsync<PageDto<AssignmentDto>>($"/api/owner/assets/{concurrentAllocation.Asset}/allocations"))!.Items;
         await Expect(await client.PutAsJsonAsync($"/api/owner/assets/{concurrentAllocation.Asset}/allocations/{initialAllocation.AssignmentId}", new { allocation = 61 }), HttpStatusCode.Conflict, "allocation update cannot exceed total 100 percent");
         var competitor = allocationRows.Single(a => a.BeneficiaryId == ids["other"]).AssignmentId;
         var racingOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection).AddInterceptors(new AllocationRace(dbOptions, ids["owner"], concurrentAllocation.Asset, competitor, app.Services)).Options;
@@ -351,7 +351,11 @@ internal static class JwtWorkflowTests
             check((await db.HandoverRequests.SingleAsync(r => r.RequestId == request.RequestId)).Status == "Draft", "death certificate upload does not approve or complete request");
             check((await db.ExecutorAssignments.SingleAsync(a => a.VaultId == handover.Vault)).Status == "Active", "explicit Owner assignment remains unchanged");
         }
-        check((await client.GetFromJsonAsync<ExecutorAssignmentDto[]>("/api/executor/assignments"))!.Any(a => a.VaultId == handover.Vault), "Executor can discover persisted vault assignments");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorAssignmentDto>>("/api/executor/assignments"))!.Items.Any(a => a.VaultId == handover.Vault), "Executor can discover persisted vault assignments");
+        var assignmentPage = (await client.GetFromJsonAsync<PageDto<ExecutorAssignmentDto>>("/api/executor/assignments?page=1&pageSize=1"))!;
+        check(assignmentPage.Page == 1 && assignmentPage.PageSize == 1 && assignmentPage.Items.Count == 1, "merged Executor assignments retain pagination metadata and page limit");
+        await Expect(await client.GetAsync("/api/executor/assignments?page=0"), HttpStatusCode.BadRequest, "Executor assignments reject invalid page");
+        await Expect(await client.GetAsync("/api/executor/assignments?pageSize=101"), HttpStatusCode.BadRequest, "Executor assignments reject excessive page size");
         using (var form = new MultipartFormDataContent())
         {
             form.Add(new StringContent(ids["legal"].ToString()), "VerifierId"); var bytes = new ByteArrayContent("%PDF-1.7 legal evidence"u8.ToArray()); bytes.Headers.ContentType = new("application/pdf"); form.Add(bytes, "Evidence", "evidence.pdf");
@@ -414,7 +418,7 @@ internal static class JwtWorkflowTests
         client.DefaultRequestHeaders.Authorization = beneficiaryAuthorization;
         await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { note = "Received" }), HttpStatusCode.OK, "beneficiary confirms completed receipt without claiming digital signature");
         await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { }), HttpStatusCode.Conflict, "receipt confirmation cannot repeat");
-        check((await client.GetFromJsonAsync<InheritanceDto[]>("/api/beneficiary/assets"))!.Length == 1, "received inheritance remains available");
+        check((await client.GetFromJsonAsync<PageDto<InheritanceDto>>("/api/beneficiary/assets"))!.Items.Count == 1, "received inheritance remains available");
         check((await client.GetFromJsonAsync<ReceiptDto>($"/api/beneficiary/handovers/{caseId}/receipt"))!.Status == "Confirmed", "beneficiary can read their persisted receipt");
         await Expect(await client.GetAsync($"/api/beneficiary/handovers/{caseId}/documents"), HttpStatusCode.OK, "beneficiary lists handover documents after OTP and legal approval");
         var notifications = (await client.GetFromJsonAsync<PageDto<NotificationDto>>("/api/notifications"))!; check(notifications.Items.Count > 0, "notifications persist for beneficiary workflow");
@@ -491,7 +495,10 @@ internal static class JwtWorkflowTests
         await client.PostAsJsonAsync($"/api/owner/assets/{unrelated.AssetId}/revoke", new { });
         var rejectedRequest = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{rejectedFlow.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
         As("executor");
-        check((await client.GetFromJsonAsync<HandoverDto[]>("/api/executor/handovers"))!.Any(r => r.RequestId == rejectedRequest.RequestId), "AutoAssigned requests appear in executor list consistently with detail");
+        check((await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Any(r => r.RequestId == rejectedRequest.RequestId), "AutoAssigned requests appear in executor list consistently with detail");
+        var firstRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=1&pageSize=1"))!;
+        var secondRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=2&pageSize=1"))!;
+        check(firstRequestPage.Items.Count == 1 && secondRequestPage.Items.Count == 1 && firstRequestPage.Items[0].RequestId != secondRequestPage.Items[0].RequestId && secondRequestPage.Page == 2, "merged handover pagination returns distinct assigned records on consecutive pages");
         await Expect(await UploadCertificate(rejectedRequest.RequestId), HttpStatusCode.OK, "randomly assigned Executor can upload death certificate");
         await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{rejectedRequest.RequestId}/start", new { }), HttpStatusCode.Conflict, "Executor cannot start before legal approval");
         using (var upload = new MultipartFormDataContent())

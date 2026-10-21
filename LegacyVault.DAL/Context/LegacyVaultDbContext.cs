@@ -213,6 +213,12 @@ public partial class LegacyVaultDbContext : DbContext
                 .IsUnicode(false)
                 .HasDefaultValue("Direct");
             entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysdatetime())");
+            // Bổ sung cấu hình mối quan hệ giữa Conversation và HandoverRequest
+            entity.HasOne(d => d.Request)
+                .WithMany()
+                .HasForeignKey(d => d.RequestId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("FK_Conversations_HandoverRequests");
         });
 
         modelBuilder.Entity<DigitalAsset>(entity =>
@@ -602,6 +608,7 @@ public partial class LegacyVaultDbContext : DbContext
 
         OnModelCreatingPartial(modelBuilder);
     }
+
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
 }

@@ -68,3 +68,6 @@ Làm theo [luồng Swagger Executor/LegalVerifier](Executor-Legal-workflow.md). 
 # Test nút “Tôi vẫn còn sống”
 
 Xem [hướng dẫn Owner life confirmation](Owner-life-confirmation.md): GET/POST `/api/owner/life-confirmation`, xác minh thời gian UTC được lưu, giới hạn quyền và lỗi 409 khi xung đột hồ sơ pháp lý. POST không cần body.
+# Cập nhật phân trang 21/10/2026
+
+Khi test list kho/tài sản/người thụ hưởng/phân bổ/tài liệu Owner, phân công/đơn Executor và tài sản thừa kế: gửi `page`, `pageSize` và đọc `items` trong response. Xem [contract sau merge](Merge-pagination-2026-10-21.md). Các kiểm tra quyền và OTP giữ nguyên.

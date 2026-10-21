@@ -6,7 +6,7 @@ Mọi endpoint bên dưới dùng `Authorization: Bearer <accessToken>`. Định
 
 `GET /api/executor/handovers/overview?page=1&pageSize=20&assignedOnly=false` trả `{ page, pageSize, items }`; mỗi item có `requestId`, `vaultId`, `vaultName`, `owner: { userId, fullName }`, `executorId`, `executorName`, `requestType`, `status`, các mốc thời gian và `isAssignedToMe`.
 
-Lọc thêm `ownerId`, `status` hoặc `assignedOnly=true`. Page bắt đầu từ 1, pageSize 1–100. API này cho Executor xem trạng thái tất cả đơn, không trả tài liệu, danh sách thụ hưởng hoặc thông tin liên lạc riêng tư. `GET /api/executor/handovers` giữ response mảng cũ và chỉ trả đơn được phân công.
+Lọc thêm `ownerId`, `status` hoặc `assignedOnly=true`. Page bắt đầu từ 1, pageSize 1–100. API này cho Executor xem trạng thái tất cả đơn, không trả tài liệu, danh sách thụ hưởng hoặc thông tin liên lạc riêng tư. Sau merge main 21/10/2026, `GET /api/executor/handovers` cũng trả `{ page, pageSize, items }` và chỉ trả đơn được phân công. `GET /api/executor/assignments` dùng cùng contract phân trang.
 
 ## Luồng người thi hành
 

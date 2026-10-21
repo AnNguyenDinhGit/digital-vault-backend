@@ -1,5 +1,5 @@
-using System.Threading.RateLimiting;
 using LegacyVault.API.Authentication;
+using LegacyVault.API.Hubs;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Interfaces;
 using LegacyVault.BLL.Security;
@@ -10,9 +10,13 @@ using LegacyVault.DAL.Storage;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
-
+// 1. Đăng ký SignalR Service
+builder.Services.AddSignalR();
+builder.Services.AddScoped<ChatService>();
+// ... (các middleware khác)
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddScoped<AdminService>();
@@ -165,5 +169,9 @@ app.UseAuthorization();
 app.UseRateLimiter();
 
 app.MapControllers();
+
+// 2. Map Hub Endpoint
+app.MapControllers();
+app.MapHub<ChatHub>("/hubs/chat"); // Đường dẫn Hub cho Frontend kết nối
 
 app.Run();
