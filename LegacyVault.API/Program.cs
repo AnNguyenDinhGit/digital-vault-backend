@@ -11,6 +11,10 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 using System.Threading.RateLimiting;
+using LegacyVault.API.Authentication;
+using LegacyVault.API.Hubs; // Khai báo này để nhận diện ChatHub
+
+
 
 var builder = WebApplication.CreateBuilder(args);
 // 1. Đăng ký SignalR Service

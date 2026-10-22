@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.DAL.Context;
@@ -12,6 +13,34 @@ namespace LegacyVault.BLL.Services;
 
 public class ChatService(LegacyVaultDbContext db)
 {
+    // Hàm kiểm tra xem user có quyền truy cập vào đơn bàn giao (Handover Request) này không
+    public async Task<bool> UserHasAccessToHandoverAsync(int userId, int requestId, CancellationToken ct)
+    {
+        // 1. Lấy thông tin user kèm theo các Role của họ
+        var user = await db.Users
+            .Include(u => u.Roles)
+            .FirstOrDefaultAsync(u => u.UserId == userId, ct);
+
+        if (user == null) return false;
+
+        var roles = user.Roles.Select(r => r.RoleName).ToList();
+
+        // 2. Chỉ cho phép các role là LegalVerifier hoặc Executor có quyền truy cập chat
+        bool isLegalOrExecutor = roles.Contains("LegalVerifier") || roles.Contains("Executor");
+        if (!isLegalOrExecutor)
+        {
+            return false; // Chủ sở hữu (Owner) hoặc các role khác tuyệt đối không có quyền
+        }
+
+        // 3. Kiểm tra xem user có thực sự được phân công phụ trách đơn bàn giao (requestId) này không
+        // Sử dụng DbSet là HandoverRequests đúng với định nghĩa trong DbContext của bạn
+        bool isAssigned = await db.HandoverRequests.AnyAsync(h =>
+            h.RequestId == requestId &&
+            (h.ExecutorId == userId), ct); // Hoặc kiểm tra thêm LegalVerifierId nếu cấu trúc bảng có lưu trữ
+
+        return isAssigned;
+    }
+
     // 1. Lấy hoặc Tạo cuộc trò chuyện riêng cho Đơn bàn giao
     public async Task<Conversation> GetOrCreateConversationAsync(int requestId, CancellationToken ct)
     {
@@ -38,6 +67,13 @@ public class ChatService(LegacyVaultDbContext db)
     // 2. Lấy Lịch sử Tin nhắn có Phân trang (Pagination)
     public async Task<PageDto<MessageDto>> GetMessagesAsync(int userId, int requestId, int page, int pageSize, CancellationToken ct)
     {
+        // Kiểm tra quyền truy cập trước khi cho phép xem lịch sử chat
+        bool hasAccess = await UserHasAccessToHandoverAsync(userId, requestId, ct);
+        if (!hasAccess)
+        {
+            throw new WorkflowException(403, "Bạn không có quyền xem lịch sử tin nhắn của đơn bàn giao này.");
+        }
+
         ManagementService.Paging(page, pageSize);
 
         var conversation = await GetOrCreateConversationAsync(requestId, ct);
@@ -72,6 +108,13 @@ public class ChatService(LegacyVaultDbContext db)
     // 3. Lưu tin nhắn mới vào DB
     public async Task<MessageDto> SaveMessageAsync(int senderId, int requestId, SendMessageInput input, CancellationToken ct)
     {
+        // Kiểm tra quyền truy cập trước khi cho phép gửi tin nhắn
+        bool hasAccess = await UserHasAccessToHandoverAsync(senderId, requestId, ct);
+        if (!hasAccess)
+        {
+            throw new WorkflowException(403, "Bạn không có quyền gửi tin nhắn trong đơn bàn giao này.");
+        }
+
         var conversation = await GetOrCreateConversationAsync(requestId, ct);
         var sender = await db.Users.Include(u => u.Roles).FirstOrDefaultAsync(u => u.UserId == senderId, ct)
             ?? throw new WorkflowException(404, "User không tồn tại.");
