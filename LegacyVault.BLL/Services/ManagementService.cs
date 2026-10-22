@@ -11,6 +11,57 @@ namespace LegacyVault.BLL.Services;
 public sealed class ManagementService(IVaultRepository repository, IWorkflowRepository workflow, IDocumentStore store, DocumentProtection protection)
 {
     private static bool Assigned(ExecutorAssignment a) => a.Status is "Active" or "AutoAssigned";
+    public async Task<ExecutorDetailDto> OwnerExecutorDetail(int user, int executorId, int? vaultId, CancellationToken ct)
+    {
+        await Require(user, ct, VaultService.OwnerRole);
+        if (executorId <= 0 || vaultId is <= 0) throw new WorkflowException(400, "Executor and vault IDs must be positive.");
+        var vault = vaultId is null ? null : await Owned(user, vaultId.Value, ct);
+        var executor = await repository.User(executorId, ct);
+        if (executor is null || executor.UserId == user || executor.Status != "Active" ||
+            !executor.Roles.Any(r => r.RoleName == VaultService.ExecutorRole) || executor.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) ||
+            (vault is not null && vault.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == executorId))))
+            throw new WorkflowException(404, "Eligible Executor not found.");
+        return new(executor.UserId, executor.FullName, VaultService.ExecutorRole, executor.Status, DateTime.SpecifyKind(executor.CreatedAt, DateTimeKind.Utc));
+    }
+
+    public async Task<HandoverDto> AcceptRequest(int user, int id, CancellationToken ct)
+    {
+        var request = await OperatorRequest(user, id, ct);
+        if (request.Status != "Pending_Executor") throw new WorkflowException(409, "Only an awaiting Executor request can be accepted.");
+        if (request.Vault.Status != "Active") throw new WorkflowException(409, "Vault is not active.");
+        Ready(request.Vault);
+        request.Status = "Draft"; Touch(request.Vault);
+        Audit(user, "AcceptHandover", "HandoverRequest", id);
+        Notify(request.Vault.OwnerId, "Handover", "Executor accepted handover", "The assigned Executor accepted your handover request.");
+        await repository.Save(ct); return Map(request);
+    }
+
+    public async Task<HandoverDto> DeclineRequest(int user, int id, DeclineHandoverInput input, CancellationToken ct)
+    {
+        Validate(input);
+        if (string.IsNullOrWhiteSpace(input.Reason)) throw new WorkflowException(400, "Decline reason is required.");
+        var request = await OperatorRequest(user, id, ct);
+        if (request.Status != "Pending_Executor") throw new WorkflowException(409, "Only an awaiting Executor request can be declined.");
+        request.Status = "Declined";
+        foreach (var item in request.HandoverCases) item.Status = "Cancelled";
+        foreach (var assignment in request.Vault.ExecutorAssignments.Where(a => a.ExecutorId == user && Assigned(a))) assignment.Status = "Revoked";
+        Touch(request.Vault);
+        Audit(user, "DeclineHandover", "HandoverRequest", id);
+        Notify(request.Vault.OwnerId, "Handover", "Executor declined handover", $"Handover #{id}: {input.Reason.Trim()}");
+        await repository.Save(ct); return Map(request);
+    }
+
+    public async Task<PageDto<ExecutorOptionDto>> OwnerExecutorOptions(int user, int page, int size, string? search, int? vaultId, CancellationToken ct)
+    {
+        await Require(user, ct, VaultService.OwnerRole);
+        Paging(page, size);
+        if (search?.Length > 100 || vaultId is <= 0) throw new WorkflowException(400, "search must be at most 100 characters; vaultId must be positive.");
+        if (vaultId is not null) _ = await Owned(user, vaultId.Value, ct);
+        search = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
+        var rows = await workflow.ExecutorOptions(user, vaultId, search, page, size, DateTime.UtcNow, ct);
+        return new(page, size, rows.Select(r => new ExecutorOptionDto(r.UserId, r.FullName)).ToArray());
+    }
+
     public async Task<LifeConfirmationDto> LifeConfirmation(int user, CancellationToken ct)
     {
         await Require(user, ct, VaultService.OwnerRole);
@@ -47,14 +98,15 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     private static void ValidateStatus(string? status)
     {
-        if (status is not null && status is not ("Draft" or "Cancelled" or "Pending_Legal" or "Additional_Info" or "Rejected" or "Approved" or "In_Progress" or "Completed"))
+        if (status is not null && status is not ("Pending_Executor" or "Declined" or "Draft" or "Cancelled" or "Pending_Legal" or "Additional_Info" or "Rejected" or "Approved" or "In_Progress" or "Completed"))
             throw new WorkflowException(400, "Unknown handover status filter.");
     }
     public async Task<PageDto<ExecutorAssignmentDto>> ExecutorAssignments(int user, int page, int size, CancellationToken ct)
     {
         await Require(user, ct, VaultService.ExecutorRole);
         Paging(page, size);
-        var all = (await workflow.ExecutorAssignments(user, ct)).Select(a => new ExecutorAssignmentDto(a.VaultId, user, a.Status, a.AssignedAt)).ToArray();
+        var all = (await workflow.ExecutorAssignments(user, ct)).Select(a => new ExecutorAssignmentDto(a.VaultId, user, a.Status, a.AssignedAt)
+        { VaultName = a.Vault.VaultName, Owner = new(a.Vault.OwnerId, a.Vault.Owner.FullName) }).ToArray();
         var items = all.Skip((page - 1) * size).Take(size).ToArray();
         return new PageDto<ExecutorAssignmentDto>(page, size, items);
     }
@@ -83,7 +135,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     private static void Mutable(DigitalVault v)
     {
-        if (v.Status != "Active" || v.HandoverRequests.Any(r => r.Status != "Cancelled"))
+        if (v.Status != "Active" || v.HandoverRequests.Any(r => r.Status != "Cancelled" && r.Status != "Declined"))
             throw new WorkflowException(409, "Vault is inactive or has a protected handover record.");
     }
     private static void Active(DigitalAsset a)
@@ -180,6 +232,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         if (input.ExecutorId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == input.ExecutorId))) throw new WorkflowException(400, "Executor must be independent.");
         foreach (var a in v.ExecutorAssignments.Where(Assigned)) a.Status = "Revoked";
         repository.Add(new ExecutorAssignment { VaultId = vault, ExecutorId = input.ExecutorId, Status = "Active", AssignedAt = DateTime.UtcNow }); Touch(v);
+        Notify(input.ExecutorId, "Assignment", "Vault assigned", "An Owner assigned you to a vault. Review your assignments for the handover workflow.");
         Audit(user, "AssignExecutor", "DigitalVault", vault); await repository.Save(ct);
     }
     private static void Ready(DigitalVault v)
@@ -192,7 +245,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private HandoverRequest NewRequest(int actor, DigitalVault v, int executor)
     {
         Ready(v); Touch(v);
-        var request = new HandoverRequest { VaultId = v.VaultId, Vault = v, ExecutorId = executor, RequestType = "Inheritance", Status = "Draft", InitiatedAt = DateTime.UtcNow };
+        var request = new HandoverRequest { VaultId = v.VaultId, Vault = v, ExecutorId = executor, RequestType = "Inheritance", Status = "Pending_Executor", InitiatedAt = DateTime.UtcNow };
         foreach (var a in v.DigitalAssets.Where(a => a.Status == "Active"))
             foreach (var b in a.BeneficiaryAssignments.Where(b => b.Status == "Active")) request.HandoverCases.Add(new HandoverCase { AssignmentId = b.AssignmentId, Assignment = b, Status = "Pending" });
         repository.Add(request); Audit(actor, "CreateHandover", "DigitalVault", v.VaultId);
@@ -228,7 +281,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         if (v.OwnerId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == user)))
             throw new WorkflowException(403, "Executor must be independent.");
         Mutable(v); Ready(v);
-        var request = NewRequest(user, v, user); await repository.Save(ct); return Map(request);
+        var request = NewRequest(user, v, user); request.Status = "Draft";
+        Audit(user, "AcceptHandover", "DigitalVault", vault);
+        await repository.Save(ct); return Map(request);
     }
     public static void Paging(int page, int size) { if (page < 1 || page > 100000 || size is < 1 or > 100) throw new WorkflowException(400, "page >= 1; pageSize must be 1-100."); }
     public async Task<PageDto<HandoverDto>> Requests(int user, string kind, int page, int size, string? status, CancellationToken ct)
@@ -241,7 +296,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     {
         await Require(user, ct, VaultService.ExecutorRole);
         var r = await workflow.RequestGraph(id, ct);
-        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && Assigned(a))) throw new WorkflowException(404, "Assigned request not found.");
+        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && (Assigned(a) || r.Status == "Declined"))) throw new WorkflowException(404, "Assigned request not found.");
         if (r.Vault.OwnerId == user || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == user)) throw new WorkflowException(403, "Executor must be independent.");
         return r;
     }
@@ -294,7 +349,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task Cancel(int user, int id, CancellationToken ct)
     {
         await OwnerRequest(user, id, ct); var r = (await workflow.RequestGraph(id, ct))!;
-        if (r.Status is not ("Draft" or "Rejected")) throw new WorkflowException(409, "Only draft or rejected requests can be cancelled.");
+        if (r.Status is not ("Pending_Executor" or "Draft" or "Rejected")) throw new WorkflowException(409, "Only awaiting Executor, draft or rejected requests can be cancelled.");
         r.Status = "Cancelled"; foreach (var c in r.HandoverCases) c.Status = "Cancelled"; Touch(r.Vault);
         Audit(user, "CancelHandover", "HandoverRequest", id); await repository.Save(ct);
     }

@@ -2,7 +2,11 @@ using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
 namespace LegacyVault.BLL.DTOs;
-public sealed record ExecutorAssignmentDto(int VaultId, int ExecutorId, string Status, DateTime AssignedAt);
+public sealed record ExecutorAssignmentDto(int VaultId, int ExecutorId, string Status, DateTime AssignedAt)
+{
+    public string? VaultName { get; init; }
+    public OwnerSummaryDto? Owner { get; init; }
+}
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class UpdateAssetInput
@@ -17,6 +21,8 @@ public sealed record AllocationInput([Range(typeof(decimal), "0.01", "100")] dec
 public sealed record ExecutorInput([Range(1, int.MaxValue)] int ExecutorId);
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ReviewInput([Required, StringLength(2000, MinimumLength = 1)] string Comment);
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record DeclineHandoverInput([Required, StringLength(2000, MinimumLength = 1)] string Reason);
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ReceiptInput([StringLength(2000)] string? Note);
 public sealed record AssignmentDto(int AssignmentId, int AssetId, int BeneficiaryId, string FullName, decimal Allocation, string Status);

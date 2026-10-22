@@ -1,5 +1,7 @@
 # Hướng dẫn Executor và LegalVerifier
 
+> Cập nhật: đơn do Owner tạo mới cần Executor accept trước khi upload/nộp pháp lý: `Pending_Executor → Draft`. Có nhánh decline riêng với trạng thái Declined. Chi tiết và request mẫu: [Executor tiếp nhận đơn](Executor-intake-and-profile.md). Hồ sơ cũ và hồ sơ Executor tự khởi tạo ở Draft giữ luồng dưới đây.
+
 Mọi endpoint bên dưới dùng `Authorization: Bearer <accessToken>`. Định danh và quyền lấy từ JWT kết hợp tài khoản/role hiện tại trong database. Không gửi `UploadedBy` hoặc tự nhận phân công bằng `ExecutorId`.
 
 ## Tổng quan tất cả đơn

@@ -44,7 +44,7 @@ public sealed class VaultService(
 
     private static void Editable(DigitalVault vault)
     {
-        if (vault.HandoverRequests.Any(r => r.Status != "Cancelled")) throw new WorkflowException(409, "Handover records protect this vault from mutation.");
+        if (vault.HandoverRequests.Any(r => r.Status != "Cancelled" && r.Status != "Declined")) throw new WorkflowException(409, "Handover records protect this vault from mutation.");
     }
 
     private async Task OperatorRole(int user, CancellationToken ct)
@@ -114,7 +114,7 @@ public sealed class VaultService(
     {
         await OperatorRole(user, ct);
         var r = await repository.Request(request, ct);
-        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned")))
+        if (r is null || r.ExecutorId != user || !r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned" || r.Status == "Declined")))
             throw new WorkflowException(404, "Handover request not found or executor assignment is inactive.");
         if (r.Vault.OwnerId == user || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == user))
             throw new WorkflowException(403, "Executor must be independent of the owner and beneficiaries.");
@@ -263,7 +263,7 @@ public sealed class VaultService(
         await OperatorRole(user, ct);
         ManagementService.Paging(page, pageSize);
         var allRequests = (await repository.Requests(user, ct))
-            .Where(r => r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned")))
+            .Where(r => r.Vault.ExecutorAssignments.Any(x => x.ExecutorId == user && (x.Status == "Active" || x.Status == "AutoAssigned" || r.Status == "Declined")))
             .Select(Map)
             .ToArray();
         var items = allRequests.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
