@@ -215,3 +215,9 @@ GET `/api/owner/life-confirmation` khi mở trang; POST cùng path khi bấm nú
 # Contract phân trang sau merge 21/10/2026
 
 List Owner, Executor assignments/handovers và beneficiary assets nay trả `{ page, pageSize, items }`. Frontend đọc `items`, không coi response là mảng trực tiếp. Xem [endpoint và query cụ thể](Merge-pagination-2026-10-21.md). JWT và life-confirmation không đổi.
+# Dropdown Executor khi tạo kho
+
+GET `/api/owner/executors` với Bearer Owner; query `page`, `pageSize`, `search`, `vaultId` tùy chọn. Dùng `fullName` làm label, `userId` làm value. Flow tạo kho rồi gán ID vẫn là hai request riêng; xem [contract và xử lý lỗi](Owner-executor-dropdown.md).
+# Tiếp nhận đơn và chi tiết Executor
+
+Owner có GET `/api/owner/executors/{executorId}` cho nút xem chi tiết. Đơn Owner mới tạo có `Pending_Executor`, cần POST `/api/executor/handovers/{requestId}/accept` để chuyển Draft trước upload. POST `/decline` nhận `{ "reason": "..." }`, trả Declined và thu hồi phân công. Xem [contract đầy đủ](Executor-intake-and-profile.md). Bổ sung nhãn/nút trên frontend; không đổi contract JWT hoặc phân trang.

@@ -133,7 +133,11 @@ Authorization: Bearer {{operatorToken}}
 POST {{baseUrl}}/api/executor/assignments/{{vaultId}}/handovers
 Authorization: Bearer {{operatorToken}}
 
-### Assigned Executor uploads death certificate before legal submission
+### Assigned Executor accepts an Owner-created Pending_Executor request; skip for self-initiated Draft
+POST {{baseUrl}}/api/executor/handovers/{{requestId}}/accept
+Authorization: Bearer {{operatorToken}}
+
+### Assigned Executor uploads death certificate after acceptance and before legal submission
 POST {{baseUrl}}/api/executor/handovers/{{requestId}}/death-certificate
 Authorization: Bearer {{operatorToken}}
 Content-Type: multipart/form-data; boundary=DeathBoundary
@@ -276,3 +280,24 @@ Authorization: Bearer {{ownerToken}}
 ### Owner: click "I am still alive"; no body, no ownerId or client timestamp
 POST {{baseUrl}}/api/owner/life-confirmation
 Authorization: Bearer {{ownerToken}}
+### Owner: populate Executor dropdown before creating a vault
+GET {{baseUrl}}/api/owner/executors?page=1&pageSize=20
+Authorization: Bearer {{ownerToken}}
+
+### Owner: filter dropdown by name and exclude beneficiaries of an existing owned vault
+GET {{baseUrl}}/api/owner/executors?vaultId={{vaultId}}&search=Nguyen&page=1&pageSize=20
+Authorization: Bearer {{ownerToken}}
+### Owner: public Executor detail for "View details" button
+GET {{baseUrl}}/api/owner/executors/{{executorId}}
+Authorization: Bearer {{ownerToken}}
+
+### Assigned Executor: pending decision inbox
+GET {{baseUrl}}/api/executor/handovers/overview?assignedOnly=true&status=Pending_Executor&page=1&pageSize=20
+Authorization: Bearer {{operatorToken}}
+
+### Alternative to accept: decline a Pending_Executor request (cannot run after acceptance)
+POST {{baseUrl}}/api/executor/handovers/{{requestId}}/decline
+Authorization: Bearer {{operatorToken}}
+Content-Type: application/json
+
+{ "reason": "Currently unable to take this handover" }
