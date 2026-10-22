@@ -9,6 +9,13 @@ namespace LegacyVault.API.Controllers;
 [ApiController, Authorize, Route("api/owner")]
 public sealed class OwnerManagementController(ManagementService service) : VaultController
 {
+    [HttpGet("executors/{executorId:int}"), Authorize(Roles = "Owner")]
+    public Task<ExecutorDetailDto> ExecutorDetail(int executorId, [FromQuery] int? vaultId, CancellationToken ct) =>
+        service.OwnerExecutorDetail(UserId, executorId, vaultId, ct);
+    [HttpGet("executors"), Authorize(Roles = "Owner")]
+    public Task<PageDto<ExecutorOptionDto>> Executors([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        [FromQuery] string? search = null, [FromQuery] int? vaultId = null, CancellationToken ct = default) =>
+        service.OwnerExecutorOptions(UserId, page, pageSize, search, vaultId, ct);
     [HttpGet("life-confirmation"), Authorize(Roles = "Owner")]
     public Task<LifeConfirmationDto> LifeConfirmation(CancellationToken ct) => service.LifeConfirmation(UserId, ct);
     [HttpPost("life-confirmation"), Authorize(Roles = "Owner")]
@@ -56,6 +63,10 @@ public sealed class ExecutorAssignmentsController(ManagementService service) : V
 [ApiController, Authorize(Roles = "Executor"), Route("api/executor/handovers")]
 public sealed class ExecutorWorkflowController(ManagementService service) : VaultController
 {
+    [HttpPost("{requestId:int}/accept")]
+    public Task<HandoverDto> Accept(int requestId, CancellationToken ct) => service.AcceptRequest(UserId, requestId, ct);
+    [HttpPost("{requestId:int}/decline")]
+    public Task<HandoverDto> Decline(int requestId, DeclineHandoverInput input, CancellationToken ct) => service.DeclineRequest(UserId, requestId, input, ct);
     [HttpGet("overview")]
     public Task<PageDto<HandoverOverviewDto>> Overview([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
         [FromQuery] string? status = null, [FromQuery] int? ownerId = null, [FromQuery] bool assignedOnly = false, CancellationToken ct = default) =>

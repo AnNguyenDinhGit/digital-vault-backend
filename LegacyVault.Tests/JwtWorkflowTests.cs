@@ -182,6 +182,47 @@ internal static class JwtWorkflowTests
 
         As("owner");
         await Expect(await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Too long", description = new string('a', 501) }), HttpStatusCode.BadRequest, "vault description is limited to scaffold 500 characters");
+        var options = (await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors"))!;
+        check(options.Page == 1 && options.PageSize == 20 && options.Items.Single().UserId == ids["executor"] && options.Items[0].FullName == "executor", "Owner dropdown returns only Active Executor accounts with paginated public labels");
+        var optionsJson = await client.GetStringAsync("/api/owner/executors");
+        var executorDetail = (await client.GetFromJsonAsync<ExecutorDetailDto>($"/api/owner/executors/{ids["executor"]}"))!;
+        check(executorDetail.UserId == ids["executor"] && executorDetail.FullName == "executor" && executorDetail.Role == "Executor" && executorDetail.Status == "Active", "Owner can open public Executor detail from dropdown ID");
+        var executorDetailJson = await client.GetStringAsync($"/api/owner/executors/{ids["executor"]}");
+        check(!executorDetailJson.Contains("email", StringComparison.OrdinalIgnoreCase) && !executorDetailJson.Contains("secret", StringComparison.OrdinalIgnoreCase) && !executorDetailJson.Contains("phone", StringComparison.OrdinalIgnoreCase), "Executor detail excludes private contact and security information");
+        await Expect(await client.GetAsync($"/api/owner/executors/{ids["staff"]}"), HttpStatusCode.NotFound, "legacy Staff is not an Executor public profile");
+        check(!optionsJson.Contains("email", StringComparison.OrdinalIgnoreCase) && !optionsJson.Contains("password", StringComparison.OrdinalIgnoreCase) && !optionsJson.Contains("phone", StringComparison.OrdinalIgnoreCase), "Executor dropdown does not expose contact or authentication information");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors?search=%20EXEC%20"))!.Items.Single().UserId == ids["executor"], "dropdown name search trims and ignores case");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors?search=no-match"))!.Items.Count == 0, "unmatched dropdown search returns an empty page");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            var role = await db.Roles.SingleAsync(r => r.RoleName == "Executor");
+            (await db.Users.SingleAsync(u => u.UserId == ids["owner"])).Roles.Add(role);
+            (await db.Users.SingleAsync(u => u.UserId == ids["other"])).Roles.Add(role);
+            await db.SaveChangesAsync();
+        }
+        var optionPage1 = (await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors?page=1&pageSize=1"))!;
+        var optionPage2 = (await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors?page=2&pageSize=1"))!;
+        check(optionPage1.Items.Count == 1 && optionPage2.Items.Count == 1 && optionPage1.Items[0].UserId != optionPage2.Items[0].UserId && optionPage2.Page == 2 && optionPage2.PageSize == 1, "Executor dropdown applies SQL pagination with stable distinct pages");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors"))!.Items.All(e => e.UserId != ids["owner"]), "multi-role Owner never sees themselves as an Executor option");
+        await EditUser("other", u => u.Status = "Inactive");
+        await Expect(await client.GetAsync($"/api/owner/executors/{ids["other"]}"), HttpStatusCode.NotFound, "inactive Executor detail is unavailable");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors"))!.Items.All(e => e.UserId != ids["other"]), "inactive Executor is excluded from dropdown");
+        await EditUser("other", u => { u.Status = "Active"; u.Authentications.Single().LockedUntil = DateTime.UtcNow.AddMinutes(5); });
+        await Expect(await client.GetAsync($"/api/owner/executors/{ids["other"]}"), HttpStatusCode.NotFound, "locked Executor detail is unavailable");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors"))!.Items.All(e => e.UserId != ids["other"]), "locked Executor is excluded from dropdown");
+        await EditUser("other", u => { u.Authentications.Single().LockedUntil = null; u.Roles.Remove(u.Roles.Single(r => r.RoleName == "Executor")); });
+        await EditUser("owner", u => u.Roles.Remove(u.Roles.Single(r => r.RoleName == "Executor")));
+        foreach (var query in new[] { "page=0", "pageSize=101", "vaultId=0", "search=" + new string('x', 101) })
+            await Expect(await client.GetAsync("/api/owner/executors?" + query), HttpStatusCode.BadRequest, "dropdown validates query " + query.Split('=')[0]);
+        await Expect(await client.GetAsync("/api/owner/executors?vaultId=999999"), HttpStatusCode.NotFound, "dropdown vault filter requires an existing owned vault");
+        client.DefaultRequestHeaders.Authorization = null;
+        await Expect(await client.GetAsync("/api/owner/executors"), HttpStatusCode.Unauthorized, "dropdown requires JWT");
+        foreach (var actor in new[] { "executor", "legal", "recipient", "staff" })
+        {
+            As(actor); await Expect(await client.GetAsync("/api/owner/executors"), HttpStatusCode.Forbidden, "dropdown requires Owner role: " + actor);
+            await Expect(await client.GetAsync($"/api/owner/executors/{ids["executor"]}"), HttpStatusCode.Forbidden, "Executor detail requires Owner role: " + actor);
+        }
+        As("owner");
         var initialLife = (await client.GetFromJsonAsync<LifeConfirmationDto>("/api/owner/life-confirmation"))!;
         check(initialLife.OwnerId == ids["owner"] && initialLife.LastConfirmedAliveAt is null, "Owner without confirmation sees null instead of profile UpdatedAt");
         var beforeConfirmation = DateTime.UtcNow;
@@ -222,6 +263,18 @@ internal static class JwtWorkflowTests
             return (v.VaultId, a.AssetId);
         }
         var editable = await CreateFixture("Editable");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            (await db.Users.SingleAsync(u => u.UserId == ids["recipient"])).Roles.Add(await db.Roles.SingleAsync(r => r.RoleName == "Executor"));
+            await db.SaveChangesAsync();
+        }
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>("/api/owner/executors"))!.Items.Any(e => e.UserId == ids["recipient"]), "before vault selection dropdown can list an otherwise eligible Executor");
+        check((await client.GetFromJsonAsync<PageDto<ExecutorOptionDto>>($"/api/owner/executors?vaultId={editable.Vault}"))!.Items.All(e => e.UserId != ids["recipient"]), "vault-specific dropdown excludes its Active beneficiaries");
+        await Expect(await client.GetAsync($"/api/owner/executors/{ids["recipient"]}?vaultId={editable.Vault}"), HttpStatusCode.NotFound, "Executor detail applies the same vault beneficiary independence check");
+        await EditUser("recipient", u => u.Roles.Remove(u.Roles.Single(r => r.RoleName == "Executor")));
+        As("other"); await Expect(await client.GetAsync($"/api/owner/executors?vaultId={editable.Vault}"), HttpStatusCode.NotFound, "Owner cannot inspect another vault's filtered Executor list");
+        await Expect(await client.GetAsync($"/api/owner/executors/{ids["executor"]}?vaultId={editable.Vault}"), HttpStatusCode.NotFound, "Executor detail cannot expose another Owner's vault eligibility");
+        As("owner");
         await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{editable.Vault}", new { name = "Updated", description = "500 bounded" }), HttpStatusCode.OK, "owner updates vault");
         var futureVersion = DateTime.UtcNow.AddSeconds(1);
         await using (var db = new LegacyVaultDbContext(dbOptions)) { (await db.DigitalVaults.SingleAsync(v => v.VaultId == editable.Vault)).UpdatedAt = futureVersion; await db.SaveChangesAsync(); }
@@ -323,7 +376,7 @@ internal static class JwtWorkflowTests
         var overviewJson = await client.GetStringAsync("/api/executor/handovers/overview");
         check(!overviewJson.Contains("storagePath", StringComparison.OrdinalIgnoreCase) && !overviewJson.Contains("documents") && !overviewJson.Contains("cases") && !overviewJson.Contains("email"), "global overview exposes status metadata without sensitive documents or contacts");
         check((await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>("/api/executor/handovers/overview?assignedOnly=true"))!.Items.Count == 0, "overview can filter only the caller's active assignments");
-        check((await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>($"/api/executor/handovers/overview?ownerId={ids["owner"]}&status=Draft&pageSize=1"))!.Items.Count == 1, "overview supports Owner, status and pagination filters");
+        check((await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>($"/api/executor/handovers/overview?ownerId={ids["owner"]}&status=Pending_Executor&pageSize=1"))!.Items.Count == 1, "overview supports Owner, awaiting Executor status and pagination filters");
         check((await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>($"/api/executor/handovers/overview?ownerId={ids["other"]}"))!.Items.Count == 0, "overview Owner filter cannot return another Owner's rows");
         await Expect(await client.GetAsync("/api/executor/handovers/overview?pageSize=0"), HttpStatusCode.BadRequest, "overview rejects invalid pagination");
         await Expect(await client.GetAsync("/api/executor/handovers/overview?status=Arbitrary"), HttpStatusCode.BadRequest, "overview rejects arbitrary status filter");
@@ -334,7 +387,15 @@ internal static class JwtWorkflowTests
             var u = await db.Users.Include(u => u.Roles).SingleAsync(u => u.UserId == ids["other"]); u.Roles.Remove(u.Roles.Single(r => r.RoleName == "Executor"));
             (await db.Users.SingleAsync(u => u.UserId == ids["executor"])).Roles.Add(await db.Roles.SingleAsync(r => r.RoleName == "Owner")); await db.SaveChangesAsync();
         }
-        As("executor"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.OK, "assigned multi-role Executor uploads death certificate before legal submission");
+        As("executor");
+        check((await client.GetFromJsonAsync<HandoverDto>($"/api/executor/handovers/{request.RequestId}"))!.Status == "Pending_Executor", "Owner-created request awaits Executor decision and is visible in inbox");
+        await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Conflict, "Executor must accept before uploading death certificate");
+        var acceptResponse = await client.PostAsync($"/api/executor/handovers/{request.RequestId}/accept", null);
+        await Expect(acceptResponse, HttpStatusCode.OK, "assigned Executor accepts Owner request");
+        check((await acceptResponse.Content.ReadFromJsonAsync<HandoverDto>())!.Status == "Draft", "Executor acceptance opens preparation, not legal approval");
+        await Expect(await client.PostAsync($"/api/executor/handovers/{request.RequestId}/accept", null), HttpStatusCode.Conflict, "Executor acceptance cannot be repeated");
+        await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{request.RequestId}/decline", new { reason = "Too late" }), HttpStatusCode.Conflict, "accepted request cannot later be declined through intake");
+        await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.OK, "assigned multi-role Executor uploads death certificate after acceptance");
         var reported = (await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{request.RequestId}/owner-status"))!;
         check(reported.Status == "ReportedDeceased" && reported.VerifierId is null && reported.DeathCertificateDocumentId is not null, "Executor evidence reports death without legally confirming it");
         As("owner"); await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Conflict, "Owner cannot overwrite an outstanding death report with self-confirmation");
@@ -353,6 +414,7 @@ internal static class JwtWorkflowTests
         }
         check((await client.GetFromJsonAsync<PageDto<ExecutorAssignmentDto>>("/api/executor/assignments"))!.Items.Any(a => a.VaultId == handover.Vault), "Executor can discover persisted vault assignments");
         var assignmentPage = (await client.GetFromJsonAsync<PageDto<ExecutorAssignmentDto>>("/api/executor/assignments?page=1&pageSize=1"))!;
+        check(assignmentPage.Items.Single().Owner?.UserId == ids["owner"] && assignmentPage.Items.Single().VaultName == "Handover", "Executor assignment screen includes assigned vault and Owner label");
         check(assignmentPage.Page == 1 && assignmentPage.PageSize == 1 && assignmentPage.Items.Count == 1, "merged Executor assignments retain pagination metadata and page limit");
         await Expect(await client.GetAsync("/api/executor/assignments?page=0"), HttpStatusCode.BadRequest, "Executor assignments reject invalid page");
         await Expect(await client.GetAsync("/api/executor/assignments?pageSize=101"), HttpStatusCode.BadRequest, "Executor assignments reject excessive page size");
@@ -499,6 +561,7 @@ internal static class JwtWorkflowTests
         var firstRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=1&pageSize=1"))!;
         var secondRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=2&pageSize=1"))!;
         check(firstRequestPage.Items.Count == 1 && secondRequestPage.Items.Count == 1 && firstRequestPage.Items[0].RequestId != secondRequestPage.Items[0].RequestId && secondRequestPage.Page == 2, "merged handover pagination returns distinct assigned records on consecutive pages");
+        await Expect(await client.PostAsync($"/api/executor/handovers/{rejectedRequest.RequestId}/accept", null), HttpStatusCode.OK, "autoassigned request also requires Executor acceptance before legal flow");
         await Expect(await UploadCertificate(rejectedRequest.RequestId), HttpStatusCode.OK, "randomly assigned Executor can upload death certificate");
         await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{rejectedRequest.RequestId}/start", new { }), HttpStatusCode.Conflict, "Executor cannot start before legal approval");
         using (var upload = new MultipartFormDataContent())
@@ -535,6 +598,7 @@ internal static class JwtWorkflowTests
         var allOwners = (await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>("/api/executor/handovers/overview"))!;
         check(allOwners.Items.Any(x => x.Owner.UserId == ids["owner"]) && allOwners.Items.Any(x => x.Owner.UserId == ids["other"]), "global overview contains handovers from different Owners");
         check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{otherRequest.RequestId}/owner-status"))!.Status == "NotConfirmed", "confirmed death of one Owner never applies to another Owner");
+        await Expect(await client.PostAsync($"/api/executor/handovers/{otherRequest.RequestId}/accept", null), HttpStatusCode.OK, "Executor accepts another Owner's pending handover");
         await Expect(await UploadCertificate(otherRequest.RequestId), HttpStatusCode.OK, "different Owner death report requires own linked evidence");
         await SubmitReview(otherRequest.RequestId);
         As("legal"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{otherRequest.RequestId}/reject", new { comment = "Certificate not sufficient" }), HttpStatusCode.OK, "legal rejection is persisted for separate Owner");
@@ -542,7 +606,7 @@ internal static class JwtWorkflowTests
         As("other"); await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.OK, "rejected death report does not permanently block Owner life confirmation");
         As("executor"); await Expect(await client.PutAsJsonAsync($"/api/executor/handovers/{otherRequest.RequestId}/owner-status", new { status = "ConfirmedDeceased" }), HttpStatusCode.MethodNotAllowed, "Executor cannot force confirmed death through arbitrary status input");
         var raceRequest = await NewOtherOwnerRequest("Concurrent legal review");
-        As("executor"); await UploadCertificate(raceRequest.RequestId); await SubmitReview(raceRequest.RequestId);
+        As("executor"); await client.PostAsync($"/api/executor/handovers/{raceRequest.RequestId}/accept", null); await UploadCertificate(raceRequest.RequestId); await SubmitReview(raceRequest.RequestId);
         var racingReview = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
             .AddInterceptors(new LegalReviewRace(dbOptions, raceRequest.RequestId, ids["legal"], app.Services)).Options;
         await using (var db = new LegacyVaultDbContext(racingReview))
@@ -556,6 +620,61 @@ internal static class JwtWorkflowTests
                 (await db.HandoverCases.SingleAsync(c => c.RequestId == raceRequest.RequestId)).Status == "Pending" &&
                 !await db.AuditLogs.AnyAsync(a => a.Action == "ConfirmOwnerDeceased" && a.EntityId == ids["other"]), "losing approval rolls back Owner death audit and case transitions");
         }
+        var intake = await CreateFixture("Executor intake"); await UploadAsset(intake.Asset);
+        var intakeResponse = await client.PostAsJsonAsync($"/api/owner/vaults/{intake.Vault}/handovers", new { });
+        var intakeRequest = (await intakeResponse.Content.ReadFromJsonAsync<HandoverDto>())!;
+        check(intakeRequest.Status == "Pending_Executor", "new Owner handover has a distinct Executor decision state");
+        foreach (var actor in new[] { "owner", "legal", "staff", "recipient" })
+        {
+            As(actor); await Expect(await client.PostAsync($"/api/executor/handovers/{intakeRequest.RequestId}/accept", null), HttpStatusCode.Forbidden, "non-Executor cannot accept handover: " + actor);
+            await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "No permission" }), HttpStatusCode.Forbidden, "non-Executor cannot decline handover: " + actor);
+        }
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            (await db.Users.SingleAsync(u => u.UserId == ids["other"])).Roles.Add(await db.Roles.SingleAsync(r => r.RoleName == "Executor")); await db.SaveChangesAsync();
+        }
+        As("other");
+        await Expect(await client.PostAsync($"/api/executor/handovers/{intakeRequest.RequestId}/accept", null), HttpStatusCode.NotFound, "unassigned Executor cannot accept visible overview request");
+        await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "Unassigned" }), HttpStatusCode.NotFound, "unassigned Executor cannot decline another assignment");
+        As("executor");
+        await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "   " }), HttpStatusCode.BadRequest, "Executor decline requires nonblank reason");
+        await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = new string('x', 2001) }), HttpStatusCode.BadRequest, "Executor decline validates reason length");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+            await db.Database.ExecuteSqlRawAsync("CREATE TRIGGER fail_intake_notification BEFORE INSERT ON NOTIFICATIONS WHEN NEW.Title = 'Executor declined handover' BEGIN SELECT RAISE(ABORT, 'Injected failure'); END;");
+        await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "No capacity" }), HttpStatusCode.InternalServerError, "decline notification persistence failure is not reported as success");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            check((await db.HandoverRequests.SingleAsync(r => r.RequestId == intakeRequest.RequestId)).Status == "Pending_Executor" &&
+                (await db.ExecutorAssignments.SingleAsync(a => a.VaultId == intake.Vault)).Status != "Revoked" &&
+                !await db.AuditLogs.AnyAsync(a => a.Action == "DeclineHandover" && a.EntityId == intakeRequest.RequestId), "decline failure rolls back request, assignment and audit together");
+            await db.Database.ExecuteSqlRawAsync("DROP TRIGGER fail_intake_notification;");
+        }
+        var declineResponse = await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "No capacity" });
+        await Expect(declineResponse, HttpStatusCode.OK, "assigned Executor declines pending handover with reason");
+        check((await declineResponse.Content.ReadFromJsonAsync<HandoverDto>())!.Status == "Declined", "Executor decline is distinguishable from legal rejection");
+        check((await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Any(r => r.RequestId == intakeRequest.RequestId && r.Status == "Declined"), "declined request remains visible in assigned Executor history");
+        await Expect(await UploadCertificate(intakeRequest.RequestId), HttpStatusCode.Conflict, "declined request cannot accept evidence despite retained read history");
+        await Expect(await client.PostAsync($"/api/executor/handovers/{intakeRequest.RequestId}/accept", null), HttpStatusCode.Conflict, "decline cannot be reversed with a late accept");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            check((await db.ExecutorAssignments.SingleAsync(a => a.VaultId == intake.Vault)).Status == "Revoked" &&
+                (await db.HandoverCases.Where(c => c.RequestId == intakeRequest.RequestId).ToListAsync()).All(c => c.Status == "Cancelled") &&
+                await db.Notifications.AnyAsync(n => n.UserId == ids["owner"] && n.Title == "Executor declined handover" && n.Message.Contains("No capacity")), "decline closes cases, revokes assignment and persists Owner reason notification");
+        }
+        As("owner"); await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{intake.Vault}/executor", new { executorId = ids["other"] }), HttpStatusCode.NoContent, "Owner can choose a different Executor after decline");
+        var replacement = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{intake.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
+        check(replacement.RequestId != intakeRequest.RequestId && replacement.ExecutorId == ids["other"] && replacement.Status == "Pending_Executor", "replacement creates a new pending request and preserves declined history");
+        var intakeRaceOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
+            .AddInterceptors(new IntakeRace(dbOptions, replacement.RequestId, ids["other"], app.Services)).Options;
+        await using (var db = new LegacyVaultDbContext(intakeRaceOptions))
+        {
+            try { await Service(db, app.Services).DeclineRequest(ids["other"], replacement.RequestId, new("Losing decline"), default); throw new Exception("Expected intake decision conflict"); }
+            catch (RepositoryConflictException) { check(true, "competing accept and decline cannot both commit across DbContexts"); }
+        }
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+            check((await db.HandoverRequests.SingleAsync(r => r.RequestId == replacement.RequestId)).Status == "Draft" &&
+                (await db.ExecutorAssignments.SingleAsync(a => a.VaultId == intake.Vault && a.ExecutorId == ids["other"])).Status == "Active" &&
+                !await db.AuditLogs.AnyAsync(a => a.Action == "DeclineHandover" && a.EntityId == replacement.RequestId), "losing decline rolls back revoked assignment, cases and audit after winning acceptance");
         await app.StopAsync();
     }
     private static ManagementService Service(LegacyVaultDbContext db, IServiceProvider services) => new(new VaultRepository(db), new WorkflowRepository(db), services.GetRequiredService<IDocumentStore>(), services.GetRequiredService<DocumentProtection>());
@@ -571,6 +690,15 @@ internal static class JwtWorkflowTests
         public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
         {
             if (!ran) { ran = true; await using var other = new LegacyVaultDbContext(options); await Service(other, services).CreateRequest(owner, vault, ct); }
+            return result;
+        }
+    }
+    private sealed class IntakeRace(DbContextOptions<LegacyVaultDbContext> options, int request, int executor, IServiceProvider services) : SaveChangesInterceptor
+    {
+        private bool ran;
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
+        {
+            if (!ran) { ran = true; await using var other = new LegacyVaultDbContext(options); await Service(other, services).AcceptRequest(executor, request, ct); }
             return result;
         }
     }

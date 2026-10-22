@@ -71,3 +71,9 @@ Xem [hướng dẫn Owner life confirmation](Owner-life-confirmation.md): GET/PO
 # Cập nhật phân trang 21/10/2026
 
 Khi test list kho/tài sản/người thụ hưởng/phân bổ/tài liệu Owner, phân công/đơn Executor và tài sản thừa kế: gửi `page`, `pageSize` và đọc `items` trong response. Xem [contract sau merge](Merge-pagination-2026-10-21.md). Các kiểm tra quyền và OTP giữ nguyên.
+# Test dropdown Executor của Owner
+
+Authorize bằng JWT Owner; gọi GET `/api/owner/executors?page=1&pageSize=20`. Chọn `items[].userId` rồi tạo kho và PUT `/api/owner/vaults/{vaultId}/executor` với `{ "executorId": 15 }`. Thử search, chuyển trang, tài khoản khóa và vaultId của Owner khác theo [hướng dẫn đầy đủ](Owner-executor-dropdown.md).
+# Test Executor nhận/từ chối và xem chi tiết
+
+Thực hiện [luồng tiếp nhận bàn giao](Executor-intake-and-profile.md): Owner mở dropdown, xem detail, gán và tạo đơn Pending_Executor; Executor đúng phân công accept (không body) hoặc decline (reason bắt buộc). Thử sai role/phân công, gọi lặp, upload trước accept, rồi đi tiếp luồng pháp lý sau accept. Decline phải giữ lịch sử, báo Owner và cho Owner chọn lại người khác.

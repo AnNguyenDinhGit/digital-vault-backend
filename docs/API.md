@@ -6,6 +6,14 @@
 
 # LegacyVault API
 
+## Tiếp nhận bàn giao và chi tiết Executor
+
+Đã bổ sung GET `/api/owner/executors/{executorId}`, POST `/api/executor/handovers/{requestId}/accept` và `/decline`. Đơn Owner tạo mới ở `Pending_Executor`; accept mở Draft, decline thành Declined. Xem [contract và hướng dẫn frontend](Executor-intake-and-profile.md). Phân trang vẫn giữ nguyên.
+
+## Dropdown Executor dành cho Owner
+
+GET `/api/owner/executors?page=1&pageSize=20&search=...` trả PageDto gồm `userId`, `fullName` cho dropdown trước khi tạo kho. Hỗ trợ `vaultId` tùy chọn để lọc xung đột thụ hưởng trong kho của Owner. Xem [contract frontend và test](Owner-executor-dropdown.md).
+
 > Contract sau merge 21/10/2026: các list từ main đã áp dụng phân trang `{ page, pageSize, items }`. Xem [danh sách endpoint thay đổi](Merge-pagination-2026-10-21.md); mô tả mảng trực tiếp ở tài liệu cũ không còn áp dụng cho các endpoint này.
 
 ## Owner xác nhận còn sống (20/10/2026)

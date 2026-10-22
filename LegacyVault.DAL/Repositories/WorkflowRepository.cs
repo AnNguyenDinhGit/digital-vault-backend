@@ -8,9 +8,11 @@ namespace LegacyVault.DAL.Repositories;
 public sealed record HandoverOverviewRow(int RequestId, int VaultId, string VaultName, int OwnerId, string OwnerName,
     int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,
     DateTime? SubmittedAt, DateTime? CompletedAt, bool IsAssignedToMe);
+public sealed record ExecutorOptionRow(int UserId, string FullName);
 
 public interface IWorkflowRepository
 {
+    Task<List<ExecutorOptionRow>> ExecutorOptions(int ownerId, int? vaultId, string? search, int page, int size, DateTime now, CancellationToken ct);
     Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct);
     Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct);
     Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct);
@@ -28,6 +30,21 @@ public interface IWorkflowRepository
 }
 public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepository
 {
+    public Task<List<ExecutorOptionRow>> ExecutorOptions(int ownerId, int? vaultId, string? search, int page, int size, DateTime now, CancellationToken ct)
+    {
+        var query = db.Users.AsNoTracking().Where(u => u.UserId != ownerId && u.Status == "Active" &&
+            u.Roles.Any(r => r.RoleName == "Executor") && !u.Authentications.Any(a => a.LockedUntil > now));
+        if (vaultId is not null)
+            query = query.Where(u => !db.BeneficiaryAssignments.Any(b => b.Asset.VaultId == vaultId && b.BeneficiaryId == u.UserId && b.Status == "Active"));
+        if (search is not null)
+        {
+            var term = search.ToUpperInvariant();
+            query = query.Where(u => u.FullName.ToUpper().Contains(term));
+        }
+        return query.OrderBy(u => u.FullName).ThenBy(u => u.UserId).Skip((page - 1) * size).Take(size)
+            .Select(u => new ExecutorOptionRow(u.UserId, u.FullName)).ToListAsync(ct);
+    }
+
     public Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct) => db.ProofOfLives.AsNoTracking()
         .Where(p => p.UserId == ownerId).OrderByDescending(p => p.LastPingAt)
         .Select(p => (DateTime?)p.LastPingAt).FirstOrDefaultAsync(ct);
@@ -80,6 +97,7 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
             r.LegalVerifications.Any(v => v.Status == "Approved" && v.ReviewedAt != null))
         .OrderByDescending(r => r.RequestId).ToListAsync(ct);
     public Task<List<ExecutorAssignment>> ExecutorAssignments(int user, CancellationToken ct) => db.ExecutorAssignments.AsNoTracking()
+        .Include(a => a.Vault).ThenInclude(v => v.Owner)
         .Where(a => a.ExecutorId == user && (a.Status == "Active" || a.Status == "AutoAssigned"))
         .OrderByDescending(a => a.AssignedAt).ToListAsync(ct);
     private IQueryable<DigitalVault> Vaults => db.DigitalVaults.Include(v => v.Owner).Include(v => v.ExecutorAssignments).ThenInclude(a => a.Executor).ThenInclude(u => u.Roles)
@@ -99,7 +117,7 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
     public Task<HandoverRequest?> RequestGraph(int id, CancellationToken ct) => Requests.SingleOrDefaultAsync(r => r.RequestId == id, ct);
     public Task<List<HandoverRequest>> UserRequests(int user, string kind, int page, int size, string? status, CancellationToken ct)
     {
-        var query = kind switch { "Owner" => Requests.Where(r => r.Vault.OwnerId == user), "LegalVerifier" => Requests.Where(r => r.LegalVerifications.Any(v => v.VerifierId == user) && r.Vault.OwnerId != user && r.ExecutorId != user && !r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == user)), _ => Requests.Where(r => r.ExecutorId == user && r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && (a.Status == "Active" || a.Status == "AutoAssigned"))) };
+        var query = kind switch { "Owner" => Requests.Where(r => r.Vault.OwnerId == user), "LegalVerifier" => Requests.Where(r => r.LegalVerifications.Any(v => v.VerifierId == user) && r.Vault.OwnerId != user && r.ExecutorId != user && !r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == user)), _ => Requests.Where(r => r.ExecutorId == user && r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == user && (a.Status == "Active" || a.Status == "AutoAssigned" || r.Status == "Declined"))) };
         if (status is not null) query = query.Where(r => r.Status == status);
         return query.OrderByDescending(r => r.RequestId).Skip((page - 1) * size).Take(size).ToListAsync(ct);
     }
