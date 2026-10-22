@@ -168,7 +168,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
 
-app.MapControllers();
+
 
 // 2. Map Hub Endpoint
 app.MapControllers();
