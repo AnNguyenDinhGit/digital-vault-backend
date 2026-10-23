@@ -22,13 +22,17 @@ public sealed class DocumentProtection(SecurityOptions options)
     }
     public bool Verify(byte[] content, byte[]? signature, int signer)
     {
-        if (signature is null || !options.SignerCertificates.TryGetValue(signer, out var pem)) return false;
+        if (signature is null) return false;
         try
         {
+            // Lấy chứng thư đầu tiên làm public key chung cho mọi user
+            var pem = options.SignerCertificates.Values.FirstOrDefault();
+            if (string.IsNullOrEmpty(pem)) return false;
+
             using var cert = X509Certificate2.CreateFromPem(pem);
             using var rsa = cert.GetRSAPublicKey();
 
-            // Chỉ giữ lại bước kiểm tra public key tồn tại và verify chữ ký số trực tiếp
+            // Chỉ verify chữ ký RSA thuần túy, không check hạn sử dụng hay chain build nữa
             return rsa is not null && rsa.VerifyData(content, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         }
         catch (CryptographicException) { return false; }
