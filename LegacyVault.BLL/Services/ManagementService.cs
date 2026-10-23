@@ -11,6 +11,51 @@ namespace LegacyVault.BLL.Services;
 public sealed class ManagementService(IVaultRepository repository, IWorkflowRepository workflow, IDocumentStore store, DocumentProtection protection)
 {
     private static bool Assigned(ExecutorAssignment a) => a.Status is "Active" or "AutoAssigned";
+    public async Task<VaultExecutorDto> OwnerVaultExecutor(int user, int vaultId, CancellationToken ct)
+    {
+        var vault = await Owned(user, vaultId, ct);
+        var active = vault.ExecutorAssignments.Where(Assigned).ToArray();
+        if (active.Length > 1) throw new WorkflowException(409, "Multiple active Executor assignments require correction.");
+        var assignment = active.SingleOrDefault() ?? vault.ExecutorAssignments.OrderByDescending(a => a.AssignedAt).ThenByDescending(a => a.ExecutorAssignmentId).FirstOrDefault()
+            ?? throw new WorkflowException(404, "Executor assignment not found.");
+        return new(vaultId, assignment.ExecutorId, assignment.Executor.FullName, assignment.Status, DateTime.SpecifyKind(assignment.AssignedAt, DateTimeKind.Utc));
+    }
+
+    public async Task RevokeExecutor(int user, int vaultId, CancellationToken ct)
+    {
+        var vault = await Owned(user, vaultId, ct);
+        if (vault.Status != "Active" || vault.HandoverRequests.Any(r => r.Status is not ("Pending_Executor" or "Cancelled" or "Declined")))
+            throw new WorkflowException(409, "Executor cannot be revoked after handover acceptance or processing.");
+        var active = vault.ExecutorAssignments.Where(Assigned).ToArray();
+        if (active.Length == 0) throw new WorkflowException(404, "Active Executor assignment not found.");
+        if (active.Length > 1) throw new WorkflowException(409, "Multiple active Executor assignments require correction.");
+        foreach (var request in vault.HandoverRequests.Where(r => r.Status == "Pending_Executor"))
+        {
+            var graph = await workflow.RequestGraph(request.RequestId, ct) ?? throw new WorkflowException(404, "Request not found.");
+            graph.Status = "Cancelled";
+            foreach (var item in graph.HandoverCases) item.Status = "Cancelled";
+            Audit(user, "CancelHandover", "HandoverRequest", graph.RequestId);
+        }
+        active[0].Status = "Revoked"; Touch(vault);
+        Audit(user, "RevokeExecutor", "DigitalVault", vaultId);
+        Notify(active[0].ExecutorId, "Assignment", "Vault assignment revoked", "The Owner revoked your vault assignment.");
+        await repository.Save(ct);
+    }
+
+    private async Task<HandoverDto[]> OwnerHandoverDetails(int owner, HandoverRequest[] requests, CancellationToken ct)
+    {
+        var ids = requests.Where(r => r.Status == "Declined").Select(r => r.RequestId).ToArray();
+        var declines = ids.Length == 0 ? new Dictionary<int, OwnerDeclineRow>() : (await workflow.OwnerDeclines(owner, ids, ct)).ToDictionary(r => r.RequestId);
+        return requests.Select(r =>
+        {
+            var dto = Map(r);
+            if (!declines.TryGetValue(r.RequestId, out var decline)) return dto;
+            var prefix = $"Handover #{r.RequestId}: ";
+            return dto with { DeclineReason = decline.Message?.StartsWith(prefix, StringComparison.Ordinal) == true ? decline.Message[prefix.Length..] : null,
+                DeclinedAt = decline.DeclinedAt is { } date ? DateTime.SpecifyKind(date, DateTimeKind.Utc) : null };
+        }).ToArray();
+    }
+
     public async Task<ExecutorDetailDto> OwnerExecutorDetail(int user, int executorId, int? vaultId, CancellationToken ct)
     {
         await Require(user, ct, VaultService.OwnerRole);
@@ -270,7 +315,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         }
         if (executor == v.OwnerId || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == executor)))
             throw new WorkflowException(409, "Assigned Executor must be independent of the owner and beneficiaries.");
-        var r = NewRequest(user, v, executor); await repository.Save(ct); return Map(r);
+        var r = NewRequest(user, v, executor); r.Executor = await Require(executor, ct, VaultService.ExecutorRole);
+        await repository.Save(ct); return Map(r);
     }
     public async Task<HandoverDto> CreateAssignedRequest(int user, int vault, CancellationToken ct)
     {
@@ -290,7 +336,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     {
         await Require(user, ct, kind == "Operator" ? new[] { VaultService.ExecutorRole } : new[] { kind }); Paging(page, size);
         ValidateStatus(status);
-        return new(page, size, (await workflow.UserRequests(user, kind, page, size, status, ct)).Select(Map).ToArray());
+        var requests = (await workflow.UserRequests(user, kind, page, size, status, ct)).ToArray();
+        return new(page, size, kind == "Owner" ? await OwnerHandoverDetails(user, requests, ct) : requests.Select(Map).ToArray());
     }
     public async Task<HandoverRequest> OperatorRequest(int user, int id, CancellationToken ct)
     {
@@ -344,7 +391,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     {
         await Require(user, ct, VaultService.OwnerRole);
         var r = await workflow.RequestGraph(id, ct);
-        return r is not null && r.Vault.OwnerId == user ? Map(r) : throw new WorkflowException(404, "Request not found.");
+        if (r is null || r.Vault.OwnerId != user) throw new WorkflowException(404, "Request not found.");
+        return (await OwnerHandoverDetails(user, new[] { r }, ct))[0];
     }
     public async Task Cancel(int user, int id, CancellationToken ct)
     {

@@ -8,6 +8,8 @@
 
 # LegacyVault / DigitalVault backend
 
+Hướng dẫn test chung cho toàn bộ API: [Huong-dan-test-toan-bo-API.md](docs/Huong-dan-test-toan-bo-API.md) — 93 controller operations, auth/Google/2FA, Owner, Executor, LegalVerifier, Beneficiary, Admin, notifications, chat và mã hóa trường. Các hướng dẫn theo đợt cập nhật bên dưới là tài liệu tham khảo lịch sử.
+
 ASP.NET Core .NET 8, EF Core SQL Server, API → BLL → DAL. API nghiệp vụ dùng JWT Bearer; Google chỉ giữ cookies tạm để xác minh Google/OTP.
 
 ## Chức năng

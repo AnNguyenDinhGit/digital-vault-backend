@@ -624,6 +624,9 @@ internal static class JwtWorkflowTests
         var intakeResponse = await client.PostAsJsonAsync($"/api/owner/vaults/{intake.Vault}/handovers", new { });
         var intakeRequest = (await intakeResponse.Content.ReadFromJsonAsync<HandoverDto>())!;
         check(intakeRequest.Status == "Pending_Executor", "new Owner handover has a distinct Executor decision state");
+        check(intakeRequest.ExecutorId == ids["executor"] && intakeRequest.ExecutorName == "executor" && intakeRequest.DeclineReason is null && intakeRequest.DeclinedAt is null, "Owner create response includes assigned Executor identity and null decline fields before any decision");
+        var pendingOwnerDetail = (await client.GetFromJsonAsync<HandoverDto>($"/api/owner/handovers/{intakeRequest.RequestId}"))!;
+        check(pendingOwnerDetail.ExecutorName == "executor" && pendingOwnerDetail.DeclinedAt is null, "Owner detail returns Executor name before acceptance");
         foreach (var actor in new[] { "owner", "legal", "staff", "recipient" })
         {
             As(actor); await Expect(await client.PostAsync($"/api/executor/handovers/{intakeRequest.RequestId}/accept", null), HttpStatusCode.Forbidden, "non-Executor cannot accept handover: " + actor);
@@ -652,6 +655,31 @@ internal static class JwtWorkflowTests
         var declineResponse = await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "No capacity" });
         await Expect(declineResponse, HttpStatusCode.OK, "assigned Executor declines pending handover with reason");
         check((await declineResponse.Content.ReadFromJsonAsync<HandoverDto>())!.Status == "Declined", "Executor decline is distinguishable from legal rejection");
+        As("owner");
+        var declinedOwnerDetail = (await client.GetFromJsonAsync<HandoverDto>($"/api/owner/handovers/{intakeRequest.RequestId}"))!;
+        check(declinedOwnerDetail.ExecutorId == ids["executor"] && declinedOwnerDetail.ExecutorName == "executor" && declinedOwnerDetail.DeclineReason == "No capacity" && declinedOwnerDetail.DeclinedAt?.Kind == DateTimeKind.Utc, "Owner detail reads persisted decline reason and UTC audit time with Executor identity");
+        var ownerDeclinedPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/owner/handovers?status=Declined"))!;
+        check(ownerDeclinedPage.Items.Single(r => r.RequestId == intakeRequest.RequestId).DeclineReason == "No capacity" &&
+            ownerDeclinedPage.Items.Single(r => r.RequestId == intakeRequest.RequestId).DeclinedAt == declinedOwnerDetail.DeclinedAt, "Owner paginated list includes the same persisted decline metadata as detail");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            var audit = await db.AuditLogs.SingleAsync(a => a.Action == "DeclineHandover" && a.EntityId == intakeRequest.RequestId);
+            check(audit.Timestamp == declinedOwnerDetail.DeclinedAt, "declinedAt is the stored decision audit time rather than response time");
+        }
+        var revokedByDecline = (await client.GetFromJsonAsync<VaultExecutorDto>($"/api/owner/vaults/{intake.Vault}/executor"))!;
+        check(revokedByDecline.ExecutorId == ids["executor"] && revokedByDecline.FullName == "executor" && revokedByDecline.Status == "Revoked", "Owner can inspect last revoked assignment after Executor declines");
+        int legacyDeclinedId;
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            db.Notifications.Add(new Notification { UserId = ids["other"], Type = "Handover", Title = "Executor declined handover", Message = $"Handover #{intakeRequest.RequestId}: Wrong Owner notification", CreatedAt = DateTime.UtcNow });
+            var legacy = new HandoverRequest { VaultId = intake.Vault, ExecutorId = ids["executor"], RequestType = "Inheritance", Status = "Declined", InitiatedAt = DateTime.UtcNow };
+            db.HandoverRequests.Add(legacy); await db.SaveChangesAsync(); legacyDeclinedId = legacy.RequestId;
+        }
+        check((await client.GetFromJsonAsync<HandoverDto>($"/api/owner/handovers/{intakeRequest.RequestId}"))!.DeclineReason == "No capacity", "decline enrichment ignores a same-request message belonging to a different Owner");
+        var legacyDecline = (await client.GetFromJsonAsync<HandoverDto>($"/api/owner/handovers/{legacyDeclinedId}"))!;
+        check(legacyDecline.ExecutorName == "executor" && legacyDecline.DeclineReason is null && legacyDecline.DeclinedAt is null, "legacy decline without persisted reason or audit returns null instead of invented data");
+        As("other"); await Expect(await client.GetAsync($"/api/owner/handovers/{intakeRequest.RequestId}"), HttpStatusCode.NotFound, "another Owner cannot read decline metadata");
+        As("executor");
         check((await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Any(r => r.RequestId == intakeRequest.RequestId && r.Status == "Declined"), "declined request remains visible in assigned Executor history");
         await Expect(await UploadCertificate(intakeRequest.RequestId), HttpStatusCode.Conflict, "declined request cannot accept evidence despite retained read history");
         await Expect(await client.PostAsync($"/api/executor/handovers/{intakeRequest.RequestId}/accept", null), HttpStatusCode.Conflict, "decline cannot be reversed with a late accept");
@@ -664,6 +692,11 @@ internal static class JwtWorkflowTests
         As("owner"); await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{intake.Vault}/executor", new { executorId = ids["other"] }), HttpStatusCode.NoContent, "Owner can choose a different Executor after decline");
         var replacement = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{intake.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
         check(replacement.RequestId != intakeRequest.RequestId && replacement.ExecutorId == ids["other"] && replacement.Status == "Pending_Executor", "replacement creates a new pending request and preserves declined history");
+        check(replacement.ExecutorName == "other" && replacement.DeclineReason is null && replacement.DeclinedAt is null, "replacement Owner create response identifies new Executor without copying previous decline");
+        var historicalDecline = (await client.GetFromJsonAsync<HandoverDto>($"/api/owner/handovers/{intakeRequest.RequestId}"))!;
+        check(historicalDecline.ExecutorName == "executor" && historicalDecline.DeclineReason == "No capacity", "reassignment does not replace historical request Executor identity or decline reason");
+        var currentExecutor = (await client.GetFromJsonAsync<VaultExecutorDto>($"/api/owner/vaults/{intake.Vault}/executor"))!;
+        check(currentExecutor.VaultId == intake.Vault && currentExecutor.ExecutorId == ids["other"] && currentExecutor.Status == "Active" && currentExecutor.AssignedAt.Kind == DateTimeKind.Utc, "vault Executor endpoint prefers current active assignment over revoked history");
         var intakeRaceOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
             .AddInterceptors(new IntakeRace(dbOptions, replacement.RequestId, ids["other"], app.Services)).Options;
         await using (var db = new LegacyVaultDbContext(intakeRaceOptions))
@@ -675,6 +708,49 @@ internal static class JwtWorkflowTests
             check((await db.HandoverRequests.SingleAsync(r => r.RequestId == replacement.RequestId)).Status == "Draft" &&
                 (await db.ExecutorAssignments.SingleAsync(a => a.VaultId == intake.Vault && a.ExecutorId == ids["other"])).Status == "Active" &&
                 !await db.AuditLogs.AnyAsync(a => a.Action == "DeclineHandover" && a.EntityId == replacement.RequestId), "losing decline rolls back revoked assignment, cases and audit after winning acceptance");
+        As("owner"); await Expect(await client.PostAsync($"/api/owner/vaults/{intake.Vault}/executor/revoke", null), HttpStatusCode.Conflict, "Owner cannot revoke an already accepted handover assignment");
+        var revokeFixture = await CreateFixture("Owner revokes assignment"); await UploadAsset(revokeFixture.Asset);
+        await Expect(await client.GetAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor"), HttpStatusCode.NotFound, "vault with no assignment returns 404 instead of invented Executor");
+        await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor", new { executorId = ids["executor"] }), HttpStatusCode.NoContent, "Owner assigns Executor before revocation test");
+        As("other"); await Expect(await client.GetAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor"), HttpStatusCode.NotFound, "another Owner cannot inspect assigned Executor");
+        await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NotFound, "another Owner cannot revoke assignment");
+        As("legal"); await Expect(await client.GetAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor"), HttpStatusCode.Forbidden, "LegalVerifier cannot use Owner vault Executor endpoint");
+        As("owner"); await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NoContent, "Owner revokes assignment and receives 204 only after persistence");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+            check((await db.ExecutorAssignments.SingleAsync(a => a.VaultId == revokeFixture.Vault)).Status == "Revoked" &&
+                await db.AuditLogs.AnyAsync(a => a.Action == "RevokeExecutor" && a.EntityId == revokeFixture.Vault), "204 revoke persists exact Revoked status and audit in database");
+        await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NotFound, "repeat revocation does not falsely report changing an active assignment");
+        await client.PutAsJsonAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor", new { executorId = ids["executor"] });
+        var revokePending = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{revokeFixture.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+            await db.Database.ExecuteSqlRawAsync("CREATE TRIGGER fail_revoke_notification BEFORE INSERT ON NOTIFICATIONS WHEN NEW.Title = 'Vault assignment revoked' BEGIN SELECT RAISE(ABORT, 'Injected failure'); END;");
+        await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.InternalServerError, "revoke save failure is not reported as 204");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+        {
+            check((await db.HandoverRequests.SingleAsync(r => r.RequestId == revokePending.RequestId)).Status == "Pending_Executor" &&
+                (await db.ExecutorAssignments.SingleAsync(a => a.VaultId == revokeFixture.Vault && a.Status == "Active")).ExecutorId == ids["executor"], "revoke failure rolls back pending request cancellation and assignment status");
+            await db.Database.ExecuteSqlRawAsync("DROP TRIGGER fail_revoke_notification;");
+        }
+        await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NoContent, "Owner may revoke while Executor decision is pending");
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+            check((await db.HandoverRequests.SingleAsync(r => r.RequestId == revokePending.RequestId)).Status == "Cancelled" &&
+                (await db.HandoverCases.Where(c => c.RequestId == revokePending.RequestId).ToListAsync()).All(c => c.Status == "Cancelled") &&
+                !await db.ExecutorAssignments.AnyAsync(a => a.VaultId == revokeFixture.Vault && a.Status == "Active"), "successful pending revoke closes cases and leaves no active assignment");
+        As("executor"); await Expect(await client.PostAsync($"/api/executor/handovers/{revokePending.RequestId}/accept", null), HttpStatusCode.NotFound, "revoked Executor cannot accept cancelled pending handover");
+        var revokeRaceFixture = await CreateFixture("Concurrent revoke and acceptance"); await UploadAsset(revokeRaceFixture.Asset);
+        await client.PutAsJsonAsync($"/api/owner/vaults/{revokeRaceFixture.Vault}/executor", new { executorId = ids["executor"] });
+        var revokeRaceRequest = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{revokeRaceFixture.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
+        var revokeRaceOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
+            .AddInterceptors(new IntakeRace(dbOptions, revokeRaceRequest.RequestId, ids["executor"], app.Services)).Options;
+        await using (var db = new LegacyVaultDbContext(revokeRaceOptions))
+        {
+            try { await Service(db, app.Services).RevokeExecutor(ids["owner"], revokeRaceFixture.Vault, default); throw new Exception("Expected revoke concurrency conflict"); }
+            catch (RepositoryConflictException) { check(true, "concurrent Executor acceptance prevents stale Owner revocation from committing"); }
+        }
+        await using (var db = new LegacyVaultDbContext(dbOptions))
+            check((await db.HandoverRequests.SingleAsync(r => r.RequestId == revokeRaceRequest.RequestId)).Status == "Draft" &&
+                (await db.ExecutorAssignments.SingleAsync(a => a.VaultId == revokeRaceFixture.Vault)).Status == "Active" &&
+                !await db.AuditLogs.AnyAsync(a => a.Action == "RevokeExecutor" && a.EntityId == revokeRaceFixture.Vault), "losing revoke does not cancel accepted request, revoke assignment or commit a false audit");
         await app.StopAsync();
     }
     private static ManagementService Service(LegacyVaultDbContext db, IServiceProvider services) => new(new VaultRepository(db), new WorkflowRepository(db), services.GetRequiredService<IDocumentStore>(), services.GetRequiredService<DocumentProtection>());
