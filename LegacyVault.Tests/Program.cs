@@ -44,9 +44,13 @@ var signedProtection = new DocumentProtection(new SecurityOptions
     TrustedRootCertificates = new() { certificate.ExportCertificatePem() }
 });
 var signature = rsa.SignData(file.Content, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-Check(signedProtection.Verify(file.Content, signature, 1), "trusted RSA certificate signature accepted");
+Check(signedProtection.Verify(file.Content, signature, 1), "configured shared RSA public key accepts valid signature");
 Check(!signedProtection.Verify(Encoding.UTF8.GetBytes("changed"), signature, 1), "signature cannot validate modified document");
-Check(!signedProtection.Verify(file.Content, signature, 7), "signature cannot validate unconfigured signer identity");
+// Main deliberately uses the first configured public key for all signer IDs; authorization remains in the workflow.
+Check(signedProtection.Verify(file.Content, signature, 7), "main shared-key contract does not bind cryptographic verification to signer ID");
+using var unrelatedKey = RSA.Create(2048);
+Check(!signedProtection.Verify(file.Content, unrelatedKey.SignData(file.Content, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1), 1), "shared-key verification rejects signatures made by a different private key");
+Check(!signedProtection.Verify(file.Content, Array.Empty<byte>(), 1), "shared-key verification rejects empty signature");
 var salt = RandomNumberGenerator.GetBytes(16);
 var hash = Rfc2898DeriveBytes.Pbkdf2("correct-password", salt, 100000, HashAlgorithmName.SHA256, 32);
 var encoded = $"PBKDF2-SHA256$100000${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";

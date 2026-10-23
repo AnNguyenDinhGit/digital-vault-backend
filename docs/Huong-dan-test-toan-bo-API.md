@@ -1,6 +1,6 @@
 # Hướng dẫn test toàn bộ API LegacyVault / DigitalVault
 
-Cập nhật theo mã nguồn ngày 23/10/2026. Đây là tài liệu test tổng hợp: **93 operation trong controller**, callback OIDC và SignalR. Có thể thực hiện luồng chính chỉ với tài liệu này và Swagger, không cần đọc các hướng dẫn lịch sử. “Có endpoint” không đồng nghĩa mọi nhóm đã được test production; xem giới hạn ở cuối.
+Cập nhật theo mã nguồn ngày 23/10/2026. Đây là tài liệu test tổng hợp: **94 operation trong controller**, callback OIDC và SignalR. Có thể thực hiện luồng chính chỉ với tài liệu này và Swagger, không cần đọc các hướng dẫn lịch sử. “Có endpoint” không đồng nghĩa mọi nhóm đã được test production; xem giới hạn ở cuối.
 
 ## 1. Chuẩn bị môi trường và Swagger
 
@@ -24,8 +24,8 @@ Swagger: `https://localhost:7015/swagger`; OpenAPI: `https://localhost:7015/swag
 | `ConnectionStrings:LegacyVault` | SQL Server test, schema tương thích entity scaffold |
 | `Jwt:Issuer`, `Jwt:Audience`, `Jwt:SigningKey`, `Jwt:LifetimeMinutes` | Key ngẫu nhiên ít nhất 32 byte; lifetime 1–30 phút, mặc định 15 |
 | `Security:EncryptionKey` | Base64 của key AES 32 byte, giữ ổn định để đọc file cũ |
-| `Security:SignerCertificates:<userId>` | Chứng thư public PEM của Owner/Executor thực sự ký file |
-| `Security:TrustedRootCertificates:<index>` | Root PEM được tin cậy nếu dùng custom root |
+| `Security:SignerCertificates:<id>` | Main hiện dùng **giá trị PEM đầu tiên** làm public key chung cho mọi user; hỗ trợ chuỗi newline escaped |
+| `Security:TrustedRootCertificates:<index>` | Cấu hình có sẵn nhưng Verify hiện tại trên main không kiểm tra certificate chain |
 | `Google:ClientId`, `Google:ClientSecret`, `Google:FrontendCallbackUrl` | OAuth client; frontend callback tùy chọn, URL cố định được cấu hình cho phép |
 | `MailOptions:Host`, `Port`, `Username`, `Password`, `From` | SMTP gửi OTP; code cũng có fallback section `Mail` |
 | `Cors:Origins:<index>` | Origin frontend cụ thể, không wildcard; CORS hỗ trợ Authorization/multipart |
@@ -174,13 +174,13 @@ Mỗi file nội dung tối đa **10 MiB = 10,485,760 byte**, không rỗng. Đ�
 
 Owner chỉ gửi các multipart field trên; OwnerAlive/DeathCertificate/UploadedBy là không hợp lệ trong endpoint upload Owner. Không dùng endpoint Owner để nộp giấy chứng tử. DocumentDto có `documentId,fileName,fileType,isEncrypted,signatureValid,purpose` (hai trường cuối có thể null ở response upload cũ).
 
-Chuẩn bị chứng thư Owner và Executor riêng trên môi trường test: RSA ít nhất 2048 bit, còn hạn, cho phép DigitalSignature, chain hợp lệ; config public certificate theo UserId thực. Private key ở máy/người ký, không gửi trong upload. Cơ chế Verify dùng SHA-256 + RSA PKCS#1 v1.5. Có thể tạo detached signature với công cụ ký tương thích, ví dụ khi đã có private PEM của môi trường test:
+Theo main mới (`635b589`), Verify lấy **public PEM đầu tiên trong SignerCertificates làm key chung**, không chọn chứng thư theo signerId; không kiểm tra chain, hạn chứng thư, key usage hoặc ràng buộc chứng thư với user. Private key tương ứng do môi trường ký quản lý, không gửi trong upload. Cơ chế kiểm tra bytes vẫn là SHA-256 + RSA PKCS#1 v1.5, chữ ký từ key khác hoặc file bị sửa bị từ chối. Có thể tạo detached signature bằng private PEM tương ứng của môi trường test:
 
 ```text
 openssl dgst -sha256 -sign owner-private.pem -out instructions.sig instructions.pdf
 ```
 
-Upload chính xác bytes đã ký. Completion phải ký bằng key Executor, không dùng chữ ký Owner. Không thêm root tùy ý trong production để làm test pass; chain/revocation có thể cần dịch vụ chứng thư hoạt động. Thiếu chứng thư/signature hợp lệ phải báo lỗi, không bỏ validation.
+Upload chính xác bytes đã ký. Owner upload và Executor completion đều phải dùng chữ ký khớp **key chung** hiện tại; có quyền Executor không làm chữ ký từ key khác hợp lệ. JWT/role/phân công vẫn được backend kiểm tra riêng. Verify hiện không chứng minh danh tính pháp lý của người ký; không ghi “đã xác minh chứng thư riêng của Executor” từ cơ chế này. Cách hoạt động này đến từ main, không phải thay đổi bảo mật trong API Owner/revoke.
 
 File được backend mã hóa AES-256-GCM khi lưu, giải mã khi download sau authorization; **không E2EE/client-side encryption**. Download trả binary theo MIME, Content-Disposition filename, Cache-Control no-store, X-Content-Type-Options nosniff, `X-Signature-Valid: true|false`. File không ký hợp lệ có thể false trong bằng chứng tùy chọn; không suy ra giấy tờ đã được pháp lý xác nhận từ header này. Không có storage path trong DTO.
 
@@ -235,6 +235,7 @@ Revoke: kho Active và chưa có đơn được nhận/xử lý; chưa tạo đ�
 | POST | `/api/executor/assignments/{vaultId}/handovers` | Không body → 201 Draft nếu tự khởi tạo từ phân công hợp lệ, chưa có đơn bảo vệ |
 | GET | `/api/executor/handovers` | page/pageSize → PageDto đơn của chính Executor; giữ lịch sử Declined |
 | GET | `/api/executor/handovers/overview` | page/pageSize/status/ownerId/assignedOnly → PageDto tổng quan |
+| GET | `/api/executor/handovers/completed` | page/pageSize → PageDto<HandoverOverviewDto> mọi đơn Completed; Executor role, tương tự overview filter Completed |
 | GET | `/api/executor/handovers/{requestId}` | Chi tiết đơn mình được giao |
 | POST | `/api/executor/handovers/{requestId}/accept` | Không body → 200 HandoverDto status Draft |
 | POST | `/api/executor/handovers/{requestId}/decline` | `{ "reason": "Không thể tiếp nhận" }` → 200 status Declined |
@@ -266,7 +267,7 @@ Chỉ Executor được phân công có quyền nộp giấy chứng tử. Owner
 
 Upload và gửi pháp lý chỉ ở Draft/Rejected/Additional_Info. Pending_Executor phải accept trước; Pending_Legal/Approved/In_Progress/Completed/Declined không sửa chứng cứ. Chọn verifier từ legal-verifiers, không phải nhập tên; người xác minh phải độc lập, Active, đúng role.
 
-Trình tự: upload death-certificate → chọn verifier → POST legal-verifications với **Evidence**, không phải File → trạng thái Pending_Legal. Nộp giấy chứng tử không tự xác nhận đã mất và không hoàn tất đơn. RequestLegal tạo review Pending và thông báo người thẩm định. start/complete cần pháp lý Approved; code hiện cho complete từ Approved hoặc In_Progress, nên test chuẩn vẫn start trước. File complete có chữ ký thật của Executor; completion ghi case Completed và thông báo beneficiary.
+Trình tự: upload death-certificate → chọn verifier → POST legal-verifications với **Evidence**, không phải File → trạng thái Pending_Legal. Nộp giấy chứng tử không tự xác nhận đã mất và không hoàn tất đơn. RequestLegal tạo review Pending và thông báo người thẩm định. start/complete cần pháp lý Approved; code hiện cho complete từ Approved hoặc In_Progress, nên test chuẩn vẫn start trước. Executor được phân công nộp file complete có chữ ký hợp lệ theo key chung; completion ghi case Completed và thông báo beneficiary.
 
 ## 11. LegalVerifier: xem hồ sơ và quyết định
 
@@ -382,13 +383,13 @@ Test round-trip, plaintext rỗng → 400; sửa ciphertext/base64 sai → 400. 
 
 ### Luồng thành công
 
-1. Chuẩn bị database test, SMTP và chứng thư Owner/Executor. Có Admin/E1/L1 hợp lệ; đăng ký A/B, login A và B, lưu token riêng.
+1. Chuẩn bị database test, SMTP và public key chung/chữ ký tương ứng theo main hiện tại. Có Admin/E1/L1 hợp lệ; đăng ký A/B, login A và B, lưu token riêng.
 2. A GET/POST life-confirmation, kiểm tra thời gian đã lưu. A lấy dropdown, xem detail E1, tạo kho và PUT gán E1. E1 GET assignments thấy tên kho/Owner.
 3. A tạo asset, phân bổ B 100%, upload File + chữ ký Owner. Kiểm tra list/detail/download. Lưu assetId/assignmentId/documentId.
 4. A POST tạo handover → Pending_Executor. E1 xem inbox/detail, accept → Draft. Chưa accept thử upload phải 409.
 5. E1 upload death-certificate → owner-status ReportedDeceased, không ConfirmedDeceased. A bấm life-confirmation lúc này phải 409.
 6. E1 lấy legal-verifiers, gửi VerifierId L1 + Evidence. L1 thấy đơn Pending_Legal, xem nội dung asset/bằng chứng, approve với comment.
-7. Owner-status ConfirmedDeceased có reviewer/time/nguồn bằng chứng. E1 start, complete với File + chữ ký E1. Không dùng file Owner ký thay E1.
+7. Owner-status ConfirmedDeceased có reviewer/time/nguồn bằng chứng. E1 start, complete với File + chữ ký khớp public key chung của môi trường. JWT gửi request phải là E1 được phân công, dù Verify chữ ký không phân biệt user bằng chứng thư.
 8. B request/verify beneficiary OTP, xem tài sản/case/tài liệu; sau Completed POST receipt một lần, GET đọc lại. Kiểm tra notification và audit bằng đúng vai trò.
 
 ### Nhánh riêng trên hồ sơ test khác
@@ -408,7 +409,7 @@ State machine chính: `Pending_Executor → Draft → Pending_Legal → Approved
 
 - [ ] Mọi list phân trang đọc items, chuyển page không trùng dữ liệu; 0/101 pageSize không hợp lệ; list metadata mảng không bị parse thành PageDto.
 - [ ] Không token/sai role/Owner khác/Executor khác/Legal khác/beneficiary khác đều bị chặn theo 401/403/404.
-- [ ] File >10 MiB, rỗng, MIME sai, chữ ký giả/sai người/hết hạn, download trái phép và tài liệu revoked không được thành công.
+- [ ] File >10 MiB, rỗng, MIME sai, chữ ký sai key/bytes bị sửa, download trái phép và tài liệu revoked không được thành công. Không kỳ vọng main hiện tại tự chặn chứng thư hết hạn hoặc signerId không được map riêng.
 - [ ] Pending_Executor chưa upload; accept/decline lặp và cạnh tranh không thay hồ sơ đã xử lý; fail persistence không báo success.
 - [ ] Tổng phân bổ >100%, hơn 2 chữ số thập phân, beneficiary inactive/trùng/tự thụ hưởng bị chặn.
 - [ ] Bổ sung/nộp lại/approve/reject đúng trạng thái; file bị sửa không được duyệt; không bỏ qua pháp lý khi complete.
@@ -417,10 +418,10 @@ State machine chính: `Pending_Executor → Draft → Pending_Legal → Approved
 - [ ] Swagger JSON trả 200, không trùng method+route; CORS chỉ origin cấu hình; download expose headers cần thiết.
 - [ ] Admin role sai/tên role không tồn tại được ghi nhận đúng; chat LegalVerifier và realtime được ghi nhận theo giới hạn thực tế.
 
-Đợt thay đổi Owner/revoke ngày 23/10/2026: build thành công, console harness **527 kiểm tra đạt**, có HTTP Swagger JSON, JWT/Google/2FA, SQL truy vấn lý do từ chối, SQLite relational rollback và cạnh tranh revoke/accept qua nhiều DbContext. Full build có 3 warning có sẵn (mailSender chưa dùng, using trùng); lần build tăng dần cuối không có lỗi. **Không đồng nghĩa 93 endpoint đã được test thủ công hay mọi nhóm Admin/chat/encryption có integration coverage đầy đủ.** Không gọi Google/SMTP/SQL Server thật trong các đợt test cô lập này.
+Sau pull/integrate main `635b589`, build thành công và console harness **531 kiểm tra đạt**. Fixture và assertion chữ ký được cập nhật công khai theo contract key chung của main, vẫn kiểm tra chữ ký sai key/bytes bị sửa; code Verify production được giữ nguyên. Có HTTP Swagger JSON, completed overview mới của main, JWT/Google/2FA, SQL truy vấn lý do từ chối, SQLite relational rollback và cạnh tranh revoke/accept qua nhiều DbContext. Full build có 3 warning có sẵn (mailSender chưa dùng, using trùng); lần build tăng dần cuối không có lỗi. **Không đồng nghĩa 94 endpoint đã được test thủ công hay mọi nhóm Admin/chat/encryption có integration coverage đầy đủ.** Không gọi Google/SMTP/SQL Server thật trong các đợt test cô lập này.
 
 Chưa xác minh schema/concurrency SQL Server thật, chứng thư production, Google/SMTP thật và realtime hai phía. Hai status mới Pending_Executor/Declined vừa varchar(20) theo scaffold; nếu database thật có CHECK constraint giới hạn enum thì cần review tương thích trước deploy, không tự migration theo hướng dẫn này. OTP/challenge tạm nằm trong memory của instance; restart/multi-instance cần đánh giá vận hành, không coi như đã có distributed store.
 
-Chưa có API public invitation người chưa đăng ký, enroll 2FA, reset/change password hoặc update profile dù có DTO/service rời rạc; không tự suy ra endpoint từ tên class. Swagger/OpenAPI và `/hubs/chat/negotiate` là endpoint framework, không tính vào 93 controller operations. Không có API Staff/intake Staff.
+Chưa có API public invitation người chưa đăng ký, enroll 2FA, reset/change password hoặc update profile dù có DTO/service rời rạc; không tự suy ra endpoint từ tên class. Swagger/OpenAPI và `/hubs/chat/negotiate` là endpoint framework, không tính vào 94 controller operations. Không có API Staff/intake Staff.
 
 Request mẫu tiện chạy: `LegacyVault.http` ở root; tài liệu này vẫn là hướng dẫn đầy đủ độc lập. Khi thêm/xóa endpoint, cập nhật bảng tương ứng và đối chiếu toàn bộ controller/Swagger để không thiếu operation.

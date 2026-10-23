@@ -468,15 +468,19 @@ internal static class JwtWorkflowTests
         var beneficiaryAuthorization = client.DefaultRequestHeaders.Authorization;
         As("executor");
         await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{request.RequestId}/start", new { }), HttpStatusCode.NoContent, "Executor starts handover only after legal approval");
-        async Task<HttpResponseMessage> CompleteRequest()
+        async Task<HttpResponseMessage> CompleteRequest(bool wrongKey = false)
         {
             using var form = new MultipartFormDataContent(); var bytes = "signed handover completion"u8.ToArray();
             var file = new ByteArrayContent(bytes); file.Headers.ContentType = new("text/plain"); form.Add(file, "File", "completion.txt");
-            form.Add(new ByteArrayContent(executorKey.SignData(bytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)), "Signature", "completion.sig");
+            // Main uses the first configured certificate (ownerKey) as a shared public key, even for Executor completion.
+            form.Add(new ByteArrayContent((wrongKey ? executorKey : ownerKey).SignData(bytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)), "Signature", "completion.sig");
             return await client.PostAsync($"/api/executor/handovers/{request.RequestId}/complete", form);
         }
-        await Expect(await CompleteRequest(), HttpStatusCode.NoContent, "HTTP signed completion persists request, cases and notifications with real RSA validation");
+        await Expect(await CompleteRequest(wrongKey: true), HttpStatusCode.BadRequest, "completion still rejects a signature outside main's configured shared public key");
+        await Expect(await CompleteRequest(), HttpStatusCode.NoContent, "HTTP signed completion persists request, cases and notifications with real shared-key RSA validation");
         await Expect(await CompleteRequest(), HttpStatusCode.Conflict, "completed handover cannot be completed again");
+        var completedOverview = (await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>("/api/executor/handovers/completed?page=1&pageSize=20"))!;
+        check(completedOverview.Items.Any(r => r.RequestId == request.RequestId) && completedOverview.Items.All(r => r.Status == "Completed"), "latest main completed overview endpoint retains pagination and completed-only filter");
         client.DefaultRequestHeaders.Authorization = beneficiaryAuthorization;
         await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { note = "Received" }), HttpStatusCode.OK, "beneficiary confirms completed receipt without claiming digital signature");
         await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { }), HttpStatusCode.Conflict, "receipt confirmation cannot repeat");
