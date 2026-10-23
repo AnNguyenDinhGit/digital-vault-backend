@@ -25,8 +25,8 @@ public sealed class DocumentProtection(SecurityOptions options)
         if (signature is null) return false;
         try
         {
-            // Lấy chứng thư đầu tiên làm public key chung cho mọi user
-            var pem = options.SignerCertificates.Values.FirstOrDefault();
+            // Lấy chứng thư đầu tiên và xử lý thay thế ký tự escape \n thành xuống dòng thực tế
+            var pem = options.SignerCertificates.Values.FirstOrDefault()?.Replace("\\n", "\n");
             if (string.IsNullOrEmpty(pem)) return false;
 
             using var cert = X509Certificate2.CreateFromPem(pem);
