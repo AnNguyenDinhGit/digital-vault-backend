@@ -36,7 +36,7 @@ public static class MappingExtensions
                 .ToArray()
         )
         {
-            Owner = new(r.Vault.OwnerId, r.Vault.Owner?.FullName ?? ""), ExecutorId = r.ExecutorId,
+            Owner = new(r.Vault.OwnerId, r.Vault.Owner?.FullName ?? ""), ExecutorId = r.ExecutorId, ExecutorName = r.Executor?.FullName,
             SubmittedAt = r.SubmittedAt, CompletedAt = r.CompletedAt
         };
 

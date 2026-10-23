@@ -301,3 +301,14 @@ Authorization: Bearer {{operatorToken}}
 Content-Type: application/json
 
 { "reason": "Currently unable to take this handover" }
+### Owner: current Executor assignment, or latest historical assignment if none active
+GET {{baseUrl}}/api/owner/vaults/{{vaultId}}/executor
+Authorization: Bearer {{ownerToken}}
+
+### Owner: handover identity and persisted decline reason/time
+GET {{baseUrl}}/api/owner/handovers/{{requestId}}
+Authorization: Bearer {{ownerToken}}
+
+### Owner: revoke assignment before handover acceptance; successful 204 persists Status=Revoked
+POST {{baseUrl}}/api/owner/vaults/{{vaultId}}/executor/revoke
+Authorization: Bearer {{ownerToken}}

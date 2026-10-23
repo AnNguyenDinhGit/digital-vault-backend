@@ -6,6 +6,9 @@ public sealed record HandoverDto(int RequestId, int VaultId, string RequestType,
 {
     public OwnerSummaryDto? Owner { get; init; }
     public int? ExecutorId { get; init; }
+    public string? ExecutorName { get; init; }
+    public string? DeclineReason { get; init; }
+    public DateTime? DeclinedAt { get; init; }
     public DateTime? SubmittedAt { get; init; }
     public DateTime? CompletedAt { get; init; }
 }

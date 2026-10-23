@@ -9,6 +9,10 @@ namespace LegacyVault.API.Controllers;
 [ApiController, Authorize, Route("api/owner")]
 public sealed class OwnerManagementController(ManagementService service) : VaultController
 {
+    [HttpGet("vaults/{vaultId:int}/executor")]
+    public Task<VaultExecutorDto> VaultExecutor(int vaultId, CancellationToken ct) => service.OwnerVaultExecutor(UserId, vaultId, ct);
+    [HttpPost("vaults/{vaultId:int}/executor/revoke")]
+    public async Task<IActionResult> RevokeExecutor(int vaultId, CancellationToken ct) { await service.RevokeExecutor(UserId, vaultId, ct); return NoContent(); }
     [HttpGet("executors/{executorId:int}"), Authorize(Roles = "Owner")]
     public Task<ExecutorDetailDto> ExecutorDetail(int executorId, [FromQuery] int? vaultId, CancellationToken ct) =>
         service.OwnerExecutorDetail(UserId, executorId, vaultId, ct);

@@ -9,9 +9,11 @@ public sealed record HandoverOverviewRow(int RequestId, int VaultId, string Vaul
     int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,
     DateTime? SubmittedAt, DateTime? CompletedAt, bool IsAssignedToMe);
 public sealed record ExecutorOptionRow(int UserId, string FullName);
+public sealed record OwnerDeclineRow(int RequestId, string? Message, DateTime? DeclinedAt);
 
 public interface IWorkflowRepository
 {
+    Task<List<OwnerDeclineRow>> OwnerDeclines(int ownerId, int[] requestIds, CancellationToken ct);
     Task<List<ExecutorOptionRow>> ExecutorOptions(int ownerId, int? vaultId, string? search, int page, int size, DateTime now, CancellationToken ct);
     Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct);
     Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct);
@@ -30,6 +32,15 @@ public interface IWorkflowRepository
 }
 public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepository
 {
+    public Task<List<OwnerDeclineRow>> OwnerDeclines(int ownerId, int[] requestIds, CancellationToken ct) =>
+        db.HandoverRequests.AsNoTracking().Where(r => requestIds.Contains(r.RequestId) && r.Vault.OwnerId == ownerId && r.Status == "Declined")
+            .Select(r => new OwnerDeclineRow(r.RequestId,
+                db.Notifications.Where(n => n.UserId == ownerId && n.Title == "Executor declined handover" && n.Message.StartsWith("Handover #" + r.RequestId + ": "))
+                    .OrderByDescending(n => n.NotificationId).Select(n => n.Message).FirstOrDefault(),
+                db.AuditLogs.Where(a => a.Action == "DeclineHandover" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId && a.UserId == r.ExecutorId)
+                    .OrderByDescending(a => a.Timestamp).Select(a => (DateTime?)a.Timestamp).FirstOrDefault()))
+            .ToListAsync(ct);
+
     public Task<List<ExecutorOptionRow>> ExecutorOptions(int ownerId, int? vaultId, string? search, int page, int size, DateTime now, CancellationToken ct)
     {
         var query = db.Users.AsNoTracking().Where(u => u.UserId != ownerId && u.Status == "Active" &&
@@ -109,7 +120,7 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
         var vaultId = await db.DigitalAssets.Where(a => a.AssetId == id).Select(a => (int?)a.VaultId).SingleOrDefaultAsync(ct);
         return vaultId is null ? null : (await VaultGraph(vaultId.Value, ct))?.DigitalAssets.SingleOrDefault(a => a.AssetId == id);
     }
-    private IQueryable<HandoverRequest> Requests => db.HandoverRequests.Include(r => r.Vault).ThenInclude(v => v.Owner)
+    private IQueryable<HandoverRequest> Requests => db.HandoverRequests.Include(r => r.Executor).Include(r => r.Vault).ThenInclude(v => v.Owner)
         .Include(r => r.Vault).ThenInclude(v => v.ExecutorAssignments).Include(r => r.Vault).ThenInclude(v => v.DigitalAssets).ThenInclude(a => a.AssetDocuments)
         .Include(r => r.HandoverDocuments).Include(r => r.LegalVerifications).ThenInclude(v => v.Verifier)
         .Include(r => r.HandoverCases).ThenInclude(c => c.BeneficiaryReceipts)
