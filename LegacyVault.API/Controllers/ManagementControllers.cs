@@ -71,6 +71,13 @@ public sealed class ExecutorWorkflowController(ManagementService service) : Vaul
     public Task<PageDto<HandoverOverviewDto>> Overview([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
         [FromQuery] string? status = null, [FromQuery] int? ownerId = null, [FromQuery] bool assignedOnly = false, CancellationToken ct = default) =>
         service.ExecutorOverview(UserId, page, pageSize, status, ownerId, assignedOnly, ct);
+
+    [HttpGet("completed")]
+    public Task<PageDto<HandoverOverviewDto>> GetCompletedHandovers(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default) =>
+        service.ExecutorOverview(UserId, page, pageSize, "Completed", null, false, ct);
     [HttpGet("{requestId:int}/owner-status")]
     public Task<OwnerLifeStatusDto> OwnerStatus(int requestId, CancellationToken ct) => service.ExecutorOwnerStatus(UserId, requestId, ct);
     [HttpGet("{requestId:int}/history")]
