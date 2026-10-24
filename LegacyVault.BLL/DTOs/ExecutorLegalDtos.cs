@@ -4,6 +4,8 @@ public sealed record OwnerSummaryDto(int UserId, string FullName);
 public sealed record ExecutorOptionDto(int UserId, string FullName);
 public sealed record ExecutorDetailDto(int UserId, string FullName, string Role, string Status, DateTime JoinedAt);
 public sealed record VaultExecutorDto(int VaultId, int ExecutorId, string FullName, string Status, DateTime AssignedAt);
+public sealed record LegalAssetDto(int AssetId, string Name, string Type, string? Description, string Status,
+    IReadOnlyList<ManagedDocumentDto> Documents);
 public sealed record VerifierOptionDto(int UserId, string FullName);
 public sealed record HandoverOverviewDto(int RequestId, int VaultId, string VaultName, OwnerSummaryDto Owner,
     int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,

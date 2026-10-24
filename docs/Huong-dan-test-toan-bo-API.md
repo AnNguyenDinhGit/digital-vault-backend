@@ -1,6 +1,6 @@
 # Hướng dẫn test toàn bộ API LegacyVault / DigitalVault
 
-Cập nhật theo mã nguồn ngày 23/10/2026. Đây là tài liệu test tổng hợp: **94 operation trong controller**, callback OIDC và SignalR. Có thể thực hiện luồng chính chỉ với tài liệu này và Swagger, không cần đọc các hướng dẫn lịch sử. “Có endpoint” không đồng nghĩa mọi nhóm đã được test production; xem giới hạn ở cuối.
+Cập nhật theo mã nguồn ngày 24/10/2026. Đây là tài liệu test tổng hợp: **95 operation trong controller**, callback OIDC và SignalR. Có thể thực hiện luồng chính chỉ với tài liệu này và Swagger, không cần đọc các hướng dẫn lịch sử. “Có endpoint” không đồng nghĩa mọi nhóm đã được test production; xem giới hạn ở cuối.
 
 ## 1. Chuẩn bị môi trường và Swagger
 
@@ -277,6 +277,7 @@ Tất cả endpoint chỉ cho người xác minh được giao, không phải m�
 | --- | --- | --- |
 | GET | `/api/legal/handovers` | page/pageSize/status → PageDto<HandoverDto> được giao |
 | GET | `/api/legal/handovers/{requestId}` | 200 `{ request: HandoverDto, verification: ReviewDto }` |
+| GET | `/api/legal/handovers/{requestId}/assets` | page/pageSize → PageDto<LegalAssetDto> tài sản thuộc case trong hồ sơ được giao, kèm metadata tài liệu chưa thu hồi |
 | GET | `/api/legal/handovers/{requestId}/owner-status` | OwnerLifeStatusDto có nguồn bằng chứng |
 | GET | `/api/legal/handovers/{requestId}/history` | Mảng review các lần nộp/bổ sung/duyệt |
 | GET | `/api/legal/handovers/{requestId}/documents` | Mảng metadata bằng chứng |
@@ -287,6 +288,46 @@ Tất cả endpoint chỉ cho người xác minh được giao, không phải m�
 | POST | `/api/legal/handovers/{requestId}/request-additional-information` | `{ "comment": "Cần bổ sung giấy tờ" }` → 200 ReviewDto |
 
 Comment bắt buộc không trắng, tối đa 2000. Review chỉ khi request Pending_Legal và review Pending của mình. Approve cần giấy chứng tử đúng nguồn Executor, phân công còn hiệu lực, kho/tài sản/phân bổ/thụ hưởng hợp lệ và tài liệu Owner có chữ ký hợp lệ. File bị sửa/tài liệu thiếu không được duyệt. Lưu verifier/comment/review time; cạnh tranh review trả 409, không ghi một phần trạng thái/audit.
+
+### Danh sách tài sản để hiển thị cho pháp lý
+
+```http
+GET /api/legal/handovers/123/assets?page=1&pageSize=20
+Authorization: Bearer <legalVerifierToken>
+```
+
+Response 200:
+
+```json
+{
+  "page": 1,
+  "pageSize": 20,
+  "items": [
+    {
+      "assetId": 45,
+      "name": "Tài khoản tiết kiệm",
+      "type": "BankAccount",
+      "description": "Tài sản trong hồ sơ bàn giao",
+      "status": "Active",
+      "documents": [
+        {
+          "documentId": 67,
+          "fileName": "account.pdf",
+          "fileType": "application/pdf",
+          "isEncrypted": true,
+          "status": "Active"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Chỉ trả tài sản có trong HANDOVER_CASES của đúng hồ sơ và đúng vault. Một tài sản có nhiều người thụ hưởng vẫn chỉ xuất hiện một lần. Sắp theo assetId tăng dần, page mặc định 1, pageSize mặc định 20, tối đa 100; trang hết dữ liệu trả items rỗng. Đây là phân trang trong BLL trên graph hồ sơ đã đọc qua repository, không tuyên bố đã tối ưu SQL pagination riêng cho endpoint này.
+
+Metadata tài liệu dùng đúng điều kiện download hiện tại: loại Status=Revoked, giữ các trạng thái chưa thu hồi và hiển thị status để người thẩm định biết. Không tự ẩn tài sản nằm trong case chỉ vì trạng thái của tài sản đã đổi; không lấy tài sản khác cùng vault nhưng ngoài case. Documents có thể rỗng; không trả storage path, encryption key hoặc nội dung file trong API list. Metadata không đồng nghĩa chữ ký đã được kiểm chứng: tải/đọc bằng GET `/api/legal/handovers/{requestId}/asset-documents/{documentId}/content` có quyền để kiểm tra nội dung và header chữ ký hiện có.
+
+Test: dùng token LegalVerifier được giao, kiểm tra tên/type/description/status/documentId; dùng hai asset và một asset có hai beneficiary để kiểm tra không trùng qua các trang. Thu hồi một tài liệu trên fixture trước tạo đơn thì list không được hiển thị tài liệu đó, download trả 404. Asset ngoài case cùng vault không xuất hiện. Không token → 401; sai role/xung đột lợi ích → 403; người xác minh không được giao hoặc request không tồn tại → 404; page=0, pageSize=0/101 → 400. Có thể đọc sau khi đã quyết định pháp lý theo quyền lịch sử hiện có, không chỉ giới hạn Pending_Legal.
 
 ReviewDto: `verificationId,requestId,verifierId,status,comment,submittedAt,reviewedAt`. LegalVerifier được xem/tải, **không có endpoint upload**. Additional_Info: Executor xem comment/lịch sử, upload bổ sung, gửi legal-verifications lại; review mới Pending trước khi duyệt. Rejected pháp lý khác Declined tiếp nhận. Không gửi JSON status tùy ý.
 
@@ -418,10 +459,12 @@ State machine chính: `Pending_Executor → Draft → Pending_Legal → Approved
 - [ ] Swagger JSON trả 200, không trùng method+route; CORS chỉ origin cấu hình; download expose headers cần thiết.
 - [ ] Admin role sai/tên role không tồn tại được ghi nhận đúng; chat LegalVerifier và realtime được ghi nhận theo giới hạn thực tế.
 
-Sau pull/integrate main `635b589`, build thành công và console harness **531 kiểm tra đạt**. Fixture và assertion chữ ký được cập nhật công khai theo contract key chung của main, vẫn kiểm tra chữ ký sai key/bytes bị sửa; code Verify production được giữ nguyên. Có HTTP Swagger JSON, completed overview mới của main, JWT/Google/2FA, SQL truy vấn lý do từ chối, SQLite relational rollback và cạnh tranh revoke/accept qua nhiều DbContext. Full build có 3 warning có sẵn (mailSender chưa dùng, using trùng); lần build tăng dần cuối không có lỗi. **Không đồng nghĩa 94 endpoint đã được test thủ công hay mọi nhóm Admin/chat/encryption có integration coverage đầy đủ.** Không gọi Google/SMTP/SQL Server thật trong các đợt test cô lập này.
+Sau pull/integrate main `635b589`, build thành công và console harness **531 kiểm tra đạt**. Fixture và assertion chữ ký được cập nhật công khai theo contract key chung của main, vẫn kiểm tra chữ ký sai key/bytes bị sửa; code Verify production được giữ nguyên. Có HTTP Swagger JSON, completed overview mới của main, JWT/Google/2FA, SQL truy vấn lý do từ chối, SQLite relational rollback và cạnh tranh revoke/accept qua nhiều DbContext. Full build có 3 warning có sẵn (mailSender chưa dùng, using trùng); lần build tăng dần cuối không có lỗi. **Không đồng nghĩa 95 endpoint đã được test thủ công hay mọi nhóm Admin/chat/encryption có integration coverage đầy đủ.** Không gọi Google/SMTP/SQL Server thật trong các đợt test cô lập này.
+
+Bổ sung API danh sách tài sản LegalVerifier ngày 24/10/2026: build thành công (0 lỗi, 3 warning có sẵn), console harness **554 kiểm tra đạt**. Test HTTP/SQLite bao gồm đúng/sai role, không được phân công, request không tồn tại, page không hợp lệ, hai trang riêng biệt, nhiều case cùng một asset, asset ngoài case, metadata tài liệu và tài liệu bị thu hồi. Swagger JSON cũng được gọi thực tế qua TestServer; không khởi động Program.cs để seed database thật.
 
 Chưa xác minh schema/concurrency SQL Server thật, chứng thư production, Google/SMTP thật và realtime hai phía. Hai status mới Pending_Executor/Declined vừa varchar(20) theo scaffold; nếu database thật có CHECK constraint giới hạn enum thì cần review tương thích trước deploy, không tự migration theo hướng dẫn này. OTP/challenge tạm nằm trong memory của instance; restart/multi-instance cần đánh giá vận hành, không coi như đã có distributed store.
 
-Chưa có API public invitation người chưa đăng ký, enroll 2FA, reset/change password hoặc update profile dù có DTO/service rời rạc; không tự suy ra endpoint từ tên class. Swagger/OpenAPI và `/hubs/chat/negotiate` là endpoint framework, không tính vào 94 controller operations. Không có API Staff/intake Staff.
+Chưa có API public invitation người chưa đăng ký, enroll 2FA, reset/change password hoặc update profile dù có DTO/service rời rạc; không tự suy ra endpoint từ tên class. Swagger/OpenAPI và `/hubs/chat/negotiate` là endpoint framework, không tính vào 95 controller operations. Không có API Staff/intake Staff.
 
 Request mẫu tiện chạy: `LegacyVault.http` ở root; tài liệu này vẫn là hướng dẫn đầy đủ độc lập. Khi thêm/xóa endpoint, cập nhật bảng tương ứng và đối chiếu toàn bộ controller/Swagger để không thiếu operation.

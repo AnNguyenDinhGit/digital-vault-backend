@@ -6,11 +6,15 @@
 
 # LegacyVault API
 
+## LegalVerifier xem danh sách tài sản
+
+GET `/api/legal/handovers/{requestId}/assets?page=1&pageSize=20` trả PageDto gồm assetId/name/type/description/status và documents (documentId/fileName/fileType/isEncrypted/status). Chỉ người xác minh được giao, không xung đột lợi ích; chỉ tài sản trong case, mỗi asset một lần, loại tài liệu Revoked. Không trả file/storage path. Tải nội dung qua endpoint asset-documents hiện có; xem phần 11 của [hướng dẫn tổng hợp](Huong-dan-test-toan-bo-API.md).
+
 ## Owner xem Executor và lý do từ chối, thu hồi phân công
 
 POST `/api/owner/vaults/{vaultId}/handovers`, GET `/api/owner/handovers`, GET `/api/owner/handovers/{requestId}` bổ sung executorName/declineReason/declinedAt, giữ executorId và phân trang. Chưa từ chối hoặc thiếu dữ liệu lịch sử thì null. GET `/api/owner/vaults/{vaultId}/executor` trả vaultId/executorId/fullName/status/assignedAt (ưu tiên hiệu lực, nếu không có thì lịch sử gần nhất). POST `/api/owner/vaults/{vaultId}/executor/revoke` không body, chỉ trả 204 sau khi lưu Status=Revoked; cancel đơn Pending_Executor, chặn hồ sơ đã nhận/xử lý. Xem phần 8 trong [hướng dẫn tổng hợp](Huong-dan-test-toan-bo-API.md).
 
-**Hướng dẫn test tổng hợp hiện tại:** [Huong-dan-test-toan-bo-API.md](Huong-dan-test-toan-bo-API.md). File này bao phủ đủ 94 controller operations cùng callback OIDC/SignalR, có input, quyền, response, trạng thái, flow test và giới hạn thực tế. Dùng file tổng hợp khi kiểm thử thay cho các mô tả lịch sử chưa được đồng bộ bên dưới.
+**Hướng dẫn test tổng hợp hiện tại:** [Huong-dan-test-toan-bo-API.md](Huong-dan-test-toan-bo-API.md). File này bao phủ đủ 95 controller operations cùng callback OIDC/SignalR, có input, quyền, response, trạng thái, flow test và giới hạn thực tế. Dùng file tổng hợp khi kiểm thử thay cho các mô tả lịch sử chưa được đồng bộ bên dưới.
 
 ## Tiếp nhận bàn giao và chi tiết Executor
 

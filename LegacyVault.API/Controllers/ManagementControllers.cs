@@ -95,6 +95,9 @@ public sealed class ExecutorWorkflowController(ManagementService service) : Vaul
 [ApiController, Authorize, Route("api/legal/handovers")]
 public sealed class LegalController(ManagementService service) : VaultController
 {
+    [HttpGet("{requestId:int}/assets")]
+    public Task<PageDto<LegalAssetDto>> Assets(int requestId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        CancellationToken ct = default) => service.LegalAssets(UserId, requestId, page, pageSize, ct);
     [HttpGet("{requestId:int}/owner-status")]
     public Task<OwnerLifeStatusDto> OwnerStatus(int requestId, CancellationToken ct) => service.LegalOwnerStatus(UserId, requestId, ct);
     [HttpGet("{requestId:int}/history")]
