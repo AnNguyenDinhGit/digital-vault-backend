@@ -425,10 +425,26 @@ internal static class JwtWorkflowTests
         }
         As("legal2"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Unauthorized" }), HttpStatusCode.NotFound, "legal reviewer cannot approve another reviewer's case");
         await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/owner-status"), HttpStatusCode.NotFound, "unassigned legal reviewer cannot inspect Owner death status");
+        await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/assets"), HttpStatusCode.NotFound, "unassigned LegalVerifier cannot list handover assets");
+        client.DefaultRequestHeaders.Authorization = null;
+        await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/assets"), HttpStatusCode.Unauthorized, "legal asset list requires Bearer authentication");
+        foreach (var actor in new[] { "owner", "executor", "recipient", "staff" })
+        {
+            As(actor); await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/assets"), HttpStatusCode.Forbidden, "legal asset list requires current LegalVerifier role: " + actor);
+        }
+        As("legal2");
         await Expect(await client.GetAsync("/api/executor/handovers/overview"), HttpStatusCode.Forbidden, "LegalVerifier does not inherit Executor-wide overview permission");
         As("executor"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Conflict, "death certificate upload is locked while legal review is pending");
         As("legal");
         int deathDocument;
+        var legalAssetPage = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{request.RequestId}/assets"))!;
+        check(legalAssetPage.Page == 1 && legalAssetPage.PageSize == 20 && legalAssetPage.Items.Single().AssetId == handover.Asset && legalAssetPage.Items[0].Name == "Handover asset" && legalAssetPage.Items[0].Type == "Document" && legalAssetPage.Items[0].Status == "Active", "assigned LegalVerifier can list scoped asset details with pagination");
+        check(legalAssetPage.Items.Single().Documents.Any(d => d.DocumentId == doc.DocumentId && d.Status == "Active" && d.IsEncrypted), "legal asset list includes usable asset-document metadata");
+        var legalAssetJson = await client.GetStringAsync($"/api/legal/handovers/{request.RequestId}/assets");
+        check(!legalAssetJson.Contains("storagePath", StringComparison.OrdinalIgnoreCase) && !legalAssetJson.Contains("encryptionKey", StringComparison.OrdinalIgnoreCase) && !legalAssetJson.Contains("password", StringComparison.OrdinalIgnoreCase), "legal asset DTO does not expose storage or security fields");
+        foreach (var query in new[] { "page=0", "pageSize=0", "pageSize=101" })
+            await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/assets?{query}"), HttpStatusCode.BadRequest, "legal asset list validates pagination: " + query);
+        await Expect(await client.GetAsync("/api/legal/handovers/2147483647/assets"), HttpStatusCode.NotFound, "legal asset list does not invent a missing request");
         await using (var db = new LegacyVaultDbContext(dbOptions)) deathDocument = (await db.HandoverDocuments.FirstAsync(d => d.RequestId == request.RequestId)).HandoverDocumentId;
         await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/documents/{deathDocument}/content"), HttpStatusCode.OK, "assigned LegalVerifier can download death evidence without upload permission");
         check((await client.GetFromJsonAsync<DocumentDto[]>($"/api/legal/handovers/{request.RequestId}/documents"))!.Any(d => d.Purpose == "DeathCertificate"), "LegalVerifier sees evidence types for the assigned review");
@@ -554,6 +570,14 @@ internal static class JwtWorkflowTests
         await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{revokeDocuments.Asset}/documents/{revokeDoc.DocumentId}/revoke", new { }), HttpStatusCode.NoContent, "owner revokes unprocessed document without deleting history");
         await Expect(await client.GetAsync($"/api/owner/assets/{revokeDocuments.Asset}/documents/{revokeDoc.DocumentId}/content"), HttpStatusCode.NotFound, "revoked document is not downloadable");
         var rejectedFlow = await CreateFixture("Rejected flow"); await UploadAsset(rejectedFlow.Asset);
+        var existingAllocation = (await client.GetFromJsonAsync<PageDto<AssignmentDto>>($"/api/owner/assets/{rejectedFlow.Asset}/allocations"))!.Items.Single();
+        await Expect(await client.PutAsJsonAsync($"/api/owner/assets/{rejectedFlow.Asset}/allocations/{existingAllocation.AssignmentId}", new { allocation = 50 }), HttpStatusCode.OK, "legal asset fixture splits allocation across beneficiaries");
+        await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{rejectedFlow.Asset}/beneficiaries", new { email = "other@example.test", allocation = 50 }), HttpStatusCode.Created, "legal asset fixture has multiple cases for one asset");
+        var extraAsset = (await (await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = rejectedFlow.Vault, name = "Second legal asset", type = "BankAccount", description = "Legal list description" })).Content.ReadFromJsonAsync<AssetDto>())!;
+        await client.PostAsJsonAsync($"/api/owner/assets/{extraAsset.AssetId}/beneficiaries", new { email = "recipient@example.test", allocation = 100 });
+        await UploadAsset(extraAsset.AssetId);
+        var revokedAssetDocument = await UploadAsset(rejectedFlow.Asset);
+        await Expect(await client.PostAsync($"/api/owner/assets/{rejectedFlow.Asset}/documents/{revokedAssetDocument.DocumentId}/revoke", null), HttpStatusCode.NoContent, "legal asset fixture keeps revoked document history out of downloadable metadata");
         var unrelatedResponse = await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = rejectedFlow.Vault, name = "Excluded archived asset", type = "Document" });
         var unrelated = (await unrelatedResponse.Content.ReadFromJsonAsync<AssetDto>())!;
         await client.PostAsJsonAsync($"/api/owner/assets/{unrelated.AssetId}/beneficiaries", new { email = "recipient@example.test", allocation = 100 });
@@ -580,6 +604,15 @@ internal static class JwtWorkflowTests
         }
         As("legal");
         await Expect(await client.GetAsync($"/api/legal/handovers/{rejectedRequest.RequestId}/asset-documents/{unrelatedDocument.DocumentId}/content"), HttpStatusCode.NotFound, "LegalVerifier cannot read unrelated archived asset in same vault");
+        var scopedAssets = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{rejectedRequest.RequestId}/assets"))!;
+        check(scopedAssets.Items.Count == 2 && scopedAssets.Items.Select(a => a.AssetId).Distinct().Count() == 2 && scopedAssets.Items.All(a => a.AssetId != unrelated.AssetId), "legal asset list deduplicates multi-beneficiary cases and excludes unrelated assets in the same vault");
+        check(scopedAssets.Items.Single(a => a.AssetId == extraAsset.AssetId).Description == "Legal list description" && scopedAssets.Items.Single(a => a.AssetId == extraAsset.AssetId).Type == "BankAccount", "legal asset list preserves type and description");
+        check(scopedAssets.Items.SelectMany(a => a.Documents).All(d => d.DocumentId != revokedAssetDocument.DocumentId), "legal asset list excludes revoked documents consistently with download permissions");
+        await Expect(await client.GetAsync($"/api/legal/handovers/{rejectedRequest.RequestId}/asset-documents/{revokedAssetDocument.DocumentId}/content"), HttpStatusCode.NotFound, "LegalVerifier cannot download revoked asset document");
+        var assetPage1 = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{rejectedRequest.RequestId}/assets?page=1&pageSize=1"))!;
+        var assetPage2 = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{rejectedRequest.RequestId}/assets?page=2&pageSize=1"))!;
+        var assetPage3 = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{rejectedRequest.RequestId}/assets?page=3&pageSize=1"))!;
+        check(assetPage1.Items.Count == 1 && assetPage2.Items.Count == 1 && assetPage1.Items[0].AssetId < assetPage2.Items[0].AssetId && assetPage2.Page == 2 && assetPage3.Items.Count == 0, "legal asset pagination has stable ordering, no duplicate cases and an empty trailing page");
         await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{rejectedRequest.RequestId}/reject", new { comment = "Evidence insufficient" }), HttpStatusCode.OK, "LegalVerifier persists independent rejection");
         As("owner");
         await Expect(await client.PostAsJsonAsync($"/api/owner/handovers/{rejectedRequest.RequestId}/cancel", new { }), HttpStatusCode.NoContent, "Owner can cancel rejected request to repair evidence without deleting history");

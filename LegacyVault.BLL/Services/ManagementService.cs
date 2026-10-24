@@ -414,6 +414,20 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     {
         var (r, v) = await Legal(user, id, ct); return (Map(r), new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt));
     }
+    public async Task<PageDto<LegalAssetDto>> LegalAssets(int user, int id, int page, int size, CancellationToken ct)
+    {
+        var (request, _) = await Legal(user, id, ct);
+        Paging(page, size);
+        var assetIds = request.HandoverCases.Select(c => c.Assignment.AssetId).ToHashSet();
+        var items = request.Vault.DigitalAssets.Where(a => assetIds.Contains(a.AssetId)).OrderBy(a => a.AssetId)
+            .Skip((page - 1) * size).Take(size)
+            .Select(a => new LegalAssetDto(a.AssetId, a.AssetName, a.AssetType, a.Description, a.Status,
+                a.AssetDocuments.Where(d => d.Status != "Revoked").OrderBy(d => d.DocumentId)
+                    .Select(d => new ManagedDocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted, d.Status)).ToArray()))
+            .ToArray();
+        return new(page, size, items);
+    }
+
     public async Task<DocumentContent> LegalDocument(int user, int id, int document, bool assetDocument, CancellationToken ct)
     {
         var (r, _) = await Legal(user, id, ct);

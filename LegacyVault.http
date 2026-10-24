@@ -312,3 +312,6 @@ Authorization: Bearer {{ownerToken}}
 ### Owner: revoke assignment before handover acceptance; successful 204 persists Status=Revoked
 POST {{baseUrl}}/api/owner/vaults/{{vaultId}}/executor/revoke
 Authorization: Bearer {{ownerToken}}
+### Assigned LegalVerifier: paginated assets belonging to this handover's cases
+GET {{baseUrl}}/api/legal/handovers/{{requestId}}/assets?page=1&pageSize=20
+Authorization: Bearer {{legalToken}}
