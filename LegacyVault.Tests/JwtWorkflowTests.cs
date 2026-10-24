@@ -262,6 +262,35 @@ internal static class JwtWorkflowTests
             await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{a.AssetId}/beneficiaries", new { email = "recipient@example.test", allocation = 100 }), HttpStatusCode.Created, "fixture beneficiary is persisted");
             return (v.VaultId, a.AssetId);
         }
+        var scopedVaultA = await CreateFixture("Scoped vault A");
+        var scopedVaultB = await CreateFixture("Scoped vault B");
+        var secondScopedAsset = (await (await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = scopedVaultA.Vault, name = "Another asset in A", type = "Document" })).Content.ReadFromJsonAsync<AssetDto>())!;
+        var foreignVault = await CreateFixture("Foreign Owner vault", "other");
+        As("owner");
+        var filteredAssets = (await client.GetFromJsonAsync<PageDto<AssetDto>>($"/api/owner/assets?vaultId={scopedVaultA.Vault}"))!;
+        check(filteredAssets.Items.Count == 2 && filteredAssets.Items.All(a => a.AssetId == scopedVaultA.Asset || a.AssetId == secondScopedAsset.AssetId), "Owner asset query returns only the selected vault, not another owned vault");
+        var scopedAssetPage1 = (await client.GetFromJsonAsync<PageDto<AssetDto>>($"/api/owner/vaults/{scopedVaultA.Vault}/assets?page=1&pageSize=1"))!;
+        var scopedAssetPage2 = (await client.GetFromJsonAsync<PageDto<AssetDto>>($"/api/owner/vaults/{scopedVaultA.Vault}/assets?page=2&pageSize=1"))!;
+        var scopedAssetPage3 = (await client.GetFromJsonAsync<PageDto<AssetDto>>($"/api/owner/vaults/{scopedVaultA.Vault}/assets?page=3&pageSize=1"))!;
+        check(scopedAssetPage1.Items.Single().AssetId == scopedVaultA.Asset && scopedAssetPage2.Items.Single().AssetId == secondScopedAsset.AssetId && scopedAssetPage3.Items.Count == 0 && scopedAssetPage2.Page == 2, "vault filtering precedes pagination and excludes interleaved asset IDs from other vaults");
+        check((await client.GetFromJsonAsync<PageDto<AssetDto>>($"/api/owner/vaults/{scopedVaultB.Vault}/assets"))!.Items.Single().AssetId == scopedVaultB.Asset, "opening another owned vault returns its own assets only");
+        await Expect(await client.GetAsync($"/api/owner/vaults/{scopedVaultA.Vault}/assets/{scopedVaultA.Asset}"), HttpStatusCode.OK, "nested asset detail accepts an asset in the selected owned vault");
+        await Expect(await client.GetAsync($"/api/owner/assets/{scopedVaultA.Asset}?vaultId={scopedVaultA.Vault}"), HttpStatusCode.OK, "existing asset detail supports optional vault scope");
+        await Expect(await client.GetAsync($"/api/owner/vaults/{scopedVaultA.Vault}/assets/{scopedVaultB.Asset}"), HttpStatusCode.NotFound, "asset detail rejects a different vault even when both belong to the same Owner");
+        await Expect(await client.GetAsync($"/api/owner/assets/{scopedVaultB.Asset}?vaultId={scopedVaultA.Vault}"), HttpStatusCode.NotFound, "query-scoped asset detail rejects another owned vault's asset");
+        var allOwnedAssets = (await client.GetFromJsonAsync<PageDto<AssetDto>>("/api/owner/assets"))!;
+        check(allOwnedAssets.Items.Any(a => a.AssetId == scopedVaultA.Asset) && allOwnedAssets.Items.Any(a => a.AssetId == scopedVaultB.Asset) && allOwnedAssets.Items.All(a => a.AssetId != foreignVault.Asset), "unfiltered asset list remains a backward-compatible Owner dashboard without foreign assets");
+        var emptyVault = (await (await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Empty scoped vault" })).Content.ReadFromJsonAsync<VaultDto>())!;
+        check((await client.GetFromJsonAsync<PageDto<AssetDto>>($"/api/owner/vaults/{emptyVault.VaultId}/assets"))!.Items.Count == 0, "empty selected vault returns an empty page instead of other assets");
+        foreach (var url in new[] { $"/api/owner/vaults/{foreignVault.Vault}/assets", $"/api/owner/assets?vaultId={foreignVault.Vault}", $"/api/owner/vaults/{foreignVault.Vault}/assets/{foreignVault.Asset}", $"/api/owner/assets/{scopedVaultA.Asset}?vaultId={foreignVault.Vault}" })
+            await Expect(await client.GetAsync(url), HttpStatusCode.NotFound, "Owner cannot scope reads to another Owner's vault");
+        foreach (var url in new[] { "/api/owner/assets?vaultId=0", "/api/owner/assets?vaultId=-1", $"/api/owner/assets/{scopedVaultA.Asset}?vaultId=0", "/api/owner/vaults/0/assets", $"/api/owner/vaults/{scopedVaultA.Vault}/assets?page=0" })
+            await Expect(await client.GetAsync(url), HttpStatusCode.BadRequest, "vault-scoped asset API validates IDs and pagination");
+        await Expect(await client.GetAsync("/api/owner/vaults/2147483647/assets"), HttpStatusCode.NotFound, "missing vault is not treated as an unfiltered asset list");
+        As("legal"); await Expect(await client.GetAsync($"/api/owner/vaults/{scopedVaultA.Vault}/assets"), HttpStatusCode.Forbidden, "vault asset list retains Owner role requirement");
+        client.DefaultRequestHeaders.Authorization = null;
+        await Expect(await client.GetAsync($"/api/owner/vaults/{scopedVaultA.Vault}/assets"), HttpStatusCode.Unauthorized, "vault asset list requires JWT");
+        As("owner");
         var editable = await CreateFixture("Editable");
         await using (var db = new LegacyVaultDbContext(dbOptions))
         {
@@ -359,6 +388,12 @@ internal static class JwtWorkflowTests
         As("executor"); await Expect(await client.GetAsync($"/api/executor/handovers/{request.RequestId}"), HttpStatusCode.OK, "assigned Executor sees handover detail");
         var enriched = (await client.GetFromJsonAsync<HandoverDto>($"/api/executor/handovers/{request.RequestId}"))!;
         check(enriched.Owner?.UserId == ids["owner"] && enriched.Owner.FullName == "owner" && enriched.ExecutorId == ids["executor"], "assigned detail includes Owner identity and responsible Executor");
+        check(enriched.OwnerName == "owner" && enriched.Cases.Single().AssetName == "Handover asset", "Executor detail exposes Owner label and asset name without replacing existing IDs");
+        using (var inboxJson = System.Text.Json.JsonDocument.Parse(await client.GetStringAsync("/api/executor/handovers")))
+        {
+            var inboxItem = inboxJson.RootElement.GetProperty("items").EnumerateArray().Single(r => r.GetProperty("requestId").GetInt32() == request.RequestId);
+            check(inboxItem.GetProperty("ownerName").GetString() == "owner" && inboxItem.GetProperty("owner").GetProperty("fullName").GetString() == "owner" && inboxItem.GetProperty("cases")[0].GetProperty("assetName").GetString() == "Handover asset", "Executor list JSON includes ownerName and cases.assetName while preserving nested Owner profile");
+        }
         check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{request.RequestId}/owner-status"))!.Status == "NotConfirmed", "no death evidence does not assert Owner is deceased or alive");
         check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/executor/handovers/{request.RequestId}/owner-status"))!.LastConfirmedAliveAt == lastLife.LastConfirmedAliveAt, "assigned Executor sees last Owner self-confirmation separately from death status");
         As("owner"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Forbidden, "Owner cannot upload a handover death certificate");
@@ -586,6 +621,8 @@ internal static class JwtWorkflowTests
         var rejectedRequest = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{rejectedFlow.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
         As("executor");
         check((await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Any(r => r.RequestId == rejectedRequest.RequestId), "AutoAssigned requests appear in executor list consistently with detail");
+        var namedRequest = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Single(r => r.RequestId == rejectedRequest.RequestId);
+        check(namedRequest.OwnerName == "owner" && namedRequest.Cases.Count == 3 && namedRequest.Cases.All(c => c.AssetName == (c.AssetId == rejectedFlow.Asset ? "Rejected flow asset" : "Second legal asset")), "multi-asset and multi-beneficiary handover maps each case to its own asset name");
         var firstRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=1&pageSize=1"))!;
         var secondRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=2&pageSize=1"))!;
         check(firstRequestPage.Items.Count == 1 && secondRequestPage.Items.Count == 1 && firstRequestPage.Items[0].RequestId != secondRequestPage.Items[0].RequestId && secondRequestPage.Page == 2, "merged handover pagination returns distinct assigned records on consecutive pages");

@@ -19,7 +19,7 @@ public interface IVaultRepository
     Task Register(User user, string defaultRole, CancellationToken ct);
     Task<List<DigitalVault>> OwnerVaults(int owner, CancellationToken ct);
     Task<DigitalVault?> Vault(int id, CancellationToken ct);
-    Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct);
+    Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct, int? vaultId = null);
     Task<DigitalAsset?> Asset(int id, CancellationToken ct);
     Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct);
     Task<HandoverRequest?> Request(int id, CancellationToken ct);
@@ -105,8 +105,8 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
 
     private IQueryable<DigitalAsset> Assets => db.DigitalAssets.Include(x => x.Vault).ThenInclude(x => x.HandoverRequests).Include(x => x.AssetDocuments).Include(x => x.BeneficiaryAssignments).ThenInclude(x => x.Beneficiary).AsSplitQuery();
 
-    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct)
-        => Assets.Where(x => x.Vault.OwnerId == owner).OrderBy(x => x.AssetId).ToListAsync(ct);
+    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct, int? vaultId = null)
+        => Assets.Where(x => x.Vault.OwnerId == owner && (vaultId == null || x.VaultId == vaultId)).OrderBy(x => x.AssetId).ToListAsync(ct);
 
     public Task<DigitalAsset?> Asset(int id, CancellationToken ct)
         => Assets.SingleOrDefaultAsync(x => x.AssetId == id, ct);

@@ -85,11 +85,19 @@ public sealed class OwnerController(VaultService service) : VaultController
     }
 
     [HttpGet("assets")]
-    public Task<PageDto<AssetDto>> Assets([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
-        service.OwnerAssets(UserId, page, pageSize, ct);
+    public Task<PageDto<AssetDto>> Assets([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        [FromQuery] int? vaultId = null, CancellationToken ct = default) =>
+        service.OwnerAssets(UserId, page, pageSize, ct, vaultId);
 
     [HttpGet("assets/{assetId:int}")]
-    public Task<AssetDto> Asset(int assetId, CancellationToken ct) => service.OwnerAsset(UserId, assetId, ct);
+    public Task<AssetDto> Asset(int assetId, [FromQuery] int? vaultId, CancellationToken ct) => service.OwnerAsset(UserId, assetId, ct, vaultId);
+
+    [HttpGet("vaults/{vaultId:int}/assets")]
+    public Task<PageDto<AssetDto>> VaultAssets(int vaultId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.OwnerAssets(UserId, page, pageSize, ct, vaultId);
+
+    [HttpGet("vaults/{vaultId:int}/assets/{assetId:int}")]
+    public Task<AssetDto> VaultAsset(int vaultId, int assetId, CancellationToken ct) => service.OwnerAsset(UserId, assetId, ct, vaultId);
 
     [HttpGet("beneficiaries")]
     public Task<PageDto<BeneficiaryDto>> Beneficiaries([FromQuery] int? assetId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>

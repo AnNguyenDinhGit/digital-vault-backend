@@ -221,3 +221,9 @@ GET `/api/owner/executors` với Bearer Owner; query `page`, `pageSize`, `search
 # Tiếp nhận đơn và chi tiết Executor
 
 Owner có GET `/api/owner/executors/{executorId}` cho nút xem chi tiết. Đơn Owner mới tạo có `Pending_Executor`, cần POST `/api/executor/handovers/{requestId}/accept` để chuyển Draft trước upload. POST `/decline` nhận `{ "reason": "..." }`, trả Declined và thu hồi phân công. Xem [contract đầy đủ](Executor-intake-and-profile.md). Bổ sung nhãn/nút trên frontend; không đổi contract JWT hoặc phân trang.
+# Tài sản trong màn hình chi tiết kho
+
+Gọi GET `/api/owner/vaults/{vaultId}/assets?page=1&pageSize=20` hoặc GET `/api/owner/assets?vaultId={vaultId}` để chỉ lấy tài sản kho đang mở. Detail dùng GET `/api/owner/vaults/{vaultId}/assets/{assetId}` hoặc query vaultId trên endpoint detail cũ. Đọc response.items như trước. Không gọi list cũ thiếu vaultId trên màn hình kho vì đó vẫn là dashboard tài sản của mọi kho thuộc Owner. Backend kiểm tra quyền sở hữu kho, lọc trước phân trang và trả 404 khi asset không thuộc kho, kể cả cùng Owner. Không thay schema hoặc request tạo tài sản.
+# Nhãn Owner và tài sản trong danh sách đơn Executor
+
+GET `/api/executor/handovers` trả thêm `items[].ownerName` và `items[].cases[].assetName`; detail cùng shape không có lớp items. Hiển thị Owner bằng ownerName hoặc owner.fullName như cũ. Hiển thị tài sản theo cases vì đơn có thể nhiều tài sản/người thụ hưởng; các ID và phân trang không đổi. Không cần gọi API Owner để tra tên tài sản.

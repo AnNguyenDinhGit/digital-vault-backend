@@ -1,6 +1,6 @@
 # Hướng dẫn test toàn bộ API LegacyVault / DigitalVault
 
-Cập nhật theo mã nguồn ngày 24/10/2026. Đây là tài liệu test tổng hợp: **95 operation trong controller**, callback OIDC và SignalR. Có thể thực hiện luồng chính chỉ với tài liệu này và Swagger, không cần đọc các hướng dẫn lịch sử. “Có endpoint” không đồng nghĩa mọi nhóm đã được test production; xem giới hạn ở cuối.
+Cập nhật theo mã nguồn ngày 24/10/2026. Đây là tài liệu test tổng hợp: **97 operation trong controller**, callback OIDC và SignalR. Có thể thực hiện luồng chính chỉ với tài liệu này và Swagger, không cần đọc các hướng dẫn lịch sử. “Có endpoint” không đồng nghĩa mọi nhóm đã được test production; xem giới hạn ở cuối.
 
 ## 1. Chuẩn bị môi trường và Swagger
 
@@ -132,8 +132,10 @@ Tất cả endpoint phần 5–8 cần Owner Active và sở hữu tài nguyên.
 | PUT | `/api/owner/vaults/{vaultId}` | Cùng body tạo kho → 200 VaultDto |
 | POST | `/api/owner/vaults/{vaultId}/close` | Không body → 204, đóng mềm |
 | POST | `/api/owner/assets` | Body dưới → 201 AssetDto + Location |
-| GET | `/api/owner/assets` | page/pageSize → PageDto<AssetDto> |
-| GET | `/api/owner/assets/{assetId}` | 200 AssetDto |
+| GET | `/api/owner/assets` | page/pageSize, vaultId tùy chọn → PageDto<AssetDto>; có vaultId thì chỉ kho đang chọn |
+| GET | `/api/owner/assets/{assetId}` | vaultId tùy chọn để kiểm tra asset thuộc kho → 200 AssetDto |
+| GET | `/api/owner/vaults/{vaultId}/assets` | page/pageSize → PageDto<AssetDto> chỉ trong kho của Owner |
+| GET | `/api/owner/vaults/{vaultId}/assets/{assetId}` | 200 AssetDto; asset thuộc kho khác kể cả cùng Owner → 404 |
 | PUT | `/api/owner/assets/{assetId}` | name/type/description, không vaultId → 200 AssetDto |
 | POST | `/api/owner/assets/{assetId}/revoke` | Không body → 204, thu hồi mềm |
 
@@ -146,6 +148,23 @@ Tạo tài sản:
 Vault name tối đa 100, description 500. Asset name 100, type ASCII in được tối đa 50, description 4000. VaultDto: `vaultId,name,description,status`; AssetDto: `assetId,name,type,description,status,documents`. Không gửi OwnerAlive/DeathCertificate để tạo kho/tài sản.
 
 Test CRUD/close/revoke trên kho riêng **chưa có hồ sơ đang bảo vệ**. Kho có đơn Pending_Executor/Draft/đang pháp lý/đã hoàn tất không được sửa tùy ý (409). Cancelled/Declined giải phóng gate nếu không còn đơn khác bảo vệ. Dùng Owner B truy cập/sửa/download tài sản A → 404, không thấy dữ liệu A trong list.
+
+### Mở kho chỉ thấy tài sản của kho đó
+
+Khi tạo tài sản, POST body `vaultId` đã lưu quan hệ tài sản–kho trong database. Khi mở màn hình chi tiết kho, frontend phải gửi đúng vaultId đang chọn:
+
+```http
+GET /api/owner/vaults/123/assets?page=1&pageSize=20
+Authorization: Bearer <ownerAccessToken>
+```
+
+Hoặc giữ endpoint cũ nhưng thêm query: `GET /api/owner/assets?vaultId=123&page=1&pageSize=20`. Cả hai trả `{ page, pageSize, items }` cùng schema AssetDto như cũ. Lọc cả OwnerId và VaultId trong DAL trước bước phân trang; không lấy tất cả tài sản rồi chỉ dựa vào frontend ẩn bớt. Kho rỗng/trang hết dữ liệu trả items rỗng, không fallback toàn bộ kho khác.
+
+Nhấn xem một tài sản trong kho: GET `/api/owner/vaults/123/assets/456`, hoặc GET `/api/owner/assets/456?vaultId=123`. Backend kiểm tra Owner sở hữu kho và tài sản 456 thực sự thuộc kho 123. Tài sản của kho khác **cùng Owner** cũng trả 404 khi gọi theo scope này; kho Owner khác hoặc không tồn tại trả 404. vaultId 0/âm → 400; sai role → 403, thiếu JWT → 401. Phân trang giữ quy tắc chung.
+
+GET `/api/owner/assets` không có vaultId và GET `/api/owner/assets/{assetId}` không có vaultId vẫn giữ hành vi cũ cho dashboard toàn bộ tài sản của chính Owner. Vì backend không biết UI đang mở kho nào nếu request không gửi ID kho, frontend cần chuyển màn hình chi tiết kho sang một trong hai cách gọi có scope trên. Không sửa mã frontend trong thay đổi backend này.
+
+Test Swagger: tạo kho A/B cùng Owner, mỗi kho có tài sản, rồi tạo thêm tài sản thứ hai của A sau tài sản B để kiểm tra lọc trước phân trang. GET kho A phải chỉ có hai tài sản A; pageSize=1 trang 1/2 không được lẫn asset B; kho B chỉ có B. Thử detail A với asset B → 404; token Owner khác và vaultId không tồn tại/không hợp lệ phải bị chặn. API toàn bộ tài sản vẫn chỉ bao gồm các kho của Owner đăng nhập.
 
 ## 6. Owner: người thụ hưởng và phân bổ
 
@@ -206,7 +225,7 @@ Lập đơn cần kho Active, tài sản Active có tài liệu Active và phân
 
 Nút “Tôi vẫn còn sống” lưu PROOF_OF_LIFE và audit, giữ lịch hiện có; không ghi đè USERS.Status. Lần đầu mặc định 30 ngày, grace 14 ngày; chưa có job tự nhắc/đánh dấu mất. Không bấm không đồng nghĩa đã mất. Có giấy chứng tử đang xử lý hoặc hồ sơ pháp lý đã duyệt → POST 409, không hủy pháp lý; GET vẫn đọc lịch sử. Đây là lời tự xác nhận, không phải xác minh y tế/pháp lý.
 
-HandoverDto: `requestId,vaultId,requestType,status,initiatedAt,documents,cases,owner,executorId,executorName,declineReason,declinedAt,submittedAt,completedAt`. Cases có `handoverId,assetId,beneficiaryId,status`; lưu handoverId dành cho bước receipt.
+HandoverDto: `requestId,vaultId,requestType,status,initiatedAt,documents,cases,owner,ownerName,executorId,executorName,declineReason,declinedAt,submittedAt,completedAt`. Cases trong handover có `handoverId,assetId,assetName,beneficiaryId,status`; lưu handoverId dành cho bước receipt. ownerName lấy từ owner.fullName, không lấy tên Executor thay Owner.
 
 Ba API Owner POST tạo handover, GET list và GET detail đều trả `executorId`/`executorName` theo Executor gắn với **đơn đó**, không bị thay bằng người vừa được gán cho kho sau này. GET Owner list/detail có thêm `declineReason`/`declinedAt` cho Declined. Không thêm cột: reason đọc từ thông báo `Executor declined handover` của đúng Owner và mã đơn, thời gian từ audit `DeclineHandover`. Chưa từ chối hoặc dữ liệu cũ thiếu bằng chứng tương ứng thì null; không lấy comment Rejected của LegalVerifier làm lý do Executor từ chối. `declinedAt` trả UTC. POST tạo đơn mới chưa có quyết định nên hai trường này null.
 
@@ -244,6 +263,21 @@ Revoke: kho Active và chưa có đơn được nhận/xử lý; chưa tạo đ�
 | GET | `/api/executor/handovers/{requestId}/legal-verifiers` | Mảng `{userId,fullName}` người xác minh hợp lệ |
 
 Màn hình tất cả đơn dùng overview mặc định `assignedOnly=false`: trả Owner `{userId,fullName}`, vaultName, Executor, trạng thái/thời gian, `isAssignedToMe`; không trả file/contact/danh sách case riêng tư. Inbox chờ quyết định dùng `?assignedOnly=true&status=Pending_Executor`. Quyền tổng quan không cho nhận/từ chối/đọc chi tiết đơn của người khác.
+
+GET `/api/executor/handovers` và detail trả thêm tên cho UI: `items[].ownerName` và `items[].cases[].assetName` (detail bỏ tiền tố items[]). Giữ `owner.fullName` và các ID để frontend cũ tiếp tục hoạt động. Ví dụ một item rút gọn:
+
+```json
+{
+  "requestId": 123,
+  "ownerName": "Nguyen Van A",
+  "owner": { "userId": 1, "fullName": "Nguyen Van A" },
+  "cases": [
+    { "handoverId": 10, "assetId": 45, "assetName": "Tài khoản tiết kiệm", "beneficiaryId": 2, "status": "Pending" }
+  ]
+}
+```
+
+Một đơn nhiều tài sản phải hiển thị tên theo từng case; nhiều người thụ hưởng cùng tài sản có thể lặp assetName ở các case, vì đây là phần bàn giao riêng. Không thêm field assetName đơn lẻ ở cấp request dễ làm mất thông tin. Test JSON list phải có hai field mới, tên đúng từng asset khi một đơn có nhiều asset/case; quyền và page/pageSize không đổi.
 
 Chỉ Pending_Executor được accept/decline. Accept kiểm tra lại điều kiện, không bypass pháp lý. Decline bắt buộc reason không trắng ≤2000, đóng case Cancelled, thu hồi assignment, lưu audit và thông báo cho Owner cùng mã đơn/lý do. Owner đọc lý do trong notifications, chọn Executor khác rồi tạo **đơn mới**. Executor giữ quyền đọc lịch sử Declined của chính đơn, không sửa/upload/accept lại. Hai quyết định cạnh tranh không cùng commit, bên thua 409; gọi lặp 409.
 
@@ -459,12 +493,16 @@ State machine chính: `Pending_Executor → Draft → Pending_Legal → Approved
 - [ ] Swagger JSON trả 200, không trùng method+route; CORS chỉ origin cấu hình; download expose headers cần thiết.
 - [ ] Admin role sai/tên role không tồn tại được ghi nhận đúng; chat LegalVerifier và realtime được ghi nhận theo giới hạn thực tế.
 
-Sau pull/integrate main `635b589`, build thành công và console harness **531 kiểm tra đạt**. Fixture và assertion chữ ký được cập nhật công khai theo contract key chung của main, vẫn kiểm tra chữ ký sai key/bytes bị sửa; code Verify production được giữ nguyên. Có HTTP Swagger JSON, completed overview mới của main, JWT/Google/2FA, SQL truy vấn lý do từ chối, SQLite relational rollback và cạnh tranh revoke/accept qua nhiều DbContext. Full build có 3 warning có sẵn (mailSender chưa dùng, using trùng); lần build tăng dần cuối không có lỗi. **Không đồng nghĩa 95 endpoint đã được test thủ công hay mọi nhóm Admin/chat/encryption có integration coverage đầy đủ.** Không gọi Google/SMTP/SQL Server thật trong các đợt test cô lập này.
+Sau pull/integrate main `635b589`, build thành công và console harness **531 kiểm tra đạt**. Fixture và assertion chữ ký được cập nhật công khai theo contract key chung của main, vẫn kiểm tra chữ ký sai key/bytes bị sửa; code Verify production được giữ nguyên. Có HTTP Swagger JSON, completed overview mới của main, JWT/Google/2FA, SQL truy vấn lý do từ chối, SQLite relational rollback và cạnh tranh revoke/accept qua nhiều DbContext. Full build có 3 warning có sẵn (mailSender chưa dùng, using trùng); lần build tăng dần cuối không có lỗi. **Không đồng nghĩa 97 endpoint đã được test thủ công hay mọi nhóm Admin/chat/encryption có integration coverage đầy đủ.** Không gọi Google/SMTP/SQL Server thật trong các đợt test cô lập này.
 
 Bổ sung API danh sách tài sản LegalVerifier ngày 24/10/2026: build thành công (0 lỗi, 3 warning có sẵn), console harness **554 kiểm tra đạt**. Test HTTP/SQLite bao gồm đúng/sai role, không được phân công, request không tồn tại, page không hợp lệ, hai trang riêng biệt, nhiều case cùng một asset, asset ngoài case, metadata tài liệu và tài liệu bị thu hồi. Swagger JSON cũng được gọi thực tế qua TestServer; không khởi động Program.cs để seed database thật.
 
+Bổ sung lọc tài sản theo kho ngày 24/10/2026: build thành công (0 lỗi, 3 warning có sẵn), console harness **578 kiểm tra đạt**. Test HTTP/SQLite kiểm tra hai kho cùng Owner, kho Owner khác, lọc trước phân trang với assetId xen kẽ, kho rỗng, detail sai kho, input không hợp lệ, JWT/role và endpoint dashboard cũ. Không thay database/schema thật hoặc mã frontend; UI cần gửi vaultId theo phần 5.
+
+Bổ sung nhãn Owner/tài sản trên handover: build thành công (0 lỗi, 3 warning có sẵn), console harness **581 kiểm tra đạt**. Kiểm tra JSON list Executor có ownerName/cases.assetName, giữ owner.fullName/ID, detail cùng mapping và đúng tên từng tài sản khi một đơn chứa nhiều asset và beneficiary.
+
 Chưa xác minh schema/concurrency SQL Server thật, chứng thư production, Google/SMTP thật và realtime hai phía. Hai status mới Pending_Executor/Declined vừa varchar(20) theo scaffold; nếu database thật có CHECK constraint giới hạn enum thì cần review tương thích trước deploy, không tự migration theo hướng dẫn này. OTP/challenge tạm nằm trong memory của instance; restart/multi-instance cần đánh giá vận hành, không coi như đã có distributed store.
 
-Chưa có API public invitation người chưa đăng ký, enroll 2FA, reset/change password hoặc update profile dù có DTO/service rời rạc; không tự suy ra endpoint từ tên class. Swagger/OpenAPI và `/hubs/chat/negotiate` là endpoint framework, không tính vào 95 controller operations. Không có API Staff/intake Staff.
+Chưa có API public invitation người chưa đăng ký, enroll 2FA, reset/change password hoặc update profile dù có DTO/service rời rạc; không tự suy ra endpoint từ tên class. Swagger/OpenAPI và `/hubs/chat/negotiate` là endpoint framework, không tính vào 97 controller operations. Không có API Staff/intake Staff.
 
 Request mẫu tiện chạy: `LegacyVault.http` ở root; tài liệu này vẫn là hướng dẫn đầy đủ độc lập. Khi thêm/xóa endpoint, cập nhật bảng tương ứng và đối chiếu toàn bộ controller/Swagger để không thiếu operation.
