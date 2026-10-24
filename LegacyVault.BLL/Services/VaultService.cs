@@ -127,17 +127,25 @@ public sealed class VaultService(
         return await new ManagementService(repository, workflow ?? throw new WorkflowException(503, "Workflow persistence is not configured."), store, protection).CreateRequest(user, vaultId, ct);
     }
 
-    public async Task<PageDto<AssetDto>> OwnerAssets(int user, int page, int pageSize, CancellationToken ct)
+    public async Task<PageDto<AssetDto>> OwnerAssets(int user, int page, int pageSize, CancellationToken ct, int? vaultId = null)
     {
         await Role(user, OwnerRole, ct);
         ManagementService.Paging(page, pageSize);
-        var allAssets = await repository.OwnerAssets(user, ct);
-        var total = allAssets.Count;
+        if (vaultId is <= 0) throw new WorkflowException(400, "vaultId must be positive.");
+        if (vaultId is not null) _ = await OwnedVault(user, vaultId.Value, ct);
+        var allAssets = await repository.OwnerAssets(user, ct, vaultId);
         var items = allAssets.Skip((page - 1) * pageSize).Take(pageSize).Select(Map).ToArray();
         return new PageDto<AssetDto>(page, pageSize, items);
     }
 
-    public async Task<AssetDto> OwnerAsset(int user, int asset, CancellationToken ct) => Map(await Owned(user, asset, ct));
+    public async Task<AssetDto> OwnerAsset(int user, int asset, CancellationToken ct, int? vaultId = null)
+    {
+        if (vaultId is <= 0) throw new WorkflowException(400, "vaultId must be positive.");
+        if (vaultId is not null) _ = await OwnedVault(user, vaultId.Value, ct);
+        var ownedAsset = await Owned(user, asset, ct);
+        if (vaultId is not null && ownedAsset.VaultId != vaultId.Value) throw new WorkflowException(404, "Asset not found in the selected vault.");
+        return Map(ownedAsset);
+    }
 
     public async Task<PageDto<BeneficiaryDto>> Beneficiaries(int user, int? asset, int page, int pageSize, CancellationToken ct)
     {

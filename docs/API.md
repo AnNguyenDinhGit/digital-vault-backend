@@ -6,6 +6,14 @@
 
 # LegacyVault API
 
+## Tên Owner và tài sản trong đơn Executor
+
+GET `/api/executor/handovers` giữ PageDto, thêm `items[].ownerName` (cùng giá trị owner.fullName) và `items[].cases[].assetName`. Tên tài sản ở từng case vì một đơn có thể chứa nhiều tài sản/người thụ hưởng; không gán một assetName chung cho cả đơn. Mapping được dùng chung cho detail handover nên GET `/api/executor/handovers/{requestId}` cũng có các field này. Giữ ID, nested Owner, quyền theo phân công và phân trang.
+
+## Owner xem tài sản theo kho
+
+GET `/api/owner/vaults/{vaultId}/assets` và GET `/api/owner/vaults/{vaultId}/assets/{assetId}` kiểm tra ownership và phạm vi kho. API cũ GET `/api/owner/assets` và GET `/api/owner/assets/{assetId}` cũng nhận query vaultId tùy chọn. List vẫn phân trang; kho rỗng trả items rỗng, sai kho/Owner trả 404. Frontend màn hình chi tiết kho phải gửi vaultId hoặc dùng nested route; không gửi ID kho thì endpoint cũ vẫn là dashboard mọi tài sản của chính Owner. Xem phần 5 của [hướng dẫn tổng hợp](Huong-dan-test-toan-bo-API.md).
+
 ## LegalVerifier xem danh sách tài sản
 
 GET `/api/legal/handovers/{requestId}/assets?page=1&pageSize=20` trả PageDto gồm assetId/name/type/description/status và documents (documentId/fileName/fileType/isEncrypted/status). Chỉ người xác minh được giao, không xung đột lợi ích; chỉ tài sản trong case, mỗi asset một lần, loại tài liệu Revoked. Không trả file/storage path. Tải nội dung qua endpoint asset-documents hiện có; xem phần 11 của [hướng dẫn tổng hợp](Huong-dan-test-toan-bo-API.md).
@@ -14,7 +22,7 @@ GET `/api/legal/handovers/{requestId}/assets?page=1&pageSize=20` trả PageDto g
 
 POST `/api/owner/vaults/{vaultId}/handovers`, GET `/api/owner/handovers`, GET `/api/owner/handovers/{requestId}` bổ sung executorName/declineReason/declinedAt, giữ executorId và phân trang. Chưa từ chối hoặc thiếu dữ liệu lịch sử thì null. GET `/api/owner/vaults/{vaultId}/executor` trả vaultId/executorId/fullName/status/assignedAt (ưu tiên hiệu lực, nếu không có thì lịch sử gần nhất). POST `/api/owner/vaults/{vaultId}/executor/revoke` không body, chỉ trả 204 sau khi lưu Status=Revoked; cancel đơn Pending_Executor, chặn hồ sơ đã nhận/xử lý. Xem phần 8 trong [hướng dẫn tổng hợp](Huong-dan-test-toan-bo-API.md).
 
-**Hướng dẫn test tổng hợp hiện tại:** [Huong-dan-test-toan-bo-API.md](Huong-dan-test-toan-bo-API.md). File này bao phủ đủ 95 controller operations cùng callback OIDC/SignalR, có input, quyền, response, trạng thái, flow test và giới hạn thực tế. Dùng file tổng hợp khi kiểm thử thay cho các mô tả lịch sử chưa được đồng bộ bên dưới.
+**Hướng dẫn test tổng hợp hiện tại:** [Huong-dan-test-toan-bo-API.md](Huong-dan-test-toan-bo-API.md). File này bao phủ đủ 97 controller operations cùng callback OIDC/SignalR, có input, quyền, response, trạng thái, flow test và giới hạn thực tế. Dùng file tổng hợp khi kiểm thử thay cho các mô tả lịch sử chưa được đồng bộ bên dưới.
 
 ## Tiếp nhận bàn giao và chi tiết Executor
 

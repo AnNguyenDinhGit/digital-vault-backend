@@ -32,7 +32,8 @@ public static class MappingExtensions
                 .Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted))
                 .ToArray(),
             r.HandoverCases
-                .Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status))
+                .Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)
+                { AssetName = c.Assignment.Asset?.AssetName })
                 .ToArray()
         )
         {

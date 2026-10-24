@@ -222,7 +222,8 @@ sealed class FakeRepository : IVaultRepository
         Add(user);
         await Save(ct);
     }
-    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct) => Task.FromResult(new List<DigitalAsset> { asset });
+    public Task<List<DigitalAsset>> OwnerAssets(int owner, CancellationToken ct, int? vaultId = null) =>
+        Task.FromResult(new[] { asset }.Where(a => vaultId == null || a.VaultId == vaultId).ToList());
     public Task<DigitalAsset?> Asset(int id, CancellationToken ct) => Task.FromResult<DigitalAsset?>(id == 10 ? asset : null);
     public Task<List<HandoverRequest>> Requests(int executor, CancellationToken ct) => Task.FromResult(new List<HandoverRequest> { Handover });
     public Task<HandoverRequest?> Request(int id, CancellationToken ct) => Task.FromResult<HandoverRequest?>(id == 20 ? Handover : null);

@@ -5,6 +5,7 @@ public sealed record BeneficiaryDto(int AssetId, int BeneficiaryId, string FullN
 public sealed record HandoverDto(int RequestId, int VaultId, string RequestType, string Status, DateTime InitiatedAt, IReadOnlyList<DocumentDto> Documents, IReadOnlyList<CaseDto> Cases)
 {
     public OwnerSummaryDto? Owner { get; init; }
+    public string? OwnerName => Owner?.FullName;
     public int? ExecutorId { get; init; }
     public string? ExecutorName { get; init; }
     public string? DeclineReason { get; init; }
@@ -12,7 +13,10 @@ public sealed record HandoverDto(int RequestId, int VaultId, string RequestType,
     public DateTime? SubmittedAt { get; init; }
     public DateTime? CompletedAt { get; init; }
 }
-public sealed record CaseDto(int HandoverId, int AssetId, int BeneficiaryId, string Status);
+public sealed record CaseDto(int HandoverId, int AssetId, int BeneficiaryId, string Status)
+{
+    public string? AssetName { get; init; }
+}
 public sealed record InheritanceDto(int HandoverId, decimal Allocation, AssetDto Asset);
 public sealed record UploadFile(string FileName, string FileType, byte[] Content);
 public sealed record DocumentContent(string FileName, string FileType, byte[] Content, bool SignatureValid, string? Purpose = null);

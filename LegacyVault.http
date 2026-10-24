@@ -315,3 +315,17 @@ Authorization: Bearer {{ownerToken}}
 ### Assigned LegalVerifier: paginated assets belonging to this handover's cases
 GET {{baseUrl}}/api/legal/handovers/{{requestId}}/assets?page=1&pageSize=20
 Authorization: Bearer {{legalToken}}
+### Owner: list only assets in the currently selected owned vault
+GET {{baseUrl}}/api/owner/vaults/{{vaultId}}/assets?page=1&pageSize=20
+Authorization: Bearer {{ownerToken}}
+
+### Owner: equivalent query filter for existing asset list endpoint
+GET {{baseUrl}}/api/owner/assets?vaultId={{vaultId}}&page=1&pageSize=20
+Authorization: Bearer {{ownerToken}}
+
+### Owner: detail must belong to both authenticated Owner and selected vault
+GET {{baseUrl}}/api/owner/vaults/{{vaultId}}/assets/{{assetId}}
+Authorization: Bearer {{ownerToken}}
+### Executor: paginated handovers with ownerName and cases[].assetName labels
+GET {{baseUrl}}/api/executor/handovers?page=1&pageSize=20
+Authorization: Bearer {{operatorToken}}
