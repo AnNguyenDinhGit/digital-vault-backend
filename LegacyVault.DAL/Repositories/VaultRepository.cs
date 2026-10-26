@@ -10,6 +10,9 @@ public interface IVaultRepository
 {
     IQueryable<User> QueryUsers();
     IQueryable<AuditLog> QueryAuditLogs();
+    IQueryable<Role> QueryRoles();
+    IQueryable<EncryptionKey> QueryEncryptionKeys();
+    Task<List<EncryptionKey>> ActiveEncryptionKeys(CancellationToken ct);
     Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct);
     Task<User?> User(int id, CancellationToken ct);
     Task<User?> LoginUser(string email, CancellationToken ct);
@@ -33,6 +36,10 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
     public IQueryable<User> QueryUsers() => db.Users.Include(x => x.Roles).AsNoTracking();
     // Thêm phương thức này bên dưới QueryUsers()
     public IQueryable<AuditLog> QueryAuditLogs() => db.AuditLogs.Include(a => a.User).AsNoTracking();
+    public IQueryable<Role> QueryRoles() => db.Roles.Include(r => r.Users).AsNoTracking();
+    public IQueryable<EncryptionKey> QueryEncryptionKeys() => db.EncryptionKeys.Include(k => k.Asset).AsNoTracking();
+    public Task<List<EncryptionKey>> ActiveEncryptionKeys(CancellationToken ct)
+        => db.EncryptionKeys.Include(k => k.Asset).Where(k => k.Status == "Active").ToListAsync(ct);
 
     public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct)
         => db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == token, ct);

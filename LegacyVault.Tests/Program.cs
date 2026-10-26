@@ -148,6 +148,7 @@ await MainFlowTests.Run(Check);
 await BeneficiaryAssignmentTests.Run(Check);
 await GoogleLoginTests.Run(Check);
 await LoginSecurityTests.Run(Check);
+await AdminFlowTests.Run(Check);
 try { await JwtWorkflowTests.Run(Check); }
 catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; return; }
 Console.WriteLine($"{checks} checks passed.");
@@ -183,6 +184,9 @@ sealed class FakeRepository : IVaultRepository
 {
     public IQueryable<User> QueryUsers() => new List<User>().AsQueryable();
     public IQueryable<AuditLog> QueryAuditLogs() => new List<AuditLog>().AsQueryable();
+    public IQueryable<Role> QueryRoles() => new List<Role>().AsQueryable();
+    public IQueryable<EncryptionKey> QueryEncryptionKeys() => new List<EncryptionKey>().AsQueryable();
+    public Task<List<EncryptionKey>> ActiveEncryptionKeys(CancellationToken ct) => Task.FromResult(new List<EncryptionKey>());
     public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct) => Task.FromResult<RefreshToken?>(null);
     public List<object> Added { get; } = new();
     public bool FailSave { get; set; }

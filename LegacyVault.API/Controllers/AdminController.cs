@@ -1,4 +1,4 @@
-﻿using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -47,4 +47,36 @@ public sealed class AdminController(AdminService adminService) : VaultController
         [FromQuery] string? action = null,
         CancellationToken ct = default)
         => adminService.GetAuditLogsAsync(UserId, page, pageSize, action, ct);
+
+    [HttpGet("roles")]
+    public Task<IReadOnlyList<RolePermissionDto>> GetRoles(CancellationToken ct)
+        => adminService.GetRolesAsync(UserId, ct);
+
+    [HttpGet("security/alerts")]
+    public Task<SecurityDashboardDto> GetSecurityDashboard(CancellationToken ct)
+        => adminService.GetSecurityDashboardAsync(UserId, ct);
+
+    [HttpGet("system/config")]
+    public Task<SystemConfigDto> GetSystemConfig(CancellationToken ct)
+        => adminService.GetSystemConfigAsync(UserId, ct);
+
+    [HttpPut("system/config")]
+    public Task<SystemConfigDto> UpdateSystemConfig([FromBody] UpdateSystemConfigInput input, CancellationToken ct)
+        => adminService.UpdateSystemConfigAsync(UserId, input, ct);
+
+    [HttpGet("system/key-rotation")]
+    public Task<KeyRotationSummaryDto> GetKeyRotationSummary(CancellationToken ct)
+        => adminService.GetKeyRotationSummaryAsync(UserId, ct);
+
+    [HttpPost("system/key-rotation/rotate")]
+    public Task<KeyRotationSummaryDto> RotateEncryptionKeys(CancellationToken ct)
+        => adminService.RotateEncryptionKeysAsync(UserId, ct);
+
+    [HttpGet("integrations")]
+    public Task<IReadOnlyList<ThirdPartyIntegrationDto>> GetIntegrations(CancellationToken ct)
+        => adminService.GetIntegrationsAsync(UserId, ct);
+
+    [HttpPost("integrations/{serviceId}/ping")]
+    public Task<TestIntegrationResultDto> PingIntegration(string serviceId, CancellationToken ct)
+        => adminService.PingIntegrationAsync(UserId, serviceId, ct);
 }

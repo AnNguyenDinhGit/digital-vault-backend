@@ -12,6 +12,7 @@
 .artifacts/
 /AllCode.txt
 /LegacyVault.sln
+/NOTES.md
 
 # Ignore appsettings secrets
 **/appsettings.json
