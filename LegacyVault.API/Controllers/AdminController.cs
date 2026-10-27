@@ -40,6 +40,20 @@ public sealed class AdminController(AdminService adminService) : VaultController
         return NoContent();
     }
 
+    [HttpPut("users/{userId:int}")]
+    public async Task<ActionResult<UserAdminDto>> UpdateUser(int userId, [FromBody] UpdateUserByAdminInput input, CancellationToken ct)
+    {
+        var result = await adminService.UpdateUserAsync(UserId, userId, input, ct);
+        return Ok(result);
+    }
+
+    [HttpPost("users/{userId:int}/reset-password")]
+    public async Task<IActionResult> ResetPassword(int userId, [FromBody] ResetPasswordByAdminInput input, CancellationToken ct)
+    {
+        await adminService.ResetUserPasswordAsync(UserId, userId, input, ct);
+        return Ok(new { message = "Đặt lại mật khẩu cho người dùng thành công." });
+    }
+
     [HttpGet("audit-logs")]
     public Task<PageDto<AuditLogDto>> GetAuditLogs(
         [FromQuery] int page = 1,

@@ -432,6 +432,84 @@ public sealed class AdminService(IVaultRepository repository)
         await repository.Save(ct);
     }
 
+    public async Task<UserAdminDto> UpdateUserAsync(int adminUserId, int targetUserId, UpdateUserByAdminInput input, CancellationToken ct)
+    {
+        await RequireAdmin(adminUserId, ct);
+        var targetUser = await repository.User(targetUserId, ct) ?? throw new WorkflowException(404, "Không tìm thấy người dùng.");
+
+        if (!string.IsNullOrWhiteSpace(input.FullName))
+            targetUser.FullName = input.FullName.Trim();
+
+        if (input.Phone is not null)
+            targetUser.Phone = string.IsNullOrWhiteSpace(input.Phone) ? null : input.Phone.Trim();
+
+        if (input.IdentityNumber is not null)
+            targetUser.IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber) ? null : input.IdentityNumber.Trim();
+
+        targetUser.UpdatedAt = DateTime.UtcNow;
+        repository.Add(new AuditLog
+        {
+            UserId = adminUserId,
+            Action = "AdminUpdateUserProfile",
+            EntityType = "User",
+            EntityId = targetUserId,
+            Result = "Success",
+            Timestamp = DateTime.UtcNow
+        });
+        await repository.Save(ct);
+
+        return new UserAdminDto(
+            targetUser.UserId,
+            targetUser.FullName,
+            targetUser.Email,
+            targetUser.Phone,
+            targetUser.IdentityNumber,
+            targetUser.Status,
+            targetUser.Roles.Select(r => r.RoleName).ToArray(),
+            targetUser.CreatedAt,
+            targetUser.UpdatedAt
+        );
+    }
+
+    public async Task ResetUserPasswordAsync(int adminUserId, int targetUserId, ResetPasswordByAdminInput input, CancellationToken ct)
+    {
+        await RequireAdmin(adminUserId, ct);
+        var targetUser = await repository.User(targetUserId, ct) ?? throw new WorkflowException(404, "Không tìm thấy người dùng.");
+
+        var auth = targetUser.Authentications.OrderByDescending(a => a.CreatedAt).FirstOrDefault();
+        var now = DateTime.UtcNow;
+        if (auth is null)
+        {
+            auth = new Authentication
+            {
+                UserId = targetUserId,
+                PasswordHash = IdentityService.HashPassword(input.NewPassword),
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            targetUser.Authentications.Add(auth);
+        }
+        else
+        {
+            auth.PasswordHash = IdentityService.HashPassword(input.NewPassword);
+            auth.FailedLoginCount = 0;
+            auth.LockedUntil = null;
+            auth.UpdatedAt = now;
+        }
+
+        targetUser.UpdatedAt = now;
+        repository.Add(new AuditLog
+        {
+            UserId = adminUserId,
+            Action = "AdminResetUserPassword",
+            EntityType = "User",
+            EntityId = targetUserId,
+            Result = "Success",
+            Timestamp = now
+        });
+        await repository.Save(ct);
+    }
+
 
     // 1. Lấy danh sách Audit Logs cho Step 2 (Giám sát & Cảnh báo)
     // 1. Lấy danh sách Audit Logs cho Step 2 (Giám sát & Cảnh báo)

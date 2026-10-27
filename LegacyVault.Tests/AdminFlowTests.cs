@@ -146,5 +146,102 @@ internal static class AdminFlowTests
         var pingResult = await adminService.PingIntegrationAsync(adminUser.UserId, "ekyc-vnpt", default);
         check(pingResult.Success, "ping eKYC service succeeds");
         check(await db.AuditLogs.AnyAsync(a => a.Action == "TestIntegrationConnection"), "ping integration persists audit log");
+
+        // 7. Test Admin User Edit & Password Reset
+        var updatedUser = await adminService.UpdateUserAsync(adminUser.UserId, normalUser.UserId, new UpdateUserByAdminInput
+        {
+            FullName = "Updated Owner Name",
+            Phone = "0909999888",
+            IdentityNumber = "001200999999"
+        }, default);
+        check(updatedUser.FullName == "Updated Owner Name" && updatedUser.Phone == "0909999888", "admin successfully updates user profile");
+
+        await adminService.ResetUserPasswordAsync(adminUser.UserId, normalUser.UserId, new ResetPasswordByAdminInput
+        {
+            NewPassword = "AdminResetPass123!"
+        }, default);
+        check(await db.AuditLogs.AnyAsync(a => a.Action == "AdminResetUserPassword"), "admin password reset persists audit log");
+
+        // 8. Test User Self-Profile Update & Change Password with OTP
+        var fakeSender = new TestOtpSender();
+        var identityService = new IdentityService(repo, fakeSender);
+
+        var selfProfile = await identityService.UpdateProfileAndGetMe(normalUser.UserId, new UpdateProfileInput
+        {
+            FullName = "Owner Self Updated",
+            Phone = "0911222333"
+        }, default);
+        check(selfProfile.FullName == "Owner Self Updated", "user successfully updates own profile");
+
+        // Request Password Change (Validates old pass: "AdminResetPass123!")
+        var challenge = await identityService.RequestPasswordChange(normalUser.UserId, new ChangePasswordRequestInput
+        {
+            OldPassword = "AdminResetPass123!",
+            NewPassword = "UserNewPass1234!",
+            ConfirmPassword = "UserNewPass1234!"
+        }, default);
+        check(!string.IsNullOrEmpty(challenge.ChallengeId), "password change challenge generated");
+        check(!string.IsNullOrEmpty(fakeSender.LastCode), "OTP code sent to email");
+
+        // Wrong OTP rejection
+        var wrongOtpRejected = false;
+        try
+        {
+            await identityService.ConfirmPasswordChange(normalUser.UserId, new ConfirmChangePasswordInput
+            {
+                ChallengeId = challenge.ChallengeId,
+                Code = "000000"
+            }, default);
+        }
+        catch (WorkflowException ex) when (ex.StatusCode == 400)
+        {
+            wrongOtpRejected = true;
+        }
+        check(wrongOtpRejected, "wrong OTP rejected with 400");
+
+        // Correct OTP confirmation
+        await identityService.ConfirmPasswordChange(normalUser.UserId, new ConfirmChangePasswordInput
+        {
+            ChallengeId = challenge.ChallengeId,
+            Code = fakeSender.LastCode
+        }, default);
+
+        var checkLogin = await identityService.CheckPassword(normalUser.Email, "UserNewPass1234!", default);
+        check(checkLogin.UserId == normalUser.UserId, "new password verified successfully after OTP confirmation");
+        check(await db.AuditLogs.AnyAsync(a => a.Action == "ChangePassword"), "change password persists audit log");
+
+        // 9. Test Registration with Email OTP
+        var regChallenge = await identityService.RequestRegister(new RegisterInput
+        {
+            FullName = "New OTP Registered User",
+            Email = "otpregister@example.test",
+            Password = "OtpRegisterPass123!",
+            ConfirmPassword = "OtpRegisterPass123!",
+            Phone = "0988777666"
+        }, default);
+        check(!string.IsNullOrEmpty(regChallenge.ChallengeId), "registration challenge generated");
+        check(!string.IsNullOrEmpty(fakeSender.LastCode), "registration OTP code sent to email");
+
+        var regResult = await identityService.ConfirmRegister(new ConfirmRegisterInput
+        {
+            ChallengeId = regChallenge.ChallengeId,
+            Code = fakeSender.LastCode
+        }, default);
+        check(regResult.UserId > 0 && regResult.Email == "otpregister@example.test", "user registered successfully after OTP confirmation");
+
+        var regLogin = await identityService.CheckPassword("otpregister@example.test", "OtpRegisterPass123!", default);
+        check(regLogin.UserId == regResult.UserId, "newly registered user can login with confirmed credentials");
+    }
+
+    private sealed class TestOtpSender : IOtpSender
+    {
+        public string LastCode { get; private set; } = "";
+        public Task Send(string email, string code, CancellationToken ct) { LastCode = code; return Task.CompletedTask; }
+        public Task SendEmail(string email, string subject, string body, CancellationToken ct)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(body, @"\b\d{6}\b");
+            if (match.Success) LastCode = match.Value;
+            return Task.CompletedTask;
+        }
     }
 }

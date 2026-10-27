@@ -208,6 +208,22 @@ public sealed class AuthController(
         return StatusCode(StatusCodes.Status201Created, result);
     }
 
+    [HttpPost("register/request"), EnableRateLimiting("otp")]
+    [ProducesResponseType(typeof(RegisterChallengeDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<RegisterChallengeDto>> RequestRegister([FromBody] RegisterInput input, CancellationToken ct)
+    {
+        var result = await identity.RequestRegister(input, ct);
+        return Ok(result);
+    }
+
+    [HttpPost("register/confirm"), EnableRateLimiting("otp")]
+    [ProducesResponseType(typeof(RegistrationDto), StatusCodes.Status201Created)]
+    public async Task<ActionResult<RegistrationDto>> ConfirmRegister([FromBody] ConfirmRegisterInput input, CancellationToken ct)
+    {
+        var result = await identity.ConfirmRegister(input, ct);
+        return StatusCode(StatusCodes.Status201Created, result);
+    }
+
     [HttpPost("login"), EnableRateLimiting("login")]
     [ProducesResponseType(typeof(TokenDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(LoginChallengeDto), StatusCodes.Status202Accepted)]
@@ -237,6 +253,27 @@ public sealed class AuthController(
     [Authorize, HttpGet("me")]
     public Task<MeDto> Me(CancellationToken ct) =>
         identity.Me(UserId, ct);
+
+    [Authorize, HttpPut("profile")]
+    public async Task<ActionResult<MeDto>> UpdateProfile([FromBody] UpdateProfileInput input, CancellationToken ct)
+    {
+        var result = await identity.UpdateProfileAndGetMe(UserId, input, ct);
+        return Ok(result);
+    }
+
+    [Authorize, HttpPost("change-password/request"), EnableRateLimiting("otp")]
+    public async Task<ActionResult<ChangePasswordChallengeDto>> RequestChangePassword([FromBody] ChangePasswordRequestInput input, CancellationToken ct)
+    {
+        var result = await identity.RequestPasswordChange(UserId, input, ct);
+        return Ok(result);
+    }
+
+    [Authorize, HttpPost("change-password/confirm"), EnableRateLimiting("otp")]
+    public async Task<IActionResult> ConfirmChangePassword([FromBody] ConfirmChangePasswordInput input, CancellationToken ct)
+    {
+        await identity.ConfirmPasswordChange(UserId, input, ct);
+        return Ok(new { message = "Đổi mật khẩu thành công." });
+    }
 
     [Authorize, HttpPost("logout")]
     public async Task<IActionResult> Logout([FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] LogoutInput? input, CancellationToken ct)
