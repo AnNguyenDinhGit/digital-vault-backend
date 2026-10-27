@@ -45,6 +45,21 @@ public sealed class CreateUserByAdminInput
     [Required] public string[] Roles { get; init; } = Array.Empty<string>();
 }
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class UpdateUserByAdminInput
+{
+    [StringLength(100)] public string? FullName { get; init; }
+    [StringLength(20)] public string? Phone { get; init; }
+    [StringLength(20)] public string? IdentityNumber { get; init; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class ResetPasswordByAdminInput
+{
+    [Required, StringLength(1024, MinimumLength = 12)]
+    public string NewPassword { get; init; } = null!;
+}
+
 public sealed record AuditLogDto(
     long LogId,
     int? UserId,
