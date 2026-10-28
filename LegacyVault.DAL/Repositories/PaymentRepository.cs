@@ -1,0 +1,82 @@
+using LegacyVault.DAL.Context;
+using LegacyVault.DAL.Entities;
+using Microsoft.EntityFrameworkCore;
+
+namespace LegacyVault.DAL.Repositories;
+
+public sealed record PaymentOrder(string TransactionCode, decimal Amount, string PlanName);
+
+public interface IPaymentRepository
+{
+    Task<List<SubscriptionPlan>> ActivePlans(CancellationToken ct);
+    Task<PaymentOrder> CreateOrder(int userId, int planId, string transactionCode, CancellationToken ct);
+    Task<PaymentTransaction?> Transaction(string transactionCode, CancellationToken ct);
+    Task ApplyGatewayResult(string transactionCode, bool success, CancellationToken ct);
+}
+
+public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentRepository
+{
+    public Task<List<SubscriptionPlan>> ActivePlans(CancellationToken ct) => db.SubscriptionPlans.AsNoTracking()
+        .Where(x => x.IsActive).OrderBy(x => x.Price).ToListAsync(ct);
+
+    public async Task<PaymentOrder> CreateOrder(int userId, int planId, string transactionCode, CancellationToken ct)
+    {
+        var plan = await db.SubscriptionPlans.SingleOrDefaultAsync(x => x.PlanId == planId && x.IsActive, ct)
+            ?? throw new KeyNotFoundException("Subscription plan not found or inactive.");
+        var userExists = await db.Users.AnyAsync(x => x.UserId == userId && x.Status == "Active", ct);
+        if (!userExists) throw new KeyNotFoundException("User not found or inactive.");
+        if (plan.Price <= 0 || plan.Price != decimal.Truncate(plan.Price))
+            throw new InvalidOperationException("VNPay requires a positive whole-VND plan price.");
+
+        var now = DateTime.UtcNow;
+        var subscription = new UserSubscription
+        {
+            UserId = userId, PlanId = plan.PlanId, StartDate = now,
+            EndDate = now.AddDays(plan.DurationDays), Status = "Pending"
+        };
+        db.UserSubscriptions.Add(subscription);
+        db.PaymentTransactions.Add(new PaymentTransaction
+        {
+            UserId = userId, Subscription = subscription, Amount = plan.Price,
+            PaymentMethod = "VNPay", TransactionCode = transactionCode,
+            Status = "Pending", CreatedAt = now
+        });
+        await db.SaveChangesAsync(ct);
+        return new(transactionCode, plan.Price, plan.PlanName);
+    }
+
+    public Task<PaymentTransaction?> Transaction(string transactionCode, CancellationToken ct) =>
+        db.PaymentTransactions.Include(x => x.Subscription).ThenInclude(x => x!.Plan)
+            .SingleOrDefaultAsync(x => x.TransactionCode == transactionCode, ct);
+
+    public async Task ApplyGatewayResult(string transactionCode, bool success, CancellationToken ct)
+    {
+        await using var dbTransaction = await db.Database.BeginTransactionAsync(ct);
+        var payment = await db.PaymentTransactions.Include(x => x.Subscription)
+            .SingleOrDefaultAsync(x => x.TransactionCode == transactionCode, ct);
+        if (payment is null) throw new KeyNotFoundException("Payment transaction not found.");
+        if (payment.Status != "Pending")
+        {
+            if (success && payment.Status != "Success") throw new InvalidOperationException("Payment already has a different final status.");
+            await dbTransaction.CommitAsync(ct);
+            return;
+        }
+
+        payment.Status = success ? "Success" : "Failed";
+        if (payment.Subscription is not null)
+        {
+            if (success)
+            {
+                var now = DateTime.UtcNow;
+                var existing = await db.UserSubscriptions.Where(x => x.UserId == payment.UserId && x.Status == "Active").ToListAsync(ct);
+                foreach (var subscription in existing) { subscription.Status = "Expired"; subscription.EndDate = now; }
+                payment.Subscription.StartDate = now;
+                payment.Subscription.EndDate = now.AddDays((await db.SubscriptionPlans.SingleAsync(x => x.PlanId == payment.Subscription.PlanId, ct)).DurationDays);
+                payment.Subscription.Status = "Active";
+            }
+            else payment.Subscription.Status = "Failed";
+        }
+        await db.SaveChangesAsync(ct);
+        await dbTransaction.CommitAsync(ct);
+    }
+}
