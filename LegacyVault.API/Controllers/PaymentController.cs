@@ -11,6 +11,14 @@ public sealed class PaymentController(VnPayService service) : VaultController
     [AllowAnonymous, HttpGet("plans")]
     public Task<IReadOnlyList<SubscriptionPlanDto>> Plans(CancellationToken ct) => service.Plans(ct);
 
+    [Authorize, HttpGet("me/subscription")]
+    public Task<CurrentSubscriptionDto> CurrentSubscription(CancellationToken ct) => service.CurrentSubscription(UserId, ct);
+
+    [Authorize, HttpGet("me/transactions")]
+    public Task<PaymentTransactionPageDto> MyTransactions([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null, CancellationToken ct = default) =>
+        service.UserHistory(UserId, page, pageSize, status, ct);
+
     [Authorize, HttpPost("vnpay/checkout")]
     public Task<PaymentCheckoutDto> Checkout(CreatePaymentInput input, CancellationToken ct) =>
         service.CreateCheckout(UserId, input.PlanId, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1", ct);

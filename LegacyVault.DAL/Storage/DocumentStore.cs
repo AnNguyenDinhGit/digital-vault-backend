@@ -3,6 +3,7 @@ public interface IDocumentStore
 {
     Task<string> Write(byte[] bytes, CancellationToken ct);
     Task<byte[]> Read(string id, CancellationToken ct);
+    async Task<long> Length(string id, CancellationToken ct) => (await Read(id, ct)).LongLength;
     Task Delete(string id);
 }
 public sealed class DocumentStore(string root) : IDocumentStore
@@ -20,5 +21,6 @@ public sealed class DocumentStore(string root) : IDocumentStore
         catch { File.Delete(PathFor(id)); throw; }
     }
     public Task<byte[]> Read(string id, CancellationToken ct) => File.ReadAllBytesAsync(PathFor(id), ct);
+    public Task<long> Length(string id, CancellationToken ct) => Task.FromResult(new FileInfo(PathFor(id)).Length);
     public Task Delete(string id) { File.Delete(PathFor(id)); return Task.CompletedTask; }
 }
