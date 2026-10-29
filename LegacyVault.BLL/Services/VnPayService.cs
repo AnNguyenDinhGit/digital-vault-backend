@@ -2,8 +2,10 @@ using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.ComponentModel.DataAnnotations;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
+using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
 using Microsoft.AspNetCore.WebUtilities;
 
@@ -26,6 +28,73 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 {
     public async Task<IReadOnlyList<SubscriptionPlanDto>> Plans(CancellationToken ct) =>
         (await repository.ActivePlans(ct)).Select(x => new SubscriptionPlanDto(x.PlanId, x.PlanName, x.MaxVaults, x.MaxStorageBytes, x.Price, x.DurationDays)).ToArray();
+
+    public async Task<CurrentSubscriptionDto> CurrentSubscription(int userId, CancellationToken ct)
+    {
+        var current = await repository.CurrentSubscription(userId, DateTime.UtcNow, ct);
+        return current is null
+            ? new(false, null)
+            : new(true, new(current.SubscriptionId, current.Status, current.StartDate, current.EndDate, ToDto(current.Plan)));
+    }
+
+    public async Task<PaymentTransactionPageDto> UserHistory(int userId, int page, int pageSize, string? status, CancellationToken ct)
+    {
+        ValidatePaging(page, pageSize);
+        ValidateStatus(status);
+        var total = await repository.CountUserTransactions(userId, status, ct);
+        var rows = await repository.UserTransactions(userId, status, (page - 1) * pageSize, pageSize, ct);
+        return new(page, pageSize, total, rows.Select(ToDto).ToArray());
+    }
+
+    public async Task<IReadOnlyList<AdminSubscriptionPlanDto>> AdminPlans(CancellationToken ct) =>
+        (await repository.AllPlans(ct)).Select(ToAdminDto).ToArray();
+
+    public async Task<AdminSubscriptionPlanDto> CreatePlan(int adminUserId, SaveSubscriptionPlanInput input, CancellationToken ct)
+    {
+        ValidatePlan(input);
+        var plan = new SubscriptionPlan
+        {
+            PlanName = input.PlanName.Trim(), MaxVaults = input.MaxVaults, MaxStorageBytes = input.MaxStorageBytes,
+            Price = input.Price, DurationDays = input.DurationDays, IsActive = input.IsActive, CreatedAt = DateTime.UtcNow
+        };
+        await repository.AddPlan(plan, adminUserId, ct);
+        return ToAdminDto(plan);
+    }
+
+    public async Task<AdminSubscriptionPlanDto> UpdatePlan(int adminUserId, int planId, SaveSubscriptionPlanInput input, CancellationToken ct)
+    {
+        ValidatePlan(input);
+        var plan = await repository.Plan(planId, ct) ?? throw new WorkflowException(404, "Subscription plan not found.");
+        plan.PlanName = input.PlanName.Trim(); plan.MaxVaults = input.MaxVaults; plan.MaxStorageBytes = input.MaxStorageBytes;
+        plan.Price = input.Price; plan.DurationDays = input.DurationDays; plan.IsActive = input.IsActive;
+        repository.AuditPlanChange(adminUserId, "UpdateSubscriptionPlan", planId);
+        await repository.Save(ct);
+        return ToAdminDto(plan);
+    }
+
+    public async Task DeactivatePlan(int adminUserId, int planId, CancellationToken ct)
+    {
+        var plan = await repository.Plan(planId, ct) ?? throw new WorkflowException(404, "Subscription plan not found.");
+        plan.IsActive = false;
+        repository.AuditPlanChange(adminUserId, "DeactivateSubscriptionPlan", planId);
+        await repository.Save(ct);
+    }
+
+    public async Task<PaymentTransactionPageDto> AdminHistory(int page, int pageSize, int? userId, string? status, CancellationToken ct)
+    {
+        ValidatePaging(page, pageSize);
+        ValidateStatus(status);
+        var total = await repository.CountTransactions(userId, status, ct);
+        var rows = await repository.Transactions(userId, status, (page - 1) * pageSize, pageSize, ct);
+        return new(page, pageSize, total, rows.Select(ToDto).ToArray());
+    }
+
+    public async Task<AdminPaymentTransactionDto> AdminTransaction(long transactionId, CancellationToken ct)
+    {
+        var row = await repository.Transaction(transactionId, ct) ?? throw new WorkflowException(404, "Payment transaction not found.");
+        return new(row.TransactionId, row.UserId, row.User?.Email, row.TransactionCode, row.Amount, row.PaymentMethod, row.Status,
+            row.CreatedAt, row.SubscriptionId, row.Subscription?.PlanId, row.Subscription?.Plan?.PlanName);
+    }
 
     public async Task<PaymentCheckoutDto> CreateCheckout(int userId, int planId, string ipAddress, CancellationToken ct)
     {
@@ -90,6 +159,36 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
             string.IsNullOrWhiteSpace(options.ReturnUrl) || !Uri.TryCreate(options.PaymentUrl, UriKind.Absolute, out _))
             throw new WorkflowException(503, "VNPay is not configured. Set VnPay:TmnCode, HashSecret, PaymentUrl and ReturnUrl.");
     }
+
+    private static void ValidatePlan(SaveSubscriptionPlanInput input)
+    {
+        if (string.IsNullOrWhiteSpace(input.PlanName)) throw new WorkflowException(400, "Plan name is required.");
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), new List<ValidationResult>(), true))
+            throw new WorkflowException(400, "Invalid subscription plan fields.");
+        if (input.Price != decimal.Truncate(input.Price))
+            throw new WorkflowException(400, "Plan price must be a whole number of VND.");
+    }
+
+    private static void ValidatePaging(int page, int pageSize)
+    {
+        if (page < 1 || pageSize is < 1 or > 100) throw new WorkflowException(400, "Page must be positive and pageSize must be between 1 and 100.");
+    }
+
+    private static void ValidateStatus(string? status)
+    {
+        if (status is not null && status is not ("Pending" or "Success" or "Failed"))
+            throw new WorkflowException(400, "Status must be Pending, Success or Failed.");
+    }
+
+    private static SubscriptionPlanDto ToDto(SubscriptionPlan plan) =>
+        new(plan.PlanId, plan.PlanName, plan.MaxVaults, plan.MaxStorageBytes, plan.Price, plan.DurationDays);
+
+    private static AdminSubscriptionPlanDto ToAdminDto(SubscriptionPlan plan) =>
+        new(plan.PlanId, plan.PlanName, plan.MaxVaults, plan.MaxStorageBytes, plan.Price, plan.DurationDays, plan.IsActive, plan.CreatedAt);
+
+    private static PaymentTransactionDto ToDto(PaymentTransaction transaction) =>
+        new(transaction.TransactionId, transaction.TransactionCode, transaction.Amount, transaction.PaymentMethod, transaction.Status,
+            transaction.CreatedAt, transaction.SubscriptionId, transaction.Subscription?.Plan?.PlanName);
 
     private string Sign(string data) => Convert.ToHexString(HMACSHA512.HashData(Encoding.UTF8.GetBytes(options.HashSecret), Encoding.UTF8.GetBytes(data))).ToLowerInvariant();
     private static bool FixedEquals(string expected, string actual)

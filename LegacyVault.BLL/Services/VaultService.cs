@@ -15,7 +15,8 @@ public sealed class VaultService(
     IDocumentStore store,
     DocumentProtection protection,
     IOtpSender mailSender,
-    IWorkflowRepository? workflow = null)
+    IWorkflowRepository? workflow = null,
+    SubscriptionQuotaService? quotas = null)
 {
     public const string OwnerRole = "Owner";
     public const string ExecutorRole = "Executor";
@@ -78,6 +79,8 @@ public sealed class VaultService(
     {
         await Role(user, OwnerRole, ct);
         ValidateInput(input);
+        using var quotaLock = quotas is null ? null : await quotas.LockUser(user, ct);
+        if (quotas is not null) await quotas.EnsureCanCreateVault(user, ct);
         var now = DateTime.UtcNow;
         var vault = new DigitalVault { OwnerId = user, VaultName = input.Name.Trim(), Description = input.Description?.Trim(), Status = "Active", CreatedAt = now, UpdatedAt = now };
         repository.Add(vault);
@@ -89,6 +92,7 @@ public sealed class VaultService(
     public async Task<AssetDto> CreateAsset(int user, CreateAssetInput input, CancellationToken ct)
     {
         ValidateInput(input);
+        using var quotaLock = quotas is null ? null : await quotas.LockUser(user, ct);
         var vault = await OwnedVault(user, input.VaultId, ct);
         if (vault.Status != "Active") throw new WorkflowException(409, "Vault is not active.");
         Editable(vault); vault.UpdatedAt = RecordVersion.Next(vault.UpdatedAt);
@@ -234,6 +238,7 @@ public sealed class VaultService(
         UploadFile file, byte[]? signature, CancellationToken ct)
     {
         var asset = await Owned(user, assetId, ct);
+        using var quotaLock = quotas is null ? null : await quotas.LockUser(user, ct);
         if (asset.Vault.Status != "Active" || asset.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
         Editable(asset.Vault);
         if (beneficiaryId is not null)
@@ -244,7 +249,9 @@ public sealed class VaultService(
                 throw new WorkflowException(409, "Select an existing active allocation; upload does not create allocations.");
         }
         Validate(file); RequireSignature(file, signature, user);
-        var path = await Store(file, user, signature, ct);
+        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, signature));
+        if (quotas is not null) await quotas.EnsureStorageAvailable(user, protectedBytes.LongLength, ct);
+        var path = await store.Write(protectedBytes, ct);
         try
         {
             var doc = new AssetDocument
@@ -312,7 +319,10 @@ public sealed class VaultService(
         if (r.Status is not ("Draft" or "Rejected" or "Additional_Info")) throw new WorkflowException(409, "Documents are editable only before legal submission.");
         if (purpose is not ("DeathCertificate" or "Evidence")) throw new WorkflowException(400, "Unknown handover document purpose.");
         Validate(file); if (signature is not null) RequireSignature(file, signature, user);
-        var path = await Store(file, user, signature, ct, purpose);
+        using var quotaLock = quotas is null ? null : await quotas.LockUser(r.Vault.OwnerId, ct);
+        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, signature, purpose));
+        if (quotas is not null) await quotas.EnsureStorageAvailable(r.Vault.OwnerId, protectedBytes.LongLength, ct);
+        var path = await store.Write(protectedBytes, ct);
         try
         {
             var d = new HandoverDocument { RequestId = request, FileName = file.FileName, FileType = file.FileType, StoragePath = path, IsEncrypted = true, UploadedBy = user, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
@@ -338,7 +348,10 @@ public sealed class VaultService(
         if (!r.LegalVerifications.Any(x => x.Status == "Approved") || r.HandoverCases.Count == 0)
             throw new WorkflowException(409, "Approved legal verification and handover cases are required.");
         Validate(file); RequireSignature(file, signature, user);
-        var path = await Store(file, user, signature, ct);
+        using var quotaLock = quotas is null ? null : await quotas.LockUser(r.Vault.OwnerId, ct);
+        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, signature));
+        if (quotas is not null) await quotas.EnsureStorageAvailable(r.Vault.OwnerId, protectedBytes.LongLength, ct);
+        var path = await store.Write(protectedBytes, ct);
         try
         {
             repository.Add(new HandoverDocument
@@ -371,7 +384,10 @@ public sealed class VaultService(
         if (comment?.Length > 2000) throw new WorkflowException(400, "Comment exceeds 2000 characters.");
         await HandoverEvidence.RequireDeathCertificate(r, store, protection, ct);
         Validate(file);
-        var path = await Store(file, user, null, ct);
+        using var quotaLock = quotas is null ? null : await quotas.LockUser(r.Vault.OwnerId, ct);
+        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, null));
+        if (quotas is not null) await quotas.EnsureStorageAvailable(r.Vault.OwnerId, protectedBytes.LongLength, ct);
+        var path = await store.Write(protectedBytes, ct);
         try
         {
             var verification = new LegalVerification { RequestId = request, VerifierId = verifier, Comment = comment, Status = "Pending", SubmittedAt = DateTime.UtcNow };
