@@ -9,7 +9,9 @@ dotnet user-secrets set "VnPay:PaymentUrl" "https://sandbox.vnpayment.vn/payment
 dotnet user-secrets set "VnPay:ReturnUrl" "https://your-public-api/api/payments/vnpay/return" --project LegacyVault.API
 ```
 
-VNPay must be configured to send its server-to-server IPN to `https://your-public-api/api/payments/vnpay/ipn`. The return URL is for the customer's browser; the IPN endpoint is the authoritative server notification. Both callbacks verify the VNPay HMAC-SHA512 signature and amount before changing transaction state. Use the production payment URL and production merchant credentials for live payments.
+Equivalent environment variables are `VnPay__TmnCode`, `VnPay__HashSecret`, `VnPay__PaymentUrl`, and `VnPay__ReturnUrl`. `LegacyVault.API/appsettings.json` includes a non-secret sandbox template; keep the merchant code and hash secret in User Secrets or environment variables. `PaymentUrl` defaults to the sandbox endpoint in development. Set the live endpoint and live credentials when going to production.
+
+VNPay must be configured to send its server-to-server IPN to `https://your-public-api/api/payments/vnpay/ipn`. The return URL is for the customer's browser; it verifies the signature and displays the persisted transaction state without settling it. The IPN endpoint verifies the VNPay HMAC-SHA512 signature, merchant code, order and amount, then is the only callback that changes transaction/subscription state. Return URL timestamps and payment expiration are generated in GMT+7 as required by VNPay.
 
 ## Start a payment
 
@@ -19,9 +21,11 @@ Clients can list active plans through `GET /api/payments/plans`. Authenticated u
 { "planId": 1 }
 ```
 
-The response contains `transactionCode`, `amount`, and `paymentUrl`. Redirect the browser to `paymentUrl`. The plan must be active and priced as a positive whole number of VND. Starting checkout creates a pending transaction and pending subscription. Successful callbacks activate it and expire the user's previous active subscription; failed callbacks mark both records failed. Repeated callbacks are idempotent.
+The response contains `transactionCode`, `amount`, and `paymentUrl`. Redirect the browser to `paymentUrl`. The plan must be active and priced as a whole number from 5,000 to 1,000,000,000 VND; VNPay sandbox enforces that amount range. Starting checkout creates a pending transaction and pending subscription. A successful IPN activates the subscription and expires the user's previous active subscription; a failed IPN marks both records failed. Repeated IPN callbacks are idempotent.
 
-The browser return endpoint returns `{ transactionCode, status, amount }`. The frontend should display the payment result and refresh account/subscription state from its normal API. Do not treat the browser redirect alone as proof of payment; VNPay's IPN updates the same transaction.
+The browser return endpoint returns `{ transactionCode, status, amount, gatewayResponseCode }`. The status reflects the server's persisted transaction state, so it can still be `Pending` if the browser return arrives before the IPN. The frontend should show a pending state and refresh `GET /api/payments/me/transactions` or `GET /api/payments/me/subscription`; do not treat the browser redirect alone as proof of payment.
+
+IPN responds with VNPay's `RspCode` and `Message` JSON fields: `00` when updated, `02` when already confirmed, `01` when the order is unknown, `04` for amount mismatch, `97` for invalid signature, and `99` for other invalid data or processing errors. If the database is unavailable, the IPN endpoint responds `99` so VNPay can retry.
 
 ## Admin endpoints
 
