@@ -96,43 +96,47 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     }
 
     public async Task<PaymentCheckoutDto> CreateCheckout(int userId, int planId, string ipAddress, CancellationToken ct)
-    {
-        ValidateConfiguration();
-        var reference = $"{DateTime.UtcNow:yyMMddHHmmss}{Guid.NewGuid():N}"[..32];
-        PaymentOrder order;
-        try { order = await repository.CreateOrder(userId, planId, reference, ct); }
-        catch (KeyNotFoundException ex) { throw new WorkflowException(404, ex.Message); }
-        catch (InvalidOperationException ex) { throw new WorkflowException(400, ex.Message); }
+{
+    var reference = $"{DateTime.UtcNow:yyMMddHHmmss}{Guid.NewGuid():N}"[..32];
+    PaymentOrder order;
+    try { order = await repository.CreateOrder(userId, planId, reference, ct); }
+    catch (KeyNotFoundException ex) { throw new WorkflowException(404, ex.Message); }
+    catch (InvalidOperationException ex) { throw new WorkflowException(400, ex.Message); }
 
-        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
-        var values = new SortedDictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["vnp_Version"] = options.Version,
-            ["vnp_Command"] = options.Command,
-            ["vnp_TmnCode"] = options.TmnCode,
-            ["vnp_Amount"] = checked((long)(order.Amount * 100m)).ToString(CultureInfo.InvariantCulture),
-            ["vnp_CurrCode"] = options.CurrencyCode,
-            ["vnp_TxnRef"] = reference,
-            ["vnp_OrderInfo"] = OrderInfo(order.PlanName),
-            ["vnp_OrderType"] = options.OrderType,
-            ["vnp_Locale"] = options.Locale,
-            ["vnp_ReturnUrl"] = options.ReturnUrl,
-            ["vnp_IpAddr"] = NormalizeIp(ipAddress),
-            ["vnp_CreateDate"] = now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
-            ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)
-        };
-        var query = BuildQuery(values);
-        var signature = Sign(query);
-        return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
+    // 1. XỬ LÝ DÀNH CHO GÓI MIỄN PHÍ (0đ) - Không cần ValidateConfiguration()
+    if (order.Amount == 0m)
+    {
+        // Trực tiếp kích hoạt gói cho User trong DB
+        await repository.ApplyGatewayResult(reference, true, ct);
+
+        // Trả về kết quả thành công ngay
+        return new(reference, 0m, "");
     }
 
-    public async Task<PaymentStatusDto> HandleReturn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
+    // 2. XỬ LÝ CHO GÓI CÓ PHÍ (> 0đ) - Chỉ Validate khi gọi VNPay
+    ValidateConfiguration();
+
+    var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+    var values = new SortedDictionary<string, string>(StringComparer.Ordinal)
     {
-        var callback = VerifyCallback(query);
-        var payment = await GetMatchingPayment(callback, ct);
-        // VNPay specifies that Return URL only verifies and displays the result. IPN owns settlement.
-        return new(callback.Reference, payment.Status, payment.Amount, callback.ResponseCode);
-    }
+        ["vnp_Version"] = options.Version,
+        ["vnp_Command"] = options.Command,
+        ["vnp_TmnCode"] = options.TmnCode,
+        ["vnp_Amount"] = checked((long)(order.Amount * 100m)).ToString(CultureInfo.InvariantCulture),
+        ["vnp_CurrCode"] = options.CurrencyCode,
+        ["vnp_TxnRef"] = reference,
+        ["vnp_OrderInfo"] = OrderInfo(order.PlanName),
+        ["vnp_OrderType"] = options.OrderType,
+        ["vnp_Locale"] = options.Locale,
+        ["vnp_ReturnUrl"] = options.ReturnUrl,
+        ["vnp_IpAddr"] = NormalizeIp(ipAddress),
+        ["vnp_CreateDate"] = now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
+        ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)
+    };
+    var query = BuildQuery(values);
+    var signature = Sign(query);
+    return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
+}
 
     public async Task<VnPayIpnResult> HandleIpn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
     {
@@ -192,8 +196,10 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         if (string.IsNullOrWhiteSpace(input.PlanName)) throw new WorkflowException(400, "Plan name is required.");
         if (!Validator.TryValidateObject(input, new ValidationContext(input), new List<ValidationResult>(), true))
             throw new WorkflowException(400, "Invalid subscription plan fields.");
-        if (input.Price != decimal.Truncate(input.Price))
-            throw new WorkflowException(400, "Plan price must be a whole number of VND.");
+
+        // Đảm bảo giá trị là số nguyên VND và không âm (cho phép = 0)
+        if (input.Price < 0m || input.Price != decimal.Truncate(input.Price))
+            throw new WorkflowException(400, "Plan price must be a non-negative whole number of VND.");
     }
 
     private static void ValidatePaging(int page, int pageSize)

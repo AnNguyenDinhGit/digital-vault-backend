@@ -15,7 +15,7 @@ public sealed class SaveSubscriptionPlanInput
     public string PlanName { get; init; } = "";
     [System.ComponentModel.DataAnnotations.Range(1, 100000)] public int MaxVaults { get; init; }
     [System.ComponentModel.DataAnnotations.Range(1, long.MaxValue)] public long MaxStorageBytes { get; init; }
-    [System.ComponentModel.DataAnnotations.Range(typeof(decimal), "5000", "1000000000")] public decimal Price { get; init; }
+    [System.ComponentModel.DataAnnotations.Range(typeof(decimal), "0", "1000000000")] public decimal Price { get; init; }
     [System.ComponentModel.DataAnnotations.Range(1, 3650)] public int DurationDays { get; init; }
     public bool IsActive { get; init; } = true;
 }
