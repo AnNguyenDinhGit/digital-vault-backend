@@ -7,7 +7,6 @@ using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
-using Microsoft.AspNetCore.WebUtilities;
 
 namespace LegacyVault.BLL.Services;
 
@@ -105,7 +104,7 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         catch (KeyNotFoundException ex) { throw new WorkflowException(404, ex.Message); }
         catch (InvalidOperationException ex) { throw new WorkflowException(400, ex.Message); }
 
-        var now = DateTime.UtcNow;
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
         var values = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
             ["vnp_Version"] = options.Version,
@@ -114,7 +113,7 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
             ["vnp_Amount"] = checked((long)(order.Amount * 100m)).ToString(CultureInfo.InvariantCulture),
             ["vnp_CurrCode"] = options.CurrencyCode,
             ["vnp_TxnRef"] = reference,
-            ["vnp_OrderInfo"] = $"Payment for {order.PlanName}",
+            ["vnp_OrderInfo"] = OrderInfo(order.PlanName),
             ["vnp_OrderType"] = options.OrderType,
             ["vnp_Locale"] = options.Locale,
             ["vnp_ReturnUrl"] = options.ReturnUrl,
@@ -127,7 +126,27 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
     }
 
-    public async Task<PaymentStatusDto> HandleCallback(IReadOnlyDictionary<string, string> query, CancellationToken ct)
+    public async Task<PaymentStatusDto> HandleReturn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
+    {
+        var callback = VerifyCallback(query);
+        var payment = await GetMatchingPayment(callback, ct);
+        // VNPay specifies that Return URL only verifies and displays the result. IPN owns settlement.
+        return new(callback.Reference, payment.Status, payment.Amount, callback.ResponseCode);
+    }
+
+    public async Task<VnPayIpnResult> HandleIpn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
+    {
+        var callback = VerifyCallback(query);
+        _ = await GetMatchingPayment(callback, ct);
+        bool alreadyProcessed;
+        try { alreadyProcessed = await repository.ApplyGatewayResult(callback.Reference, callback.Success, ct); }
+        catch (InvalidOperationException ex) { throw new WorkflowException(409, ex.Message); }
+        var payment = await repository.Transaction(callback.Reference, ct)
+            ?? throw new WorkflowException(404, "Payment transaction not found.");
+        return new(new(callback.Reference, payment.Status, payment.Amount, callback.ResponseCode), alreadyProcessed);
+    }
+
+    private VerifiedCallback VerifyCallback(IReadOnlyDictionary<string, string> query)
     {
         ValidateConfiguration();
         var values = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -137,26 +156,34 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 
         if (!query.TryGetValue("vnp_SecureHash", out var providedHash) || !FixedEquals(Sign(BuildQuery(values)), providedHash))
             throw new WorkflowException(400, "Invalid VNPay signature.");
-        if (!values.TryGetValue("vnp_TxnRef", out var reference) || !values.TryGetValue("vnp_Amount", out var amountText) ||
-            !long.TryParse(amountText, NumberStyles.None, CultureInfo.InvariantCulture, out var amount) ||
-            !values.TryGetValue("vnp_ResponseCode", out var responseCode) || !values.TryGetValue("vnp_TransactionStatus", out var transactionStatus))
-            throw new WorkflowException(400, "Incomplete VNPay callback.");
+        if (!values.TryGetValue("vnp_TmnCode", out var tmnCode) || tmnCode != options.TmnCode ||
+            !values.TryGetValue("vnp_TxnRef", out var reference) || string.IsNullOrWhiteSpace(reference) ||
+            !values.TryGetValue("vnp_Amount", out var amountText) ||
+            !long.TryParse(amountText, NumberStyles.None, CultureInfo.InvariantCulture, out var amount) || amount <= 0 ||
+            !values.TryGetValue("vnp_ResponseCode", out var responseCode) ||
+            responseCode.Length != 2 || responseCode.Any(c => !char.IsAsciiDigit(c)) ||
+            !values.TryGetValue("vnp_TransactionStatus", out var transactionStatus) ||
+            transactionStatus.Length != 2 || transactionStatus.Any(c => !char.IsAsciiDigit(c)) ||
+            !values.TryGetValue("vnp_TransactionNo", out var gatewayTransaction) || gatewayTransaction.Length is < 1 or > 15 || gatewayTransaction.Any(c => !char.IsAsciiDigit(c)))
+            throw new WorkflowException(400, "Incomplete or mismatched VNPay callback.");
 
-        var payment = await repository.Transaction(reference, ct);
-        if (payment is null) throw new WorkflowException(404, "Payment transaction not found.");
-        if (payment.PaymentMethod != "VNPay" || amount != checked((long)(payment.Amount * 100m)))
-            throw new WorkflowException(400, "VNPay callback does not match the payment order.");
-        var success = responseCode == "00" && transactionStatus == "00";
-        try { await repository.ApplyGatewayResult(reference, success, ct); }
-        catch (InvalidOperationException ex) { throw new WorkflowException(409, ex.Message); }
-        payment = await repository.Transaction(reference, ct) ?? payment;
-        return new(reference, payment.Status, payment.Amount);
+        return new(reference, amount, responseCode, transactionStatus, responseCode == "00" && transactionStatus == "00");
+    }
+
+    private async Task<PaymentTransaction> GetMatchingPayment(VerifiedCallback callback, CancellationToken ct)
+    {
+        var payment = await repository.Transaction(callback.Reference, ct)
+            ?? throw new WorkflowException(404, "Payment transaction not found.");
+        if (payment.PaymentMethod != "VNPay" || callback.Amount != checked((long)(payment.Amount * 100m)))
+            throw new WorkflowException(400, "VNPay amount does not match the payment order.");
+        return payment;
     }
 
     private void ValidateConfiguration()
     {
-        if (string.IsNullOrWhiteSpace(options.TmnCode) || string.IsNullOrWhiteSpace(options.HashSecret) ||
-            string.IsNullOrWhiteSpace(options.ReturnUrl) || !Uri.TryCreate(options.PaymentUrl, UriKind.Absolute, out _))
+        if (string.IsNullOrWhiteSpace(options.TmnCode) || options.TmnCode.Length != 8 || options.TmnCode.Any(c => !char.IsAsciiLetterOrDigit(c)) || string.IsNullOrWhiteSpace(options.HashSecret) ||
+            !Uri.TryCreate(options.ReturnUrl, UriKind.Absolute, out var returnUri) || returnUri.Scheme != Uri.UriSchemeHttps ||
+            options.ReturnUrl.Length > 255 || !Uri.TryCreate(options.PaymentUrl, UriKind.Absolute, out var paymentUri) || paymentUri.Scheme != Uri.UriSchemeHttps)
             throw new WorkflowException(503, "VNPay is not configured. Set VnPay:TmnCode, HashSecret, PaymentUrl and ReturnUrl.");
     }
 
@@ -198,5 +225,21 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     }
     private static string BuildQuery(IEnumerable<KeyValuePair<string, string>> values) =>
         string.Join("&", values.Select(x => $"{WebUtility.UrlEncode(x.Key)}={WebUtility.UrlEncode(x.Value)}"));
-    private static string NormalizeIp(string ip) => string.IsNullOrWhiteSpace(ip) ? "127.0.0.1" : ip.Length > 45 ? ip[..45] : ip;
+    private static string OrderInfo(string planName)
+    {
+        var normalized = planName.Normalize(NormalizationForm.FormD);
+        var text = new string(normalized.Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark && (char.IsAsciiLetterOrDigit(c) || char.IsWhiteSpace(c))).ToArray());
+        var words = string.Join(' ', text.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        var orderInfo = string.IsNullOrWhiteSpace(words) ? "Thanh toan goi dich vu" : $"Thanh toan goi {words}";
+        return orderInfo.Length <= 255 ? orderInfo : orderInfo[..255];
+    }
+    private static string NormalizeIp(string ip)
+    {
+        if (!IPAddress.TryParse(ip, out var address)) return "127.0.0.1";
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        var value = address.ToString();
+        return value.Length <= 45 ? value : "127.0.0.1";
+    }
+
+    private sealed record VerifiedCallback(string Reference, long Amount, string ResponseCode, string TransactionStatus, bool Success);
 }

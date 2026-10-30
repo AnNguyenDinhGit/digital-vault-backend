@@ -1,6 +1,7 @@
 using LegacyVault.DAL.Context;
 using LegacyVault.DAL.Entities;
 using Microsoft.EntityFrameworkCore;
+using System.Data;
 
 namespace LegacyVault.DAL.Repositories;
 
@@ -23,7 +24,7 @@ public interface IPaymentRepository
     Task Save(CancellationToken ct);
     Task<PaymentOrder> CreateOrder(int userId, int planId, string transactionCode, CancellationToken ct);
     Task<PaymentTransaction?> Transaction(string transactionCode, CancellationToken ct);
-    Task ApplyGatewayResult(string transactionCode, bool success, CancellationToken ct);
+    Task<bool> ApplyGatewayResult(string transactionCode, bool success, CancellationToken ct);
 }
 
 public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentRepository
@@ -90,8 +91,8 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
             ?? throw new KeyNotFoundException("Subscription plan not found or inactive.");
         var userExists = await db.Users.AnyAsync(x => x.UserId == userId && x.Status == "Active", ct);
         if (!userExists) throw new KeyNotFoundException("User not found or inactive.");
-        if (plan.Price <= 0 || plan.Price != decimal.Truncate(plan.Price))
-            throw new InvalidOperationException("VNPay requires a positive whole-VND plan price.");
+        if (plan.Price is < 5000m or > 1_000_000_000m || plan.Price != decimal.Truncate(plan.Price))
+            throw new InvalidOperationException("VNPay plan price must be a whole-VND amount from 5,000 to 1,000,000,000.");
 
         var now = DateTime.UtcNow;
         var subscription = new UserSubscription
@@ -114,17 +115,18 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
         db.PaymentTransactions.Include(x => x.Subscription).ThenInclude(x => x!.Plan)
             .SingleOrDefaultAsync(x => x.TransactionCode == transactionCode, ct);
 
-    public async Task ApplyGatewayResult(string transactionCode, bool success, CancellationToken ct)
+    public async Task<bool> ApplyGatewayResult(string transactionCode, bool success, CancellationToken ct)
     {
-        await using var dbTransaction = await db.Database.BeginTransactionAsync(ct);
+        await using var dbTransaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var payment = await db.PaymentTransactions.Include(x => x.Subscription)
             .SingleOrDefaultAsync(x => x.TransactionCode == transactionCode, ct);
         if (payment is null) throw new KeyNotFoundException("Payment transaction not found.");
         if (payment.Status != "Pending")
         {
-            if (success && payment.Status != "Success") throw new InvalidOperationException("Payment already has a different final status.");
+            var expectedStatus = success ? "Success" : "Failed";
+            if (payment.Status != expectedStatus) throw new InvalidOperationException("Payment already has a different final status.");
             await dbTransaction.CommitAsync(ct);
-            return;
+            return true;
         }
 
         payment.Status = success ? "Success" : "Failed";
@@ -143,5 +145,6 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
         }
         await db.SaveChangesAsync(ct);
         await dbTransaction.CommitAsync(ct);
+        return false;
     }
 }

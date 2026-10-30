@@ -2,11 +2,12 @@ using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json.Serialization;
 
 namespace LegacyVault.API.Controllers;
 
 [ApiController, Route("api/payments")]
-public sealed class PaymentController(VnPayService service) : VaultController
+public sealed class PaymentController(VnPayService service, ILogger<PaymentController> logger) : VaultController
 {
     [AllowAnonymous, HttpGet("plans")]
     public Task<IReadOnlyList<SubscriptionPlanDto>> Plans(CancellationToken ct) => service.Plans(ct);
@@ -24,26 +25,48 @@ public sealed class PaymentController(VnPayService service) : VaultController
         service.CreateCheckout(UserId, input.PlanId, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1", ct);
 
     [AllowAnonymous, HttpGet("vnpay/return")]
-    public Task<PaymentStatusDto> Return(CancellationToken ct) => service.HandleCallback(ReadGatewayQuery(), ct);
+    public Task<PaymentStatusDto> Return(CancellationToken ct) => service.HandleReturn(ReadGatewayQuery(), ct);
 
     [AllowAnonymous, HttpGet("vnpay/ipn")]
     public async Task<IActionResult> Ipn(CancellationToken ct)
     {
         try
         {
-            var result = await service.HandleCallback(ReadGatewayQuery(), ct);
-            return Ok(new { RspCode = "00", Message = "Confirm Success", result.TransactionCode, result.Status });
+            var result = await service.HandleIpn(ReadGatewayQuery(), ct);
+            return Ack(result.AlreadyProcessed ? "02" : "00", result.AlreadyProcessed ? "Order already confirmed" : "Confirm Success");
         }
         catch (LegacyVault.BLL.DTOs.WorkflowException ex) when (ex.StatusCode == 404)
         {
-            return Ok(new { RspCode = "01", Message = "Order not found" });
+            return Ack("01", "Order not found");
         }
-        catch (LegacyVault.BLL.DTOs.WorkflowException)
+        catch (LegacyVault.BLL.DTOs.WorkflowException ex) when (ex.StatusCode == 409)
         {
-            return Ok(new { RspCode = "97", Message = "Invalid signature or payment data" });
+            return Ack("02", "Order already confirmed with a different result");
+        }
+        catch (LegacyVault.BLL.DTOs.WorkflowException ex)
+        {
+            var (code, message) = ex.Message switch
+            {
+                var value when value.Contains("signature", StringComparison.OrdinalIgnoreCase) => ("97", "Invalid signature"),
+                var value when value.Contains("amount", StringComparison.OrdinalIgnoreCase) => ("04", "Invalid amount"),
+                _ => ("99", "Invalid payment data")
+            };
+            logger.LogWarning("VNPay IPN rejected with HTTP status {StatusCode} and code {ResponseCode}.", ex.StatusCode, code);
+            return Ack(code, message);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "VNPay IPN processing failed.");
+            return Ack("99", "System error");
         }
     }
+
+    private IActionResult Ack(string code, string message) => Ok(new VnPayIpnAck(code, message));
 
     private IReadOnlyDictionary<string, string> ReadGatewayQuery() => Request.Query
         .ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.Ordinal);
 }
+
+public sealed record VnPayIpnAck(
+    [property: JsonPropertyName("RspCode")] string RspCode,
+    [property: JsonPropertyName("Message")] string Message);
