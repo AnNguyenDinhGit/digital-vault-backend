@@ -7,11 +7,22 @@ using LegacyVault.DAL.Repositories;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Configuration;
 
 internal static class BeneficiaryAssignmentTests
 {
+    private static readonly IConfiguration Configuration = new ConfigurationBuilder().Build();
+
     private static VaultService Service(LegacyVaultDbContext db) =>
-    new(new VaultRepository(db), new FakeStore(), new DocumentProtection(new SecurityOptions()), new FakeSender(), new WorkflowRepository(db));
+        new(
+            new VaultRepository(db),
+            new FakeStore(),
+            new DocumentProtection(new SecurityOptions()),
+            new FakeSender(),
+            Configuration, // Thêm IConfiguration vào vị trí tham số thứ 5
+            new WorkflowRepository(db)
+        );
+
     private static async Task<(int Owner, int Asset)> Seed(DbContextOptions<LegacyVaultDbContext> options)
     {
         await using var db = new LegacyVaultDbContext(options);
@@ -27,6 +38,7 @@ internal static class BeneficiaryAssignmentTests
         var asset = await Service(db).CreateAsset(owner, new CreateAssetInput { VaultId = vault.VaultId, Name = "Fixture", Type = "Other" }, default);
         return (owner, asset.AssetId);
     }
+
     public static async Task Run(Action<bool, string> check)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -68,6 +80,7 @@ internal static class BeneficiaryAssignmentTests
             check(allocations.Count == 1 && allocations.Single().Beneficiary.Email == "carol@example.test" && allocations.Single().Allocation == 60 && await db.AuditLogs.CountAsync(x => x.Action == "AssignBeneficiary") == 1, "concurrent rejected assignment leaves total allocation within 100 percent and no partial audit");
         }
     }
+
     private sealed class CompetingAssignment(DbContextOptions<LegacyVaultDbContext> options, int owner, int asset) : SaveChangesInterceptor
     {
         private bool ran;
@@ -76,7 +89,6 @@ internal static class BeneficiaryAssignmentTests
             if (!ran)
             {
                 ran = true;
-                // Simulate another request committing between the original request's read and save.
                 await using var other = new LegacyVaultDbContext(options);
                 await Service(other).AssignBeneficiary(owner, asset, new AssignBeneficiaryInput { Email = "carol@example.test", Allocation = 60 }, cancellationToken);
             }

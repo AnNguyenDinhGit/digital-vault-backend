@@ -137,6 +137,13 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     var signature = Sign(query);
     return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
 }
+    public async Task<PaymentStatusDto> HandleReturn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
+    {
+        var callback = VerifyCallback(query);
+        var payment = await GetMatchingPayment(callback, ct);
+        // VNPay quy định Return URL chỉ xác minh và hiển thị kết quả. IPN chịu trách nhiệm cập nhật trạng thái chính.
+        return new(callback.Reference, payment.Status, payment.Amount, callback.ResponseCode);
+    }
 
     public async Task<VnPayIpnResult> HandleIpn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
     {
