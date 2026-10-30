@@ -26,6 +26,10 @@ public sealed class PaymentController(VnPayService service, ILogger<PaymentContr
 
     [AllowAnonymous, HttpGet("vnpay/return")]
     public Task<PaymentStatusDto> Return(CancellationToken ct) => service.HandleReturn(ReadGatewayQuery(), ct);
+   
+    [Authorize, HttpPost("select-free")]
+    public Task<CurrentSubscriptionDto> SelectFree(CreatePaymentInput input, CancellationToken ct) =>
+    service.SelectFreePlan(UserId, input.PlanId, ct);
 
     [AllowAnonymous, HttpGet("vnpay/ipn")]
     public async Task<IActionResult> Ipn(CancellationToken ct)

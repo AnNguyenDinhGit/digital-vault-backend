@@ -136,7 +136,24 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     var query = BuildQuery(values);
     var signature = Sign(query);
     return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
+
+
 }
+
+    public async Task<CurrentSubscriptionDto> SelectFreePlan(int userId, int planId, CancellationToken ct)
+    {
+        var plan = await repository.Plan(planId, ct) ?? throw new WorkflowException(404, "Subscription plan not found.");
+        if (plan.Price > 0m)
+        {
+            throw new WorkflowException(400, "Vui lòng chuyển sang cổng thanh toán đối với gói trả phí.");
+        }
+
+        var reference = $"FREE_{DateTime.UtcNow:yyMMddHHmmss}{Guid.NewGuid():N}"[..32];
+        await repository.CreateOrder(userId, planId, reference, ct);
+        await repository.ApplyGatewayResult(reference, true, ct);
+
+        return await CurrentSubscription(userId, ct);
+    }
     public async Task<PaymentStatusDto> HandleReturn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
     {
         var callback = VerifyCallback(query);
