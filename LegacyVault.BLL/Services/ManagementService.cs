@@ -141,6 +141,22 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             new(r.OwnerId, r.OwnerName), r.ExecutorId, r.ExecutorName, r.RequestType, r.Status, r.InitiatedAt,
             r.SubmittedAt, r.CompletedAt, r.IsAssignedToMe)).ToArray());
     }
+
+    public async Task<AdminHandoverPageDto> AdminHandovers(int admin, int page, int size, string? status, int? ownerId, CancellationToken ct)
+    {
+        await Require(admin, ct, VaultService.AdminRole);
+        Paging(page, size);
+        ValidateStatus(status);
+        if (ownerId is <= 0) throw new WorkflowException(400, "ownerId must be positive.");
+        var result = await workflow.AdminHandovers(page, size, status, ownerId, ct);
+        var items = result.Items.Select(r => new AdminHandoverItemDto(r.RequestId, r.VaultId, r.VaultName,
+            new(r.OwnerId, r.OwnerName), r.ExecutorId, r.ExecutorName, r.RequestType, r.Status,
+            DateTime.SpecifyKind(r.InitiatedAt, DateTimeKind.Utc),
+            r.SubmittedAt is null ? null : DateTime.SpecifyKind(r.SubmittedAt.Value, DateTimeKind.Utc),
+            r.CompletedAt is null ? null : DateTime.SpecifyKind(r.CompletedAt.Value, DateTimeKind.Utc))).ToArray();
+        return new(page, size, result.TotalCount, items);
+    }
+
     private static void ValidateStatus(string? status)
     {
         if (status is not null && status is not ("Pending_Executor" or "Declined" or "Draft" or "Cancelled" or "Pending_Legal" or "Additional_Info" or "Rejected" or "Approved" or "In_Progress" or "Completed"))

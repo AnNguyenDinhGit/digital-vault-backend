@@ -33,11 +33,16 @@ public static class MappingExtensions
                 .ToArray(),
             r.HandoverCases
                 .Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)
-                { AssetName = c.Assignment.Asset?.AssetName })
+                {
+                    AssetName = c.Assignment.Asset?.AssetName,
+                    BeneficiaryName = c.Assignment.Beneficiary?.FullName,
+                    AllocationPercentage = c.Assignment.Allocation
+                })
                 .ToArray()
         )
         {
-            Owner = new(r.Vault.OwnerId, r.Vault.Owner?.FullName ?? ""), ExecutorId = r.ExecutorId, ExecutorName = r.Executor?.FullName,
+            Owner = new(r.Vault.OwnerId, r.Vault.Owner?.FullName ?? ""), VaultName = r.Vault.VaultName,
+            ExecutorId = r.ExecutorId, ExecutorName = r.Executor?.FullName,
             SubmittedAt = r.SubmittedAt, CompletedAt = r.CompletedAt
         };
 

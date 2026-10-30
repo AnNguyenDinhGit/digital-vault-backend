@@ -10,6 +10,10 @@ public sealed record VerifierOptionDto(int UserId, string FullName);
 public sealed record HandoverOverviewDto(int RequestId, int VaultId, string VaultName, OwnerSummaryDto Owner,
     int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,
     DateTime? SubmittedAt, DateTime? CompletedAt, bool IsAssignedToMe);
+public sealed record AdminHandoverItemDto(int RequestId, int VaultId, string VaultName, OwnerSummaryDto Owner,
+    int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,
+    DateTime? SubmittedAt, DateTime? CompletedAt);
+public sealed record AdminHandoverPageDto(int Page, int PageSize, int TotalCount, IReadOnlyList<AdminHandoverItemDto> Items);
 public sealed record OwnerLifeStatusDto(int OwnerId, string FullName, string Status, int RequestId,
     int? EvidenceRequestId, int? DeathCertificateDocumentId, int? VerifierId, DateTime? VerifiedAt)
 {
