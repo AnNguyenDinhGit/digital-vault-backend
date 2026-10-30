@@ -89,24 +89,36 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
     {
         var plan = await db.SubscriptionPlans.SingleOrDefaultAsync(x => x.PlanId == planId && x.IsActive, ct)
             ?? throw new KeyNotFoundException("Subscription plan not found or inactive.");
+
         var userExists = await db.Users.AnyAsync(x => x.UserId == userId && x.Status == "Active", ct);
         if (!userExists) throw new KeyNotFoundException("User not found or inactive.");
-        if (plan.Price is < 5000m or > 1_000_000_000m || plan.Price != decimal.Truncate(plan.Price))
+
+        // Kiểm tra giá: Cho phép giá = 0 (Gói Free) HOẶC nằm trong khoảng 5.000 đến 1.000.000.000 (Gói VNPay)
+        if (plan.Price != 0m && (plan.Price is < 5000m or > 1_000_000_000m || plan.Price != decimal.Truncate(plan.Price)))
             throw new InvalidOperationException("VNPay plan price must be a whole-VND amount from 5,000 to 1,000,000,000.");
 
         var now = DateTime.UtcNow;
         var subscription = new UserSubscription
         {
-            UserId = userId, PlanId = plan.PlanId, StartDate = now,
-            EndDate = now.AddDays(plan.DurationDays), Status = "Pending"
+            UserId = userId,
+            PlanId = plan.PlanId,
+            StartDate = now,
+            EndDate = now.AddDays(plan.DurationDays),
+            Status = "Pending"
         };
+
         db.UserSubscriptions.Add(subscription);
         db.PaymentTransactions.Add(new PaymentTransaction
         {
-            UserId = userId, Subscription = subscription, Amount = plan.Price,
-            PaymentMethod = "VNPay", TransactionCode = transactionCode,
-            Status = "Pending", CreatedAt = now
+            UserId = userId,
+            Subscription = subscription,
+            Amount = plan.Price,
+            PaymentMethod = plan.Price == 0m ? "Internal" : "VNPay", // Đánh dấu phương thức cho gói Free
+            TransactionCode = transactionCode,
+            Status = "Pending",
+            CreatedAt = now
         });
+
         await db.SaveChangesAsync(ct);
         return new(transactionCode, plan.Price, plan.PlanName);
     }
