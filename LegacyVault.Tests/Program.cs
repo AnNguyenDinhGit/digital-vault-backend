@@ -72,7 +72,7 @@ var wrong = actual == "000000" ? "000001" : "000000";
 for (var i = 0; i < 5; i++) await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, wrong); return Task.CompletedTask; }, 400, $"OTP failed attempt {i + 1}");
 await Reject(() => { otp.Verify(5, "session-c", exhausted.ChallengeId, actual); return Task.CompletedTask; }, 400, "OTP attempt limit cannot be bypassed with valid code");
 
-var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, signedProtection, sender);
+var repo = new FakeRepository(); var store = new FakeStore(); var service = new VaultService(repo, store, signedProtection, sender, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
 await Reject(() => service.OwnerAsset(2, 10, default), 404, "other owner cannot read asset");
 await Reject(() => service.OwnerAsset(3, 10, default), 403, "beneficiary cannot use owner APIs");
 await Reject(() => service.UploadOwnerDocument(1, 10, null, file, null, default), 400, "owner must supply verified signature without any death declaration");
@@ -95,7 +95,7 @@ await Reject(() => service.RequestLegal(6, 20, 8, null, file, default), 409, "du
 repo.Handover.Status = "Approved";
 await Reject(() => service.Complete(6, 20, file, new byte[256], default), 409, "completion requires approved legal verification and cases");
 var signedRepo = new FakeRepository(); var signedStore = new FakeStore();
-var signedService = new VaultService(signedRepo, signedStore, signedProtection, sender);
+var signedService = new VaultService(signedRepo, signedStore, signedProtection, sender, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
 var signedUpload = await signedService.UploadOwnerDocument(1, 10, null, file, signature, default);
 Check(signedUpload.IsEncrypted && signedRepo.Added.OfType<AssetDocument>().Single().Status == "Active", "signed living-owner upload accepted");
 signedRepo.Handover.Status = "Approved";
