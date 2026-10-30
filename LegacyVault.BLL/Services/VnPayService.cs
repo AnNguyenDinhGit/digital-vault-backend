@@ -142,16 +142,26 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 
     public async Task<CurrentSubscriptionDto> SelectFreePlan(int userId, int planId, CancellationToken ct)
     {
-        var plan = await repository.Plan(planId, ct) ?? throw new WorkflowException(404, "Subscription plan not found.");
+        // 1. Kiểm tra tồn tại của Plan
+        var plan = await repository.Plan(planId, ct)
+            ?? throw new WorkflowException(404, "Subscription plan not found.");
+
+        // 2. Validate giá phải bằng 0
         if (plan.Price > 0m)
         {
-            throw new WorkflowException(400, "Vui lòng chuyển sang cổng thanh toán đối với gói trả phí.");
+            throw new WorkflowException(400, "Gói này yêu cầu thanh toán. Vui lòng chuyển sang cổng thanh toán.");
         }
 
-        var reference = $"FREE_{DateTime.UtcNow:yyMMddHHmmss}{Guid.NewGuid():N}"[..32];
+        // 3. Sinh mã Reference ngắn gọn (< 32 ký tự)
+        var reference = $"FREE{DateTime.UtcNow:yyMMddHHmmss}{Random.Shared.Next(100, 999)}";
+
+        // 4. Tạo Order
         await repository.CreateOrder(userId, planId, reference, ct);
+
+        // 5. Kích hoạt trực tiếp kết quả giao dịch thành công cho gói Free
         await repository.ApplyGatewayResult(reference, true, ct);
 
+        // 6. Trả về thông tin gói đăng ký hiện tại
         return await CurrentSubscription(userId, ct);
     }
     public async Task<PaymentStatusDto> HandleReturn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
