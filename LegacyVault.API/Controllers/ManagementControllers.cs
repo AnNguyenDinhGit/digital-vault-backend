@@ -95,6 +95,10 @@ public sealed class ExecutorWorkflowController(ManagementService service) : Vaul
 [ApiController, Authorize, Route("api/legal/handovers")]
 public sealed class LegalController(ManagementService service) : VaultController
 {
+    [Authorize(Roles = "LegalVerifier"), HttpGet("~/api/verifier/handovers/pending")]
+    public Task<PageDto<HandoverDto>> Pending([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) =>
+        service.Requests(UserId, "LegalVerifier", page, pageSize, "Pending_Legal", ct);
+
     [HttpGet("{requestId:int}/assets")]
     public Task<PageDto<LegalAssetDto>> Assets(int requestId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20,
         CancellationToken ct = default) => service.LegalAssets(UserId, requestId, page, pageSize, ct);

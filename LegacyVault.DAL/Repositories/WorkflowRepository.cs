@@ -8,6 +8,9 @@ namespace LegacyVault.DAL.Repositories;
 public sealed record HandoverOverviewRow(int RequestId, int VaultId, string VaultName, int OwnerId, string OwnerName,
     int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,
     DateTime? SubmittedAt, DateTime? CompletedAt, bool IsAssignedToMe);
+public sealed record AdminHandoverRow(int RequestId, int VaultId, string VaultName, int OwnerId, string OwnerName,
+    int ExecutorId, string ExecutorName, string RequestType, string Status, DateTime InitiatedAt,
+    DateTime? SubmittedAt, DateTime? CompletedAt);
 public sealed record ExecutorOptionRow(int UserId, string FullName);
 public sealed record OwnerDeclineRow(int RequestId, string? Message, DateTime? DeclinedAt);
 
@@ -19,6 +22,7 @@ public interface IWorkflowRepository
     Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct);
     Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct);
     Task<List<HandoverOverviewRow>> Overview(int executor, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct);
+    Task<(int TotalCount, List<AdminHandoverRow> Items)> AdminHandovers(int page, int size, string? status, int? ownerId, CancellationToken ct);
     Task<List<HandoverRequest>> ApprovedOwnerRequests(int ownerId, CancellationToken ct);
     Task<DigitalVault?> VaultGraph(int id, CancellationToken ct);
     Task<DigitalAsset?> AssetGraph(int id, CancellationToken ct);
@@ -102,6 +106,21 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
                 r.ExecutorId == executor && r.Vault.ExecutorAssignments.Any(a => a.ExecutorId == executor && (a.Status == "Active" || a.Status == "AutoAssigned"))))
             .ToListAsync(ct);
     }
+
+    public async Task<(int TotalCount, List<AdminHandoverRow> Items)> AdminHandovers(int page, int size, string? status, int? ownerId, CancellationToken ct)
+    {
+        var query = db.HandoverRequests.AsNoTracking().AsQueryable();
+        if (status is not null) query = query.Where(r => r.Status == status);
+        if (ownerId is not null) query = query.Where(r => r.Vault.OwnerId == ownerId);
+        var total = await query.CountAsync(ct);
+        var items = await query.OrderByDescending(r => r.InitiatedAt).ThenByDescending(r => r.RequestId)
+            .Skip((page - 1) * size).Take(size)
+            .Select(r => new AdminHandoverRow(r.RequestId, r.VaultId, r.Vault.VaultName,
+                r.Vault.OwnerId, r.Vault.Owner.FullName, r.ExecutorId, r.Executor.FullName,
+                r.RequestType, r.Status, r.InitiatedAt, r.SubmittedAt, r.CompletedAt))
+            .ToListAsync(ct);
+        return (total, items);
+    }
     public Task<List<HandoverRequest>> ApprovedOwnerRequests(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()
         .Include(r => r.HandoverDocuments).Include(r => r.LegalVerifications).AsSplitQuery()
         .Where(r => r.Vault.OwnerId == ownerId && (r.Status == "Approved" || r.Status == "In_Progress" || r.Status == "Completed") &&
@@ -124,6 +143,7 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
         .Include(r => r.Vault).ThenInclude(v => v.ExecutorAssignments).Include(r => r.Vault).ThenInclude(v => v.DigitalAssets).ThenInclude(a => a.AssetDocuments)
         .Include(r => r.HandoverDocuments).Include(r => r.LegalVerifications).ThenInclude(v => v.Verifier)
         .Include(r => r.HandoverCases).ThenInclude(c => c.BeneficiaryReceipts)
+        .Include(r => r.HandoverCases).ThenInclude(c => c.Assignment).ThenInclude(a => a.Asset)
         .Include(r => r.HandoverCases).ThenInclude(c => c.Assignment).ThenInclude(a => a.Beneficiary).AsSplitQuery();
     public Task<HandoverRequest?> RequestGraph(int id, CancellationToken ct) => Requests.SingleOrDefaultAsync(r => r.RequestId == id, ct);
     public Task<List<HandoverRequest>> UserRequests(int user, string kind, int page, int size, string? status, CancellationToken ct)

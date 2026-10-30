@@ -80,6 +80,8 @@ Các API kiểm tra quyền sở hữu ở server. Upload dùng multipart/form-d
 | GET | `/api/owner/handovers/{requestId}` | Chi tiết handover |
 | POST | `/api/owner/handovers/{requestId}/cancel` | Hủy handover khi trạng thái cho phép |
 
+Danh sách và chi tiết handover của Owner có thêm `vaultName`.
+
 ## 5. Executor và bàn giao
 
 | Method | Endpoint | Chức năng |
@@ -110,6 +112,7 @@ Các bước đổi trạng thái phụ thuộc quyền Executor được giao v
 | Method | Endpoint | Chức năng |
 | --- | --- | --- |
 | GET | `/api/legal/handovers` | Danh sách yêu cầu xác minh được giao |
+| GET | `/api/verifier/handovers/pending` | Danh sách handover đang chờ LegalVerifier xử lý |
 | GET | `/api/legal/handovers/{requestId}` | Chi tiết yêu cầu và kết quả xác minh |
 | GET | `/api/legal/handovers/{requestId}/assets` | Danh sách tài sản trong phạm vi handover |
 | GET | `/api/legal/handovers/{requestId}/owner-status` | Xem trạng thái Owner |
@@ -122,6 +125,7 @@ Các bước đổi trạng thái phụ thuộc quyền Executor được giao v
 | POST | `/api/legal/handovers/{requestId}/request-additional-information` | Yêu cầu bổ sung thông tin |
 
 Quyền truy cập bị giới hạn theo yêu cầu được phân công; kiểm tra xung đột lợi ích được áp dụng trong service.
+Chi tiết `/api/legal/handovers/{requestId}` có `request.vaultName`; mỗi case có `assetName`, `beneficiaryName` và `allocationPercentage` theo đơn vị phần trăm (ví dụ `50` nghĩa là 50%).
 
 ## 7. Beneficiary và xác nhận nhận bàn giao
 
@@ -147,6 +151,7 @@ Các endpoint dưới đây yêu cầu role `Admin`.
 
 | Method | Endpoint | Chức năng |
 | --- | --- | --- |
+| GET | `/api/admin/handovers` | Danh sách handover toàn hệ thống; lọc `status`/`ownerId`, phân trang và trả `totalCount` |
 | GET | `/api/admin/users` | Danh sách, tìm kiếm và lọc người dùng |
 | POST | `/api/admin/users` | Tạo tài khoản và gán role |
 | PUT | `/api/admin/users/{userId}` | Cập nhật thông tin tài khoản |

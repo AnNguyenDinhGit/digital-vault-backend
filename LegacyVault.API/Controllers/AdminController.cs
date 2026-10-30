@@ -8,8 +8,13 @@ namespace LegacyVault.API.Controllers;
 [ApiController]
 [Route("api/admin")]
 [Authorize(Roles = "Admin")]
-public sealed class AdminController(AdminService adminService) : VaultController
+public sealed class AdminController(AdminService adminService, ManagementService managementService) : VaultController
 {
+    [HttpGet("handovers")]
+    public Task<AdminHandoverPageDto> GetHandovers([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null, [FromQuery] int? ownerId = null, CancellationToken ct = default) =>
+        managementService.AdminHandovers(UserId, page, pageSize, status, ownerId, ct);
+
     [HttpGet("users")]
     public Task<PageDto<UserAdminDto>> GetUsers(
         [FromQuery] int page = 1,
