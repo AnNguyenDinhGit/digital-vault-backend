@@ -5,8 +5,11 @@ using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
 using LegacyVault.DAL.Storage;
+using Microsoft.Extensions.Configuration;
 using System.ComponentModel.DataAnnotations;
 using System.Drawing.Printing;
+using System.Net;
+using System.Net.Mail;
 
 namespace LegacyVault.BLL.Services;
 
@@ -15,6 +18,7 @@ public sealed class VaultService(
     IDocumentStore store,
     DocumentProtection protection,
     IOtpSender mailSender,
+   IConfiguration configuration,
     IWorkflowRepository? workflow = null,
     SubscriptionQuotaService? quotas = null)
 {
@@ -168,8 +172,18 @@ public sealed class VaultService(
         if (decimal.Round(input.Allocation, 2) != input.Allocation) throw new WorkflowException(400, "Allocation allows at most two decimal places.");
         if (asset.Status != "Active" || asset.Vault.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
         Editable(asset.Vault); asset.Vault.UpdatedAt = RecordVersion.Next(asset.Vault.UpdatedAt);
+
         var recipient = await repository.UserByEmail(input.Email.Trim().ToLowerInvariant(), ct);
-        if (recipient is null || recipient.Status != "Active") throw new WorkflowException(404, "Active recipient account not found. Ask the recipient to register first.");
+        if (recipient is null || recipient.Status != "Active")
+        {
+            // Tự động gửi email mời đăng ký tài khoản cho người thụ hưởng nếu chưa tồn tại hoặc chưa Active
+            string appUrl = configuration["AppUrl"] ?? "http://localhost:5173";
+            string registerUrl = $"{appUrl}/register?email={Uri.EscapeDataString(input.Email)}";
+            await SendInvitationEmailAsync(input.Email, registerUrl);
+
+            throw new WorkflowException(404, "Active recipient account not found. An invitation email has been sent to the recipient to register first.");
+        }
+
         if (recipient.UserId == owner) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
         if (asset.BeneficiaryAssignments.Any(x => x.BeneficiaryId == recipient.UserId && (x.Status == "Active" || x.Status == "Pending")))
             throw new WorkflowException(409, "This user is already a pending or active beneficiary of the asset.");
@@ -188,7 +202,7 @@ public sealed class VaultService(
             AssetId = assetId,
             BeneficiaryId = recipient.UserId,
             Allocation = input.Allocation,
-            Status = "Active", // Đặt là Pending để chờ người thụ hưởng phản hồi/xác nhận
+            Status = "Active",
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -202,6 +216,36 @@ public sealed class VaultService(
         }
         catch (RepositoryDuplicateException) { throw new WorkflowException(409, "Beneficiary configuration changed. Reload and retry."); }
         return new BeneficiaryDto(assetId, recipient.UserId, recipient.FullName, assignment.Allocation, assignment.Status);
+    }
+
+    private async Task SendInvitationEmailAsync(string toEmail, string registerUrl)
+    {
+        var mailHost = configuration["MailOptions:Host"];
+        var mailPort = int.Parse(configuration["MailOptions:Port"] ?? "587");
+        var mailUser = configuration["MailOptions:Username"];
+        var mailPass = configuration["MailOptions:Password"];
+        var mailFrom = configuration["MailOptions:From"];
+
+        using var client = new SmtpClient(mailHost, mailPort)
+        {
+            Credentials = new NetworkCredential(mailUser, mailPass),
+            EnableSsl = true
+        };
+
+        var mailMessage = new MailMessage
+        {
+            From = new MailAddress(mailFrom),
+            Subject = "Loi moi tro thanh nguoi thu huong tai san ky thuat so - LegacyVault",
+            Body = $"Xin chao,\n\n" +
+                   $"Ban da duoc chi dinh lam nguoi thu huong mot tai san tren he thong LegacyVault.\n" +
+                   $"Vui long tao tai khoan bằng cach truy cap vao duong dan sau de tiep nhan quyen thu huong:\n\n" +
+                   $"{registerUrl}\n\n" +
+                   $"Tran trong,\nLegacyVault Team",
+            IsBodyHtml = false
+        };
+
+        mailMessage.To.Add(toEmail);
+        await client.SendMailAsync(mailMessage);
     }
 
     private static void Validate(UploadFile file)
@@ -423,7 +467,6 @@ public sealed class VaultService(
 
     public async Task<InheritanceDto> InheritedAsset(int user, int asset, CancellationToken ct)
     {
-        // Gọi Inherited với phân trang mặc định (ví dụ trang 1, lấy tối đa 100 kết quả để tìm asset)
         var result = await Inherited(user, 1, 100, ct);
         return result.Items.FirstOrDefault(x => x.Asset.AssetId == asset) ?? throw new WorkflowException(404, "Inherited asset not found.");
     }
