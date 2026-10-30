@@ -82,6 +82,11 @@ builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
 builder.Services.AddScoped<ManagementService>();
 builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
+builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
+builder.Services.AddScoped<VnPayService>();
+builder.Services.AddSingleton(builder.Configuration.GetSection("VnPay").Get<VnPayOptions>() ?? new VnPayOptions());
+builder.Services.AddScoped<SubscriptionQuotaService>();
+builder.Services.AddSingleton(builder.Configuration.GetSection("SubscriptionQuota").Get<SubscriptionQuotaOptions>() ?? new SubscriptionQuotaOptions());
 builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
 
 var mailOptions = builder.Configuration.GetSection("MailOptions").Get<MailOptions>()
