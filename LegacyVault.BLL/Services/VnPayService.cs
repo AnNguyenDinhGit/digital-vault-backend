@@ -104,6 +104,18 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         catch (KeyNotFoundException ex) { throw new WorkflowException(404, ex.Message); }
         catch (InvalidOperationException ex) { throw new WorkflowException(400, ex.Message); }
 
+        
+        // XỬ LÝ DÀNH CHO GÓI MIỄN PHÍ (0đ)
+        if (order.Amount == 0m)
+        {
+            // 1. Trực tiếp kích hoạt gói cho User trong DB (truyền true thay vì isSuccess: true)
+            await repository.ApplyGatewayResult(reference, true, ct);
+
+            // 2. Trả về kết quả thành công ngay (truyền "" thay vì paymentUrl: "")
+            return new(reference, 0m, "");
+        }
+
+        // XỬ LÝ CHO GÓI CÓ PHÍ (> 0đ)
         var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
         var values = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
@@ -192,8 +204,10 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         if (string.IsNullOrWhiteSpace(input.PlanName)) throw new WorkflowException(400, "Plan name is required.");
         if (!Validator.TryValidateObject(input, new ValidationContext(input), new List<ValidationResult>(), true))
             throw new WorkflowException(400, "Invalid subscription plan fields.");
-        if (input.Price != decimal.Truncate(input.Price))
-            throw new WorkflowException(400, "Plan price must be a whole number of VND.");
+
+        // Đảm bảo giá trị là số nguyên VND và không âm (cho phép = 0)
+        if (input.Price < 0m || input.Price != decimal.Truncate(input.Price))
+            throw new WorkflowException(400, "Plan price must be a non-negative whole number of VND.");
     }
 
     private static void ValidatePaging(int page, int pageSize)
