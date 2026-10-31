@@ -277,6 +277,8 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     {
         if (!IPAddress.TryParse(ip, out var address)) return "127.0.0.1";
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address)) return "127.0.0.1";
+        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return "127.0.0.1";
         var value = address.ToString();
         return value.Length <= 45 ? value : "127.0.0.1";
     }
