@@ -13,8 +13,10 @@ Không thay schema. Backend xác minh Google OIDC; email có User hợp lệ kh�
 Google OAuth Client loại Web application, consent/test users phù hợp. Authorized redirect URI:
 
 ```text
-https://localhost:7015/api/auth/google/oidc-callback
+https://vault-owner-be.huydevops.id.vn/api/auth/google/oidc-callback
 ```
+
+For local development, add `https://localhost:7015/api/auth/google/oidc-callback` as an additional authorized redirect URI.
 
 ```powershell
 dotnet user-secrets set "Google:ClientId" "YOUR_CLIENT_ID" --project LegacyVault.API
@@ -57,3 +59,10 @@ Email mới tạo User + Owner atomically sau OTP. Email cũ giữ tên/mật kh
 Không refresh token, JWT hết hạn phải login lại. Logout không revoke JWT. OTP/challenge trong bộ nhớ một instance, restart mất challenge; Google-only User chưa có API đặt mật khẩu.
 
 Tests dùng Google discovery/token/JWKS giả lập và TestServer, không certificate import UserKeySet hoặc TLS bypass production. Google/SMTP thật cần credentials hợp lệ, chưa được kiểm chứng trong lần triển khai này.
+
+## Production callback URLs
+
+Google Cloud authorized redirect URI: `https://vault-owner-be.huydevops.id.vn/api/auth/google/oidc-callback`.
+
+Frontend sign-in starts at `https://vault-owner-be.huydevops.id.vn/api/auth/google/start` and returns to `https://digitalvault-zeta.vercel.app/auth/google/callback`. Configure `Google:ClientId` and `Google:ClientSecret` as backend environment variables; do not commit the client secret.
+If the backend host terminates TLS at a reverse proxy, configure `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` in the hosting service so OIDC generates the HTTPS callback URI. Only enable this when requests reach the app through the trusted hosting proxy.
