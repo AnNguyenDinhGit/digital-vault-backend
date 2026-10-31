@@ -6,12 +6,12 @@ Configure secrets with User Secrets or environment variables:
 dotnet user-secrets set "VnPay:TmnCode" "YOUR_TMN_CODE" --project LegacyVault.API
 dotnet user-secrets set "VnPay:HashSecret" "YOUR_HASH_SECRET" --project LegacyVault.API
 dotnet user-secrets set "VnPay:PaymentUrl" "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html" --project LegacyVault.API
-dotnet user-secrets set "VnPay:ReturnUrl" "https://your-public-api/api/payments/vnpay/return" --project LegacyVault.API
+dotnet user-secrets set "VnPay:ReturnUrl" "https://vault-owner-be.huydevops.id.vn/api/payments/vnpay/return" --project LegacyVault.API
 ```
 
 Equivalent environment variables are `VnPay__TmnCode`, `VnPay__HashSecret`, `VnPay__PaymentUrl`, and `VnPay__ReturnUrl`. `LegacyVault.API/appsettings.json` includes a non-secret sandbox template; keep the merchant code and hash secret in User Secrets or environment variables. `PaymentUrl` defaults to the sandbox endpoint in development. Set the live endpoint and live credentials when going to production.
 
-VNPay must be configured to send its server-to-server IPN to `https://your-public-api/api/payments/vnpay/ipn`. The return URL is for the customer's browser; it verifies the signature and displays the persisted transaction state without settling it. The IPN endpoint verifies the VNPay HMAC-SHA512 signature, merchant code, order and amount, then is the only callback that changes transaction/subscription state. Return URL timestamps and payment expiration are generated in GMT+7 as required by VNPay.
+For the deployed backend, configure VNPay to send its server-to-server IPN to `https://vault-owner-be.huydevops.id.vn/api/payments/vnpay/ipn`. The configured Return URL is `https://vault-owner-be.huydevops.id.vn/api/payments/vnpay/return`. The return URL is for the customer's browser; it verifies the signature and displays the persisted transaction state without settling it. The IPN endpoint verifies the VNPay HMAC-SHA512 signature, merchant code, order and amount, then is the only callback that changes transaction/subscription state. Return URL timestamps and payment expiration are generated in GMT+7 as required by VNPay.
 
 ## Start a payment
 
