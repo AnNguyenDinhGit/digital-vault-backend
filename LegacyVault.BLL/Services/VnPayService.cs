@@ -133,7 +133,7 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         ["vnp_IpAddr"] = NormalizeIp(ipAddress),
         ["vnp_CreateDate"] = now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
         ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
-        ["vnp_CallbackUrl"] = string.IsNullOrWhiteSpace(options.IpnUrl) ? options.ReturnUrl : options.IpnUrl
+        
     };
     var query = BuildQuery(values);
     var signature = Sign(query);
