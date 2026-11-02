@@ -25,8 +25,15 @@ public sealed class PaymentController(VnPayService service, ILogger<PaymentContr
         service.CreateCheckout(UserId, input.PlanId, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1", ct);
 
     [AllowAnonymous, HttpGet("vnpay/return")]
-    public Task<PaymentStatusDto> Return(CancellationToken ct) => service.HandleReturn(ReadGatewayQuery(), ct);
-   
+    public async Task<IActionResult> Return(CancellationToken ct)
+    {
+        var result = await service.HandleReturn(ReadGatewayQuery(), ct);
+
+        // Chuyển hướng người dùng về trang kết quả trên Frontend kèm theo trạng thái và mã giao dịch
+        var frontendUrl = $"https://digitalvault-zeta.vercel.app/payment-result?status={result.Status}&code={result.TransactionCode}";
+        return Redirect(frontendUrl);
+    }
+
     [Authorize, HttpPost("select-free")]
     public Task<CurrentSubscriptionDto> SelectFree(CreatePaymentInput input, CancellationToken ct) =>
     service.SelectFreePlan(UserId, input.PlanId, ct);
