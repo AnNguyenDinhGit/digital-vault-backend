@@ -16,6 +16,7 @@ public sealed class VnPayOptions
     public string HashSecret { get; set; } = "";
     public string PaymentUrl { get; set; } = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html";
     public string ReturnUrl { get; set; } = "";
+    public string IpnUrl { get; set; } = "";
     public string Version { get; set; } = "2.1.0";
     public string Command { get; set; } = "pay";
     public string CurrencyCode { get; set; } = "VND";
@@ -131,7 +132,8 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         ["vnp_ReturnUrl"] = options.ReturnUrl,
         ["vnp_IpAddr"] = NormalizeIp(ipAddress),
         ["vnp_CreateDate"] = now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
-        ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)
+        ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
+        ["vnp_CallbackUrl"] = string.IsNullOrWhiteSpace(options.IpnUrl) ? options.ReturnUrl : options.IpnUrl
     };
     var query = BuildQuery(values);
     var signature = Sign(query);
