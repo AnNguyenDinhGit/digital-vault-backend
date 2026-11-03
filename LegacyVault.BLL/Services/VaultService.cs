@@ -312,7 +312,8 @@ public sealed class VaultService(
             repository.Add(doc);
             asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt); asset.Vault.UpdatedAt = RecordVersion.Next(asset.Vault.UpdatedAt);
             Audit(user, "UploadAssetDocument", "DigitalAsset", assetId, "Alive_Signed");
-            await repository.Save(ct); return new(doc.DocumentId, doc.FileName, doc.FileType, true);
+            await repository.Save(ct); // Truyền true cho IsEncrypted và true cho SignatureValid
+            return new(doc.DocumentId, doc.FileName, doc.FileType, true, true);
         }
         catch { await store.Delete(path); throw; }
     }
