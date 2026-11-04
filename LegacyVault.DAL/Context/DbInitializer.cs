@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -26,7 +26,23 @@ public static class DbInitializer
 
         await db.SaveChangesAsync();
 
-        // 2. Tạo tài khoản Admin hệ thống mặc định nếu chưa tồn tại
+        // 2. Khởi tạo Gói Miễn Phí mặc định nếu chưa có
+        if (!await db.SubscriptionPlans.AnyAsync(p => p.Price == 0m))
+        {
+            db.SubscriptionPlans.Add(new SubscriptionPlan
+            {
+                PlanName = "Gói Miễn Phí",
+                MaxVaults = 1,
+                MaxStorageBytes = 1_073_741_824, // 1 GB
+                Price = 0m,
+                DurationDays = 36500, // Vô thời hạn
+                IsActive = true,
+                CreatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // 3. Tạo tài khoản Admin hệ thống mặc định nếu chưa tồn tại
         var adminEmail = "admin@legacyvault.com";
         if (!await db.Users.AnyAsync(u => u.Email == adminEmail))
         {

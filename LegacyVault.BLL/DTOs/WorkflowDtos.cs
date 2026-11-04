@@ -24,7 +24,8 @@ public sealed record InheritanceDto(int HandoverId, decimal Allocation, AssetDto
 public sealed record UploadFile(string FileName, string FileType, byte[] Content);
 public sealed record DocumentContent(string FileName, string FileType, byte[] Content, bool SignatureValid, string? Purpose = null);
 public sealed record LoginDto(int UserId, string[] Roles);
-public sealed class WorkflowException(int statusCode, string message) : Exception(message)
+public class WorkflowException(int statusCode, string message, string? errorCode = null) : Exception(message)
 {
     public int StatusCode { get; } = statusCode;
+    public string? ErrorCode { get; } = errorCode;
 }

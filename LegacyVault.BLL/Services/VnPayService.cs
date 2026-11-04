@@ -32,10 +32,155 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 
     public async Task<CurrentSubscriptionDto> CurrentSubscription(int userId, CancellationToken ct)
     {
-        var current = await repository.CurrentSubscription(userId, DateTime.UtcNow, ct);
-        return current is null
-            ? new(false, null)
-            : new(true, new(current.SubscriptionId, current.Status, current.StartDate, current.EndDate, ToDto(current.Plan)));
+        var now = DateTime.UtcNow;
+        var current = await repository.CurrentSubscription(userId, now, ct);
+        var scheduled = await repository.ScheduledSubscription(userId, ct);
+        var isReadOnly = await repository.IsReadOnly(userId, now, ct);
+
+        UserSubscriptionDto? subDto = current is null ? null : ToUserSubDto(current);
+        UserSubscriptionDto? scheduledDto = scheduled is null ? null : ToUserSubDto(scheduled);
+
+        DateTime? upgradeWindowEndsAt = null;
+        DateTime? renewalWindowStartsAt = null;
+        int? daysLeft = null;
+
+        if (current is not null)
+        {
+            if (current.Plan.Price > 0)
+            {
+                upgradeWindowEndsAt = current.StartDate.AddDays(3);
+                renewalWindowStartsAt = current.EndDate.AddDays(-5);
+                var remaining = (current.EndDate - now).TotalDays;
+                daysLeft = Math.Max(0, (int)Math.Ceiling(remaining));
+            }
+            else
+            {
+                daysLeft = null;
+            }
+        }
+
+        return new(
+            HasActiveSubscription: current is not null,
+            Subscription: subDto,
+            ScheduledSubscription: scheduledDto,
+            UpgradeWindowEndsAt: upgradeWindowEndsAt,
+            RenewalWindowStartsAt: renewalWindowStartsAt,
+            DaysLeft: daysLeft,
+            IsReadOnly: isReadOnly);
+    }
+
+    public async Task<SubscriptionQuoteDto> GetQuote(int userId, int planId, CancellationToken ct)
+    {
+        var newPlan = await repository.Plan(planId, ct)
+            ?? throw new WorkflowException(404, "Subscription plan not found.");
+
+        if (!newPlan.IsActive)
+            throw new WorkflowException(404, "Subscription plan is not active.");
+
+        var now = DateTime.UtcNow;
+        var currentPaid = await repository.CurrentPaidSubscription(userId, now, ct);
+        var scheduled = await repository.ScheduledSubscription(userId, ct);
+        var duration = newPlan.DurationDays > 0 ? newPlan.DurationDays : 30;
+
+        if (currentPaid != null)
+        {
+            var start = currentPaid.StartDate;
+            var end = currentPaid.EndDate;
+            var upgradeWindowEnd = start.AddDays(3);
+            var renewalWindowStart = end.AddDays(-5);
+
+            // Window 1: now <= start + 3 ngày
+            if (now <= upgradeWindowEnd)
+            {
+                if (newPlan.Price > currentPaid.Plan.Price)
+                {
+                    var amountDue = newPlan.Price - currentPaid.Plan.Price;
+                    return new SubscriptionQuoteDto(
+                        Allowed: true,
+                        ReasonCode: null,
+                        ReasonMessage: null,
+                        ChangeType: "Upgrade",
+                        AmountDue: amountDue,
+                        StartsAt: now,
+                        EndsAt: now.AddDays(duration));
+                }
+                else
+                {
+                    return new SubscriptionQuoteDto(
+                        Allowed: false,
+                        ReasonCode: "UPGRADE_PRICE_TOO_LOW",
+                        ReasonMessage: "Trong 3 ngày đầu chỉ được nâng cấp lên gói có giá cao hơn gói hiện tại.",
+                        ChangeType: null,
+                        AmountDue: 0m,
+                        StartsAt: null,
+                        EndsAt: null);
+                }
+            }
+
+            // Window 2: start + 3 ngày < now < end - 5 ngày
+            if (now > upgradeWindowEnd && now < renewalWindowStart)
+            {
+                return new SubscriptionQuoteDto(
+                    Allowed: false,
+                    ReasonCode: "PLAN_CHANGE_LOCKED",
+                    ReasonMessage: $"Chỉ đổi gói được từ {renewalWindowStart:yyyy-MM-dd HH:mm:ss}.",
+                    ChangeType: null,
+                    AmountDue: 0m,
+                    StartsAt: null,
+                    EndsAt: null);
+            }
+
+            // Window 3: end - 5 ngày <= now < end
+            if (now >= renewalWindowStart && now < end)
+            {
+                if (scheduled != null)
+                {
+                    return new SubscriptionQuoteDto(
+                        Allowed: false,
+                        ReasonCode: "SCHEDULED_PLAN_EXISTS",
+                        ReasonMessage: "Bạn đã có một gói đăng ký chờ kích hoạt. Chỉ cho phép tối đa một gói chờ.",
+                        ChangeType: null,
+                        AmountDue: 0m,
+                        StartsAt: null,
+                        EndsAt: null);
+                }
+
+                var changeType = newPlan.PlanId == currentPaid.PlanId ? "Renew" : "Scheduled";
+                return new SubscriptionQuoteDto(
+                    Allowed: true,
+                    ReasonCode: null,
+                    ReasonMessage: null,
+                    ChangeType: changeType,
+                    AmountDue: newPlan.Price,
+                    StartsAt: end,
+                    EndsAt: end.AddDays(duration));
+            }
+        }
+
+        // Window 4 / Case B: now >= end hoặc chưa có gói trả phí
+        if (scheduled != null)
+        {
+            return new SubscriptionQuoteDto(
+                Allowed: false,
+                ReasonCode: "SCHEDULED_PLAN_EXISTS",
+                ReasonMessage: "Bạn đã có một gói đăng ký chờ kích hoạt. Chỉ cho phép tối đa một gói chờ.",
+                ChangeType: null,
+                AmountDue: 0m,
+                StartsAt: null,
+                EndsAt: null);
+        }
+
+        var lastSub = await repository.LastSubscription(userId, ct);
+        var defaultChangeType = (lastSub != null && lastSub.PlanId == newPlan.PlanId) ? "Renew" : "New";
+
+        return new SubscriptionQuoteDto(
+            Allowed: true,
+            ReasonCode: null,
+            ReasonMessage: null,
+            ChangeType: defaultChangeType,
+            AmountDue: newPlan.Price,
+            StartsAt: now,
+            EndsAt: now.AddDays(duration));
     }
 
     public async Task<PaymentTransactionPageDto> UserHistory(int userId, int page, int pageSize, string? status, CancellationToken ct)
@@ -98,50 +243,56 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     }
 
     public async Task<PaymentCheckoutDto> CreateCheckout(int userId, int planId, string ipAddress, CancellationToken ct)
-{
-    var reference = $"{DateTime.UtcNow:yyMMddHHmmss}{Guid.NewGuid():N}"[..32];
-    PaymentOrder order;
-    try { order = await repository.CreateOrder(userId, planId, reference, ct); }
-    catch (KeyNotFoundException ex) { throw new WorkflowException(404, ex.Message); }
-    catch (InvalidOperationException ex) { throw new WorkflowException(400, ex.Message); }
-
-    // 1. XỬ LÝ DÀNH CHO GÓI MIỄN PHÍ (0đ) - Không cần ValidateConfiguration()
-    if (order.Amount == 0m)
     {
-        // Trực tiếp kích hoạt gói cho User trong DB
-        await repository.ApplyGatewayResult(reference, true, ct);
+        var quote = await GetQuote(userId, planId, ct);
+        if (!quote.Allowed)
+        {
+            throw new WorkflowException(409, quote.ReasonMessage ?? "Plan change is not allowed at this time.", quote.ReasonCode);
+        }
 
-        // Trả về kết quả thành công ngay
-        return new(reference, 0m, "");
+        var reference = $"{DateTime.UtcNow:yyMMddHHmmss}{Guid.NewGuid():N}"[..32];
+        PaymentOrder order;
+        try
+        {
+            order = await repository.CreateOrder(userId, planId, reference, quote.AmountDue, quote.ChangeType, quote.StartsAt, quote.EndsAt, ct);
+        }
+        catch (KeyNotFoundException ex) { throw new WorkflowException(404, ex.Message); }
+        catch (InvalidOperationException ex) { throw new WorkflowException(400, ex.Message); }
+
+        // 1. XỬ LÝ DÀNH CHO GÓI MIỄN PHÍ (0đ) - Không cần ValidateConfiguration()
+        if (order.Amount == 0m)
+        {
+            // Trực tiếp kích hoạt gói cho User trong DB
+            await repository.ApplyGatewayResult(reference, true, ct);
+
+            // Trả về kết quả thành công ngay
+            return new(reference, 0m, "");
+        }
+
+        // 2. XỬ LÝ CHO GÓI CÓ PHÍ (> 0đ) - Chỉ Validate khi gọi VNPay
+        ValidateConfiguration();
+
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var values = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["vnp_Version"] = options.Version,
+            ["vnp_Command"] = options.Command,
+            ["vnp_TmnCode"] = options.TmnCode,
+            ["vnp_Amount"] = checked((long)(order.Amount * 100m)).ToString(CultureInfo.InvariantCulture),
+            ["vnp_CurrCode"] = options.CurrencyCode,
+            ["vnp_TxnRef"] = reference,
+            ["vnp_OrderInfo"] = OrderInfo(order.PlanName),
+            ["vnp_OrderType"] = options.OrderType,
+            ["vnp_Locale"] = options.Locale,
+            ["vnp_ReturnUrl"] = options.ReturnUrl,
+            ["vnp_IpAddr"] = NormalizeIp(ipAddress),
+            ["vnp_CreateDate"] = now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
+            ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
+        };
+        var query = BuildQuery(values);
+        var signature = Sign(query);
+        return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
     }
-
-    // 2. XỬ LÝ CHO GÓI CÓ PHÍ (> 0đ) - Chỉ Validate khi gọi VNPay
-    ValidateConfiguration();
-
-    var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
-    var values = new SortedDictionary<string, string>(StringComparer.Ordinal)
-    {
-        ["vnp_Version"] = options.Version,
-        ["vnp_Command"] = options.Command,
-        ["vnp_TmnCode"] = options.TmnCode,
-        ["vnp_Amount"] = checked((long)(order.Amount * 100m)).ToString(CultureInfo.InvariantCulture),
-        ["vnp_CurrCode"] = options.CurrencyCode,
-        ["vnp_TxnRef"] = reference,
-        ["vnp_OrderInfo"] = OrderInfo(order.PlanName),
-        ["vnp_OrderType"] = options.OrderType,
-        ["vnp_Locale"] = options.Locale,
-        ["vnp_ReturnUrl"] = options.ReturnUrl,
-        ["vnp_IpAddr"] = NormalizeIp(ipAddress),
-        ["vnp_CreateDate"] = now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
-        ["vnp_ExpireDate"] = now.AddMinutes(15).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
-        
-    };
-    var query = BuildQuery(values);
-    var signature = Sign(query);
-    return new(reference, order.Amount, $"{options.PaymentUrl}?{query}&vnp_SecureHash={signature}");
-
-
-}
 
     public async Task<CurrentSubscriptionDto> SelectFreePlan(int userId, int planId, CancellationToken ct)
     {
@@ -155,16 +306,23 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
             throw new WorkflowException(400, "Gói này yêu cầu thanh toán. Vui lòng chuyển sang cổng thanh toán.");
         }
 
-        // 3. Sinh mã Reference ngắn gọn (< 32 ký tự)
+        // 3. Không cho phép hủy gói trả phí đang hiệu lực
+        var currentPaid = await repository.CurrentPaidSubscription(userId, DateTime.UtcNow, ct);
+        if (currentPaid != null)
+        {
+            throw new WorkflowException(409, "Không thể chuyển sang gói miễn phí khi đang có gói trả phí hiệu lực.", "CANNOT_CANCEL_PAID_SUBSCRIPTION");
+        }
+
+        // 4. Sinh mã Reference ngắn gọn (< 32 ký tự)
         var reference = $"FREE{DateTime.UtcNow:yyMMddHHmmss}{Random.Shared.Next(100, 999)}";
 
-        // 4. Tạo Order
-        await repository.CreateOrder(userId, planId, reference, ct);
+        // 5. Tạo Order
+        await repository.CreateOrder(userId, planId, reference, 0m, "Free", DateTime.UtcNow, DateTime.UtcNow.AddYears(100), ct);
 
-        // 5. Kích hoạt trực tiếp kết quả giao dịch thành công cho gói Free
+        // 6. Kích hoạt trực tiếp kết quả giao dịch thành công cho gói Free
         await repository.ApplyGatewayResult(reference, true, ct);
 
-        // 6. Trả về thông tin gói đăng ký hiện tại
+        // 7. Trả về thông tin gói đăng ký hiện tại
         return await CurrentSubscription(userId, ct);
     }
     public async Task<PaymentStatusDto> HandleReturn(IReadOnlyDictionary<string, string> query, CancellationToken ct)
@@ -252,6 +410,9 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 
     private static SubscriptionPlanDto ToDto(SubscriptionPlan plan) =>
         new(plan.PlanId, plan.PlanName, plan.MaxVaults, plan.MaxStorageBytes, plan.Price, plan.DurationDays);
+
+    private static UserSubscriptionDto ToUserSubDto(UserSubscription sub) =>
+        new(sub.SubscriptionId, sub.Status, sub.StartDate, sub.EndDate, ToDto(sub.Plan));
 
     private static AdminSubscriptionPlanDto ToAdminDto(SubscriptionPlan plan) =>
         new(plan.PlanId, plan.PlanName, plan.MaxVaults, plan.MaxStorageBytes, plan.Price, plan.DurationDays, plan.IsActive, plan.CreatedAt);

@@ -15,6 +15,10 @@ public sealed class PaymentController(VnPayService service, ILogger<PaymentContr
     [Authorize, HttpGet("me/subscription")]
     public Task<CurrentSubscriptionDto> CurrentSubscription(CancellationToken ct) => service.CurrentSubscription(UserId, ct);
 
+    [Authorize, HttpGet("quote")]
+    public Task<SubscriptionQuoteDto> Quote([FromQuery] int planId, CancellationToken ct) =>
+        service.GetQuote(UserId, planId, ct);
+
     [Authorize, HttpGet("me/transactions")]
     public Task<PaymentTransactionPageDto> MyTransactions([FromQuery] int page = 1, [FromQuery] int pageSize = 20,
         [FromQuery] string? status = null, CancellationToken ct = default) =>

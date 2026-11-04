@@ -221,31 +221,43 @@ public sealed class VaultService(
     private async Task SendInvitationEmailAsync(string toEmail, string registerUrl)
     {
         var mailHost = configuration["MailOptions:Host"];
-        var mailPort = int.Parse(configuration["MailOptions:Port"] ?? "587");
+        var mailPortStr = configuration["MailOptions:Port"];
         var mailUser = configuration["MailOptions:Username"];
         var mailPass = configuration["MailOptions:Password"];
         var mailFrom = configuration["MailOptions:From"];
 
-        using var client = new SmtpClient(mailHost, mailPort)
+        if (string.IsNullOrWhiteSpace(mailHost) || string.IsNullOrWhiteSpace(mailFrom))
         {
-            Credentials = new NetworkCredential(mailUser, mailPass),
-            EnableSsl = true
-        };
+            return;
+        }
 
-        var mailMessage = new MailMessage
+        try
         {
-            From = new MailAddress(mailFrom),
-            Subject = "Loi moi tro thanh nguoi thu huong tai san ky thuat so - LegacyVault",
-            Body = $"Xin chao,\n\n" +
-                   $"Ban da duoc chi dinh lam nguoi thu huong mot tai san tren he thong LegacyVault.\n" +
-                   $"Vui long tao tai khoan bằng cach truy cap vao duong dan sau de tiep nhan quyen thu huong:\n\n" +
-                   $"{registerUrl}\n\n" +
-                   $"Tran trong,\nLegacyVault Team",
-            IsBodyHtml = false
-        };
+            var mailPort = int.TryParse(mailPortStr, out var port) ? port : 587;
+            using var client = new SmtpClient(mailHost, mailPort)
+            {
+                Credentials = new NetworkCredential(mailUser, mailPass),
+                EnableSsl = true
+            };
 
-        mailMessage.To.Add(toEmail);
-        await client.SendMailAsync(mailMessage);
+            var mailMessage = new MailMessage
+            {
+                From = new MailAddress(mailFrom),
+                Subject = "Loi moi tro thanh nguoi thu huong tai san ky thuat so - LegacyVault",
+                Body = $"Xin chao,\n\n" +
+                       $"Ban da duoc chi dinh lam nguoi thu huong mot tai san tren he thong LegacyVault.\n" +
+                       $"Vui long tao tai khoan bằng cach truy cap vao duong dan sau de tiep nhan quyen thu huong:\n\n" +
+                       $"{registerUrl}\n\n" +
+                       $"Tran trong,\nLegacyVault Team",
+                IsBodyHtml = false
+            };
+
+            mailMessage.To.Add(toEmail);
+            await client.SendMailAsync(mailMessage);
+        }
+        catch
+        {
+        }
     }
 
     private static void Validate(UploadFile file)
