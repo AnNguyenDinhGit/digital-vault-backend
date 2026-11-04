@@ -2,7 +2,22 @@ namespace LegacyVault.BLL.DTOs;
 
 public sealed record CreatePaymentInput(int PlanId);
 public sealed record SubscriptionPlanDto(int PlanId, string PlanName, int MaxVaults, long MaxStorageBytes, decimal Price, int DurationDays);
-public sealed record CurrentSubscriptionDto(bool HasActiveSubscription, UserSubscriptionDto? Subscription);
+public sealed record CurrentSubscriptionDto(
+    bool HasActiveSubscription,
+    UserSubscriptionDto? Subscription,
+    UserSubscriptionDto? ScheduledSubscription = null,
+    DateTime? UpgradeWindowEndsAt = null,
+    DateTime? RenewalWindowStartsAt = null,
+    int? DaysLeft = null,
+    bool IsReadOnly = false);
+public sealed record SubscriptionQuoteDto(
+    bool Allowed,
+    string? ReasonCode,
+    string? ReasonMessage,
+    string? ChangeType,
+    decimal AmountDue,
+    DateTime? StartsAt,
+    DateTime? EndsAt);
 public sealed record UserSubscriptionDto(int SubscriptionId, string Status, DateTime StartDate, DateTime EndDate, SubscriptionPlanDto Plan);
 public sealed record PaymentTransactionDto(long TransactionId, string? TransactionCode, decimal Amount, string PaymentMethod, string Status, DateTime CreatedAt, int? SubscriptionId, string? PlanName);
 public sealed record PaymentTransactionPageDto(int Page, int PageSize, int Total, IReadOnlyList<PaymentTransactionDto> Items);

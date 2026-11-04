@@ -84,6 +84,20 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
                 role ??= new Role { RoleName = defaultRole };
                 user.Roles.Clear();
                 user.Roles.Add(role);
+
+                var freePlan = await db.SubscriptionPlans.FirstOrDefaultAsync(x => x.IsActive && x.Price == 0, ct);
+                if (freePlan != null && !user.UserSubscriptions.Any())
+                {
+                    var now = DateTime.UtcNow;
+                    user.UserSubscriptions.Add(new UserSubscription
+                    {
+                        PlanId = freePlan.PlanId,
+                        StartDate = now,
+                        EndDate = DateTime.UtcNow.AddYears(100),
+                        Status = "Active"
+                    });
+                }
+
                 db.Users.Add(user);
                 await Save(ct);
                 await transaction.CommitAsync(ct);
@@ -108,6 +122,7 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
         user.UserId = 0;
         foreach (var auth in user.Authentications) { auth.AuthId = 0; auth.UserId = 0; }
         user.Roles.Clear();
+        user.UserSubscriptions.Clear();
     }
 
     private IQueryable<DigitalAsset> Assets => db.DigitalAssets.Include(x => x.Vault).ThenInclude(x => x.HandoverRequests).Include(x => x.AssetDocuments).Include(x => x.BeneficiaryAssignments).ThenInclude(x => x.Beneficiary).AsSplitQuery();

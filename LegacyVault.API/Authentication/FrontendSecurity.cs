@@ -25,7 +25,24 @@ public static class FrontendSecurity
                 throw new WorkflowException(400, "Set X-Vault-Request: 1 for Google cookie-bound mutations.");
             await next(context);
         }
-        catch (WorkflowException ex) { context.Response.StatusCode = ex.StatusCode; await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message }); }
+        catch (WorkflowException ex)
+        {
+            context.Response.StatusCode = ex.StatusCode;
+            if (ex.ErrorCode != null)
+            {
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    status = ex.StatusCode,
+                    detail = ex.Message,
+                    code = ex.ErrorCode,
+                    errorCode = ex.ErrorCode
+                });
+            }
+            else
+            {
+                await context.Response.WriteAsJsonAsync(new { status = ex.StatusCode, detail = ex.Message });
+            }
+        }
         catch (RepositoryConflictException) { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { status = 409, detail = "Resource changed concurrently; reload and retry." }); }
         catch (RepositoryDuplicateException) { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { status = 409, detail = "Duplicate resource." }); }
         catch (Exception ex) when (ex is not OperationCanceledException || !context.RequestAborted.IsCancellationRequested)

@@ -1,3 +1,4 @@
+using LegacyVault.API.Filters;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
@@ -6,7 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace LegacyVault.API.Controllers;
 
-[ApiController, Authorize, Route("api/owner")]
+[ApiController, Authorize, Route("api/owner"), TypeFilter(typeof(RequireActiveSubscriptionFilter))]
 public sealed class OwnerManagementController(ManagementService service) : VaultController
 {
     [HttpGet("vaults/{vaultId:int}/executor")]
