@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
+using LegacyVault.API.Filters;
 using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.BLL.Services;
@@ -58,7 +59,7 @@ public sealed class LegalForm
     [Required] public IFormFile Evidence { get; set; } = null!;
 }
 
-[ApiController, Authorize, Route("api/owner")]
+[ApiController, Authorize, Route("api/owner"), TypeFilter(typeof(RequireActiveSubscriptionFilter))]
 public sealed class OwnerController(VaultService service) : VaultController
 {
     [HttpGet("vaults")]
