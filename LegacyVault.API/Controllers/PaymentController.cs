@@ -7,7 +7,7 @@ using System.Text.Json.Serialization;
 namespace LegacyVault.API.Controllers;
 
 [ApiController, Route("api/payments")]
-public sealed class PaymentController(VnPayService service, ILogger<PaymentController> logger) : VaultController
+public sealed class PaymentController(VnPayService service, ILogger<PaymentController> logger, IConfiguration configuration) : VaultController
 {
     [AllowAnonymous, HttpGet("plans")]
     public Task<IReadOnlyList<SubscriptionPlanDto>> Plans(CancellationToken ct) => service.Plans(ct);
@@ -29,9 +29,18 @@ public sealed class PaymentController(VnPayService service, ILogger<PaymentContr
     {
         var result = await service.HandleReturn(ReadGatewayQuery(), ct);
 
+        if (Request.Headers.Accept.Any(h => h != null && h.Contains("application/json", StringComparison.OrdinalIgnoreCase)))
+        {
+            return Ok(result);
+        }
+
         // Chuyển hướng người dùng về trang kết quả trên Frontend kèm theo trạng thái và mã giao dịch
-        var frontendUrl = $"https://digitalvault-zeta.vercel.app/payment-result?status={result.Status}&code={result.TransactionCode}";
-        return Redirect(frontendUrl);
+        var frontendUrl = configuration["VnPay:FrontendReturnUrl"]
+            ?? configuration["VnPay:FeResult"]
+            ?? (configuration["FrontendUrl"] != null ? configuration["FrontendUrl"]!.TrimEnd('/') + "/payment/vnpay-return" : null)
+            ?? "https://digitalvault-zeta.vercel.app/payment/vnpay-return";
+        var queryString = Request.QueryString.HasValue ? Request.QueryString.Value : $"?status={result.Status}&code={result.TransactionCode}";
+        return Redirect($"{frontendUrl}{queryString}");
     }
 
     [Authorize, HttpPost("select-free")]
