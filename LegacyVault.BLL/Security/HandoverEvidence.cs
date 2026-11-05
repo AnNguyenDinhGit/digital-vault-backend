@@ -15,8 +15,14 @@ public static class HandoverEvidence
     {
         foreach (var document in request.HandoverDocuments.Where(d => d.UploadedBy == request.ExecutorId))
         {
-            var envelope = await protection.Read(store, document.StoragePath, ct);
-            if (envelope.Purpose == "DeathCertificate" && envelope.SignerId == request.ExecutorId) return document;
+            try
+            {
+                var envelope = await protection.Read(store, document.StoragePath, ct);
+                if (envelope.Purpose == "DeathCertificate" && envelope.SignerId == request.ExecutorId) return document;
+            }
+            catch (WorkflowException ex) when (ex.StatusCode == 503)
+            {
+            }
         }
         return null;
     }

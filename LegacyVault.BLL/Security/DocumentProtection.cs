@@ -25,12 +25,20 @@ public sealed class DocumentProtection(SecurityOptions options)
         if (signature is null || signature.Length == 0 || content is null || content.Length == 0) return false;
         try
         {
-            var rawPem = options.SignerCertificates.Values.FirstOrDefault();
+            if (!options.SignerCertificates.TryGetValue(signer, out var rawPem) || string.IsNullOrWhiteSpace(rawPem))
+            {
+                rawPem = options.SignerCertificates.GetValueOrDefault(0)
+                      ?? options.SignerCertificates.Values.FirstOrDefault();
+            }
             if (string.IsNullOrEmpty(rawPem)) return false;
 
             var pem = rawPem.Replace("\\n", "\n");
 
             using var cert = X509Certificate2.CreateFromPem(pem);
+            var now = DateTime.UtcNow;
+            if (now < cert.NotBefore.ToUniversalTime() || now > cert.NotAfter.ToUniversalTime())
+                return false;
+
             using var rsa = cert.GetRSAPublicKey();
             if (rsa is null) return false;
 
