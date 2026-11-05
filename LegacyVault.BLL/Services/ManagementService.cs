@@ -389,8 +389,15 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var result = new List<DocumentDto>();
         foreach (var d in request.HandoverDocuments)
         {
-            var content = await Read(d.StoragePath, ct);
-            result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+            try
+            {
+                var content = await Read(d.StoragePath, ct);
+                result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+            }
+            catch (WorkflowException ex) when (ex.StatusCode == 503)
+            {
+                result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, false, null));
+            }
         }
         return result;
     }

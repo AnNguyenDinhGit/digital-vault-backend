@@ -348,8 +348,15 @@ public sealed class VaultService(
         var documents = new List<DocumentDto>();
         foreach (var d in r.HandoverDocuments)
         {
-            var content = await Read(d.StoragePath, ct);
-            documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+            try
+            {
+                var content = await Read(d.StoragePath, ct);
+                documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+            }
+            catch (WorkflowException ex) when (ex.StatusCode == 503)
+            {
+                documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, false, null));
+            }
         }
         return Map(r) with { Documents = documents };
     }
