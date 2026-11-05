@@ -21,6 +21,6 @@ public sealed class DocumentStore(string root) : IDocumentStore
         catch { File.Delete(PathFor(id)); throw; }
     }
     public Task<byte[]> Read(string id, CancellationToken ct) => File.ReadAllBytesAsync(PathFor(id), ct);
-    public Task<long> Length(string id, CancellationToken ct) => Task.FromResult(new FileInfo(PathFor(id)).Length);
+    public Task<long> Length(string id, CancellationToken ct) { var info = new FileInfo(PathFor(id)); return Task.FromResult(info.Exists ? info.Length : 0L); }
     public Task Delete(string id) { File.Delete(PathFor(id)); return Task.CompletedTask; }
 }
