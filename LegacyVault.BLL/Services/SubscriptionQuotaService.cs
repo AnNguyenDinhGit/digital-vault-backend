@@ -45,6 +45,7 @@ public sealed class SubscriptionQuotaService(
         {
             try { used = checked(used + await store.Length(path, ct)); }
             catch (OverflowException) { throw new WorkflowException(409, "Stored data size exceeds the supported quota range."); }
+            catch (IOException) { }
         }
         if (additionalBytes < 0 || used > limits.MaxStorageBytes - additionalBytes)
             throw new WorkflowException(409, $"Storage limit exceeded. Used {used} bytes; limit is {limits.MaxStorageBytes} bytes.");
