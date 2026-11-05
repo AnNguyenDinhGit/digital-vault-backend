@@ -43,7 +43,7 @@ public sealed class PaymentController(VnPayService service, ILogger<PaymentContr
             ?? configuration["VnPay:FeResult"]
             ?? (configuration["FrontendUrl"] != null ? configuration["FrontendUrl"]!.TrimEnd('/') + "/payment/vnpay-return" : null)
             ?? "https://digitalvault-zeta.vercel.app/payment/vnpay-return";
-        var queryString = Request.QueryString.HasValue ? Request.QueryString.Value : $"?status={result.Status}&code={result.TransactionCode}";
+        var queryString = $"?status={result.Status}&code={result.TransactionCode}";
         return Redirect($"{frontendUrl}{queryString}");
     }
 
