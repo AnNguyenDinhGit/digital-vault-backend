@@ -30,7 +30,7 @@ sequenceDiagram
     BE->>FE: Redirect về https://digitalvault-zeta.vercel.app/auth/google/callback
     
     Note over FE: Tại trang Callback URL
-    FE->>BE: GET /api/auth/google/challenge (withCredentials: true)
+    FE->>BE: GET /api/auth/gCallbakhoallenge (withCredentials: true)
     BE-->>FE: Trả về { challengeId, requiresOtp, expiresAt }
     
     alt Trường hợp 1: requiresOtp == false (Email đã có tài khoản)
@@ -242,3 +242,26 @@ export default function GoogleCallbackPage() {
 
 4. **Lỗi `503 - "Configure Google:ClientId and Google:ClientSecret first."`**:
    - Nếu gặp lỗi này, là do Backend trên server chưa được cấu hình Client ID và Client Secret từ Google Cloud Console. Cần liên hệ người quản trị Backend để thêm cấu hình.
+
+---
+
+## 5. Hướng dẫn cấu hình trên Google Cloud Console (Sửa lỗi `redirect_uri_mismatch`)
+
+Để sửa lỗi đăng nhập Google OAuth (`Error 400: redirect_uri_mismatch`), người giữ tài khoản quản trị Google Cloud Console cần cập nhật cấu hình cho OAuth 2.0 Client ID theo các bước sau:
+
+1. **Truy cập trang quản lý**: Đi tới trang **Google Cloud Console > APIs & Services > Credentials** (`https://console.cloud.google.com/apis/credentials`).
+2. **Chọn Client ID**: Trong danh sách **OAuth 2.0 Client IDs**, bấm chọn Client ID tương ứng của dự án (mã ID bắt đầu bằng `654216346433-0ubl52nuqmumaqm8unvv1v7rkhtin0qg...`).
+3. **Thêm Authorized JavaScript origins**: Tại mục **Authorized JavaScript origins**, bấm **+ ADD URI** và thêm các đường dẫn sau:
+   ```text
+   https://vault-owner-be.huydevops.id.vn
+   ```
+   ```text
+   https://digitalvault-zeta.vercel.app
+   ```
+   *(Nếu test dưới máy local, thêm cả `http://localhost:5173` và `https://localhost:7015`)*
+4. **Thêm Authorized redirect URIs**: Kéo xuống mục **Authorized redirect URIs** (URI chuyển hướng được ủy quyền), bấm **+ ADD URI** và dán chính xác địa chỉ sau:
+   ```text
+   https://vault-owner-be.huydevops.id.vn/api/auth/google/oidc-callback
+   ```
+   *(Nếu test dưới máy local, thêm cả `https://localhost:7015/api/auth/google/oidc-callback`)*
+5. **Lưu cấu hình**: Bấm nút **SAVE (Lưu)** ở cuối trang, đợi khoảng 30 giây đến 1 phút để Google đồng bộ rồi thử đăng nhập lại.
