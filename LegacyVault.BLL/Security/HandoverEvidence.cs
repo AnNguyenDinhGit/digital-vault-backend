@@ -16,19 +16,28 @@ public static class HandoverEvidence
             throw new WorkflowException(409, "The assigned Executor must upload a death certificate before legal submission or approval.");
     }
 
-    public static async Task EnsureOwnerNotDeceased(int ownerId, IWorkflowRepository? workflow, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
+    public static async Task<bool> IsUserDeceased(int userId, IWorkflowRepository? workflow, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
     {
-        if (workflow is null) return;
-        if (await workflow.HasOwnerDeathRecord(ownerId, ct))
+        if (workflow is null) return false;
+        if (await workflow.HasOwnerDeathRecord(userId, ct))
         {
-            throw new WorkflowException(409, "Chủ sở hữu đang có hồ sơ báo tử hoặc đơn bàn giao di sản đã được xác nhận, không thể tạo mới hoặc chỉnh sửa kho và tài sản.");
+            return true;
         }
-        foreach (var report in await workflow.OwnerDeathReports(ownerId, ct))
+        foreach (var report in await workflow.OwnerDeathReports(userId, ct))
         {
             if (await FindDeathCertificate(report, store, protection, ct) is not null)
             {
-                throw new WorkflowException(409, "Chủ sở hữu đang có hồ sơ báo tử kèm giấy chứng tử, không thể tạo mới hoặc chỉnh sửa kho và tài sản.");
+                return true;
             }
+        }
+        return false;
+    }
+
+    public static async Task EnsureOwnerNotDeceased(int ownerId, IWorkflowRepository? workflow, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
+    {
+        if (await IsUserDeceased(ownerId, workflow, store, protection, ct))
+        {
+            throw new WorkflowException(409, "Chủ sở hữu đang có hồ sơ báo tử kèm giấy chứng tử, không thể tạo mới hoặc chỉnh sửa kho và tài sản.");
         }
     }
     public static async Task<HandoverDocument?> FindDeathCertificate(HandoverRequest request, IDocumentStore store, DocumentProtection protection, CancellationToken ct)

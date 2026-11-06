@@ -50,7 +50,13 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
     public Task<List<ExecutorOptionRow>> ExecutorOptions(int ownerId, int? vaultId, string? search, int page, int size, DateTime now, CancellationToken ct)
     {
         var query = db.Users.AsNoTracking().Where(u => u.UserId != ownerId && u.Status == "Active" &&
-            u.Roles.Any(r => r.RoleName == "Executor") && !u.Authentications.Any(a => a.LockedUntil > now));
+            u.Roles.Any(r => r.RoleName == "Executor") && !u.Authentications.Any(a => a.LockedUntil > now) &&
+            !db.HandoverRequests.Any(hr =>
+                hr.Vault.OwnerId == u.UserId &&
+                hr.Status != "Cancelled" && hr.Status != "Rejected" && hr.Status != "Declined" &&
+                db.AuditLogs.Any(a =>
+                    (a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == hr.RequestId) ||
+                    ((a.Action == "ReportOwnerDeceased" || a.Action == "ConfirmOwnerDeceased") && a.EntityType == "User" && a.EntityId == u.UserId))));
         if (vaultId is not null)
             query = query.Where(u => !db.BeneficiaryAssignments.Any(b => b.Asset.VaultId == vaultId && b.BeneficiaryId == u.UserId && b.Status == "Active"));
         if (search is not null)
@@ -101,7 +107,8 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
             r.Vault.OwnerId == ownerId &&
             r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Declined" &&
             db.AuditLogs.Any(a =>
-                a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId),
+                (a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId) ||
+                ((a.Action == "ReportOwnerDeceased" || a.Action == "ConfirmOwnerDeceased") && a.EntityType == "User" && a.EntityId == ownerId)),
             ct);
 
     public Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()

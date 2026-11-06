@@ -188,6 +188,8 @@ public sealed class VaultService(
         }
 
         if (recipient.UserId == owner) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
+        if (await HandoverEvidence.IsUserDeceased(recipient.UserId, workflow, store, protection, ct))
+            throw new WorkflowException(409, "Tài khoản người nhận đã có hồ sơ báo tử kèm giấy chứng tử, không thể chỉ định làm người thụ hưởng.");
         if (asset.BeneficiaryAssignments.Any(x => x.BeneficiaryId == recipient.UserId && (x.Status == "Active" || x.Status == "Pending")))
             throw new WorkflowException(409, "This user is already a pending or active beneficiary of the asset.");
         if (asset.BeneficiaryAssignments.Where(x => x.Status == "Active").Sum(x => x.Allocation) + input.Allocation > 100m)
@@ -448,7 +450,9 @@ public sealed class VaultService(
         var r = await Executed(user, request, ct);
         if (r.Status is not ("Draft" or "Rejected" or "Additional_Info")) throw new WorkflowException(409, "Only draft, rejected or additional-info requests can be submitted.");
         await Role(verifier, VerifierRole, ct);
-        if (verifier == user || verifier == r.Vault.OwnerId || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == verifier)) throw new WorkflowException(400, "An independent legal verifier is required.");
+        if (verifier == user || verifier == r.Vault.OwnerId || r.HandoverCases.Any(c => c.Assignment.BeneficiaryId == verifier) ||
+            await HandoverEvidence.IsUserDeceased(verifier, workflow, store, protection, ct))
+            throw new WorkflowException(400, "An independent legal verifier is required.");
         if (comment?.Length > 2000) throw new WorkflowException(400, "Comment exceeds 2000 characters.");
         await HandoverEvidence.RequireDeathCertificate(r, store, protection, ct);
         Validate(file);
