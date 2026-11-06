@@ -82,6 +82,7 @@ public sealed class VaultService(
     public async Task<VaultDto> CreateVault(int user, CreateVaultInput input, CancellationToken ct)
     {
         await Role(user, OwnerRole, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
         ValidateInput(input);
         using var quotaLock = quotas is null ? null : await quotas.LockUser(user, ct);
         if (quotas is not null) await quotas.EnsureCanCreateVault(user, ct);
@@ -98,6 +99,7 @@ public sealed class VaultService(
         ValidateInput(input);
         using var quotaLock = quotas is null ? null : await quotas.LockUser(user, ct);
         var vault = await OwnedVault(user, input.VaultId, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
         if (vault.Status != "Active") throw new WorkflowException(409, "Vault is not active.");
         Editable(vault); vault.UpdatedAt = RecordVersion.Next(vault.UpdatedAt);
         var now = DateTime.UtcNow;
@@ -168,6 +170,7 @@ public sealed class VaultService(
     public async Task<BeneficiaryDto> AssignBeneficiary(int owner, int assetId, AssignBeneficiaryInput input, CancellationToken ct)
     {
         var asset = await Owned(owner, assetId, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(owner, workflow, store, protection, ct);
         ValidateInput(input);
         if (decimal.Round(input.Allocation, 2) != input.Allocation) throw new WorkflowException(400, "Allocation allows at most two decimal places.");
         if (asset.Status != "Active" || asset.Vault.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
@@ -294,6 +297,7 @@ public sealed class VaultService(
         UploadFile file, byte[]? signature, CancellationToken ct)
     {
         var asset = await Owned(user, assetId, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
         using var quotaLock = quotas is null ? null : await quotas.LockUser(user, ct);
         if (asset.Vault.Status != "Active" || asset.Status != "Active") throw new WorkflowException(409, "Vault or asset is not active.");
         Editable(asset.Vault);

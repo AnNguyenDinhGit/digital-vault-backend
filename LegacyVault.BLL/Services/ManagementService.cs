@@ -24,6 +24,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task RevokeExecutor(int user, int vaultId, CancellationToken ct)
     {
         var vault = await Owned(user, vaultId, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
         if (vault.Status != "Active" || vault.HandoverRequests.Any(r => r.Status is not ("Pending_Executor" or "Cancelled" or "Declined")))
             throw new WorkflowException(409, "Executor cannot be revoked after handover acceptance or processing.");
         var active = vault.ExecutorAssignments.Where(Assigned).ToArray();
@@ -137,7 +138,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
                 {
                     try
                     {
-                        _ = await CreateRequest(proof.UserId, vaultSummary.VaultId, ct);
+                        _ = await CreateRequest(proof.UserId, vaultSummary.VaultId, ct, "DeadManSwitch");
                         Audit(proof.UserId, "DeadManSwitchTriggered", "DigitalVault", vaultSummary.VaultId);
                         Notify(proof.UserId, "ProofOfLife", "Đã kích hoạt bàn giao tự động", $"Kho '{vaultSummary.VaultName}' đã được tự động khởi tạo yêu cầu bàn giao do quá hạn điểm danh và hết thời gian ân hạn.");
                         triggeredCount++;
@@ -169,8 +170,10 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task<LifeConfirmationDto> ConfirmAlive(int user, CancellationToken ct)
     {
         await Require(user, ct, VaultService.OwnerRole);
-        if ((await workflow.ApprovedOwnerRequests(user, ct)).Count != 0)
-            throw new WorkflowException(409, "A legally confirmed handover exists. Resolve the conflicting legal record before confirming alive.");
+        foreach (var verified in await workflow.ApprovedOwnerRequests(user, ct))
+            if (string.Equals(verified.RequestType, "DeadManSwitch", StringComparison.OrdinalIgnoreCase) ||
+                await HandoverEvidence.FindDeathCertificate(verified, store, protection, ct) is not null)
+                throw new WorkflowException(409, "A legally confirmed handover exists. Resolve the conflicting legal record before confirming alive.");
         foreach (var request in await workflow.OwnerDeathReports(user, ct))
             if (await HandoverEvidence.FindDeathCertificate(request, store, protection, ct) is not null)
                 throw new WorkflowException(409, "A death report or legally confirmed handover exists. Resolve the conflicting report before confirming alive.");
@@ -265,25 +268,33 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private static ReceiptDto Map(BeneficiaryReceipt r) => new(r.ReceiptId, r.HandoverId, r.BeneficiaryId, r.Status, r.ConfirmationNote, r.ConfirmedAt);
     public async Task<VaultDto> UpdateVault(int user, int id, CreateVaultInput input, CancellationToken ct)
     {
-        Validate(input); var v = await Owned(user, id, ct); Mutable(v);
+        Validate(input); var v = await Owned(user, id, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Mutable(v);
         v.VaultName = input.Name.Trim(); v.Description = input.Description?.Trim(); Touch(v);
         Audit(user, "UpdateVault", "DigitalVault", id); await repository.Save(ct); return new(id, v.VaultName, v.Description, v.Status);
     }
     public async Task CloseVault(int user, int id, CancellationToken ct)
     {
-        var v = await Owned(user, id, ct); Mutable(v); v.Status = "Closed"; Touch(v);
+        var v = await Owned(user, id, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Mutable(v); v.Status = "Closed"; Touch(v);
         Audit(user, "CloseVault", "DigitalVault", id); await repository.Save(ct);
     }
     public async Task<AssetDto> UpdateAsset(int user, int id, UpdateAssetInput input, CancellationToken ct)
     {
-        Validate(input); var a = await Asset(user, id, ct); Active(a);
+        Validate(input); var a = await Asset(user, id, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Active(a);
         a.AssetName = input.Name.Trim(); a.AssetType = input.Type.Trim(); a.Description = input.Description?.Trim(); a.UpdatedAt = RecordVersion.Next(a.UpdatedAt); Touch(a.Vault);
         Audit(user, "UpdateAsset", "DigitalAsset", id); await repository.Save(ct);
         return new(id, a.AssetName, a.AssetType, a.Description, a.Status, a.AssetDocuments.Where(d => d.Status != "Revoked").Select(d => new DocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray());
     }
     public async Task RevokeAsset(int user, int id, CancellationToken ct)
     {
-        var a = await Asset(user, id, ct); Active(a); a.Status = "Revoked"; a.UpdatedAt = RecordVersion.Next(a.UpdatedAt); Touch(a.Vault);
+        var a = await Asset(user, id, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Active(a); a.Status = "Revoked"; a.UpdatedAt = RecordVersion.Next(a.UpdatedAt); Touch(a.Vault);
         Audit(user, "RevokeAsset", "DigitalAsset", id); await repository.Save(ct);
     }
     public async Task<PageDto<AssignmentDto>> Allocations(int user, int id, int page, int size, CancellationToken ct)
@@ -295,7 +306,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     public async Task<AssignmentDto> ChangeAllocation(int user, int id, int assignmentId, AllocationInput? input, CancellationToken ct)
     {
-        var a = await Asset(user, id, ct); Active(a);
+        var a = await Asset(user, id, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Active(a);
         var b = a.BeneficiaryAssignments.SingleOrDefault(x => x.AssignmentId == assignmentId) ?? throw new WorkflowException(404, "Assignment not found.");
         if (b.Status != "Active") throw new WorkflowException(409, "Assignment is not active.");
         if (input is not null)
@@ -328,7 +341,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     public async Task RevokeDocument(int user, int asset, int document, CancellationToken ct)
     {
-        var a = await Asset(user, asset, ct); Active(a);
+        var a = await Asset(user, asset, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Active(a);
         var d = a.AssetDocuments.SingleOrDefault(d => d.DocumentId == document) ?? throw new WorkflowException(404, "Document not found.");
         if (d.Status == "Revoked") throw new WorkflowException(409, "Document already revoked.");
         d.Status = "Revoked"; a.UpdatedAt = RecordVersion.Next(a.UpdatedAt); Touch(a.Vault);
@@ -341,7 +356,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     public async Task AssignExecutor(int user, int vault, ExecutorInput input, CancellationToken ct)
     {
-        Validate(input); var v = await Owned(user, vault, ct); Mutable(v);
+        Validate(input); var v = await Owned(user, vault, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Mutable(v);
         await Require(input.ExecutorId, ct, VaultService.ExecutorRole);
         if (input.ExecutorId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == input.ExecutorId))) throw new WorkflowException(400, "Executor must be independent.");
         foreach (var a in v.ExecutorAssignments.Where(Assigned)) a.Status = "Revoked";
@@ -356,19 +373,21 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             throw new WorkflowException(409, "Every active asset needs documents and exactly 100 percent active allocation.");
         if (assets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.Beneficiary.Status != "Active"))) throw new WorkflowException(409, "Beneficiary unavailable.");
     }
-    private HandoverRequest NewRequest(int actor, DigitalVault v, int executor)
+    private HandoverRequest NewRequest(int actor, DigitalVault v, int executor, string requestType = "Inheritance")
     {
         Ready(v); Touch(v);
-        var request = new HandoverRequest { VaultId = v.VaultId, Vault = v, ExecutorId = executor, RequestType = "Inheritance", Status = "Pending_Executor", InitiatedAt = DateTime.UtcNow };
+        var request = new HandoverRequest { VaultId = v.VaultId, Vault = v, ExecutorId = executor, RequestType = requestType, Status = "Pending_Executor", InitiatedAt = DateTime.UtcNow };
         foreach (var a in v.DigitalAssets.Where(a => a.Status == "Active"))
             foreach (var b in a.BeneficiaryAssignments.Where(b => b.Status == "Active")) request.HandoverCases.Add(new HandoverCase { AssignmentId = b.AssignmentId, Assignment = b, Status = "Pending" });
         repository.Add(request); Audit(actor, "CreateHandover", "DigitalVault", v.VaultId);
         Notify(executor, "Handover", "Handover assigned", "A handover has been assigned to you.");
         return request;
     }
-    public async Task<HandoverDto> CreateRequest(int user, int vault, CancellationToken ct)
+    public async Task<HandoverDto> CreateRequest(int user, int vault, CancellationToken ct, string requestType = "Inheritance")
     {
-        var v = await Owned(user, vault, ct); Mutable(v); Ready(v);
+        var v = await Owned(user, vault, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        Mutable(v); Ready(v);
         var existing = v.ExecutorAssignments.Where(Assigned).ToArray();
         if (existing.Length > 1) throw new WorkflowException(409, "Multiple active executors require administrative correction.");
         int executor;
@@ -384,7 +403,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         }
         if (executor == v.OwnerId || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == executor)))
             throw new WorkflowException(409, "Assigned Executor must be independent of the owner and beneficiaries.");
-        var r = NewRequest(user, v, executor); r.Executor = await Require(executor, ct, VaultService.ExecutorRole);
+        var r = NewRequest(user, v, executor, requestType); r.Executor = await Require(executor, ct, VaultService.ExecutorRole);
         await repository.Save(ct); return Map(r);
     }
     public async Task<HandoverDto> CreateAssignedRequest(int user, int vault, CancellationToken ct)
@@ -396,7 +415,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         if (v.OwnerId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == user)))
             throw new WorkflowException(403, "Executor must be independent.");
         Mutable(v); Ready(v);
-        var request = NewRequest(user, v, user); request.Status = "Draft";
+        var request = NewRequest(user, v, user, "DeadManSwitch"); request.Status = "Draft";
         Audit(user, "AcceptHandover", "DigitalVault", vault);
         await repository.Save(ct); return Map(request);
     }
@@ -537,7 +556,11 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             }
             foreach (var d in r.HandoverDocuments) _ = await Read(d.StoragePath, ct);
             r.Status = "Approved";
-            Audit(user, "ConfirmOwnerDeceased", "User", r.Vault.OwnerId);
+            if (string.Equals(r.RequestType, "DeadManSwitch", StringComparison.OrdinalIgnoreCase) ||
+                await HandoverEvidence.FindDeathCertificate(r, store, protection, ct) is not null)
+            {
+                Audit(user, "ConfirmOwnerDeceased", "User", r.Vault.OwnerId);
+            }
             foreach (var c in r.HandoverCases) c.Status = "In_Progress";
             foreach (var d in r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).Where(d => d.Status == "Pending_Legal")) d.Status = "Active";
             foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct()) Notify(recipient, "Inheritance", "Inheritance available", "Verify your identity to review the assigned inheritance.");
