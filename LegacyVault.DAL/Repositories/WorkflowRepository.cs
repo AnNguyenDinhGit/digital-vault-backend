@@ -21,6 +21,7 @@ public interface IWorkflowRepository
     Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct);
     Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct);
     Task<List<ProofOfLife>> ActiveProofOfLives(CancellationToken ct);
+    Task<bool> HasOwnerDeathRecord(int ownerId, CancellationToken ct);
     Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct);
     Task<List<HandoverOverviewRow>> Overview(int executor, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct);
     Task<(int TotalCount, List<AdminHandoverRow> Items)> AdminHandovers(int page, int size, string? status, int? ownerId, CancellationToken ct);
@@ -94,6 +95,14 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
         .Include(p => p.User).ThenInclude(u => u.DigitalVaults)
         .Where(p => p.Status == "Active" || p.Status == "Warning")
         .ToListAsync(ct);
+
+    public Task<bool> HasOwnerDeathRecord(int ownerId, CancellationToken ct) =>
+        db.HandoverRequests.AsNoTracking().AnyAsync(r =>
+            r.Vault.OwnerId == ownerId &&
+            r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Declined" &&
+            db.AuditLogs.Any(a =>
+                a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId),
+            ct);
 
     public Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()
         .Include(r => r.HandoverDocuments).AsSplitQuery()

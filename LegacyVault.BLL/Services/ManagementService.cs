@@ -47,14 +47,33 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     {
         var ids = requests.Where(r => r.Status == "Declined").Select(r => r.RequestId).ToArray();
         var declines = ids.Length == 0 ? new Dictionary<int, OwnerDeclineRow>() : (await workflow.OwnerDeclines(owner, ids, ct)).ToDictionary(r => r.RequestId);
-        return requests.Select(r =>
+        var hasDeathRecord = await workflow.HasOwnerDeathRecord(owner, ct);
+        var result = new HandoverDto[requests.Length];
+        for (var i = 0; i < requests.Length; i++)
         {
+            var r = requests[i];
             var dto = Map(r);
-            if (!declines.TryGetValue(r.RequestId, out var decline)) return dto;
-            var prefix = $"Handover #{r.RequestId}: ";
-            return dto with { DeclineReason = decline.Message?.StartsWith(prefix, StringComparison.Ordinal) == true ? decline.Message[prefix.Length..] : null,
-                DeclinedAt = decline.DeclinedAt is { } date ? DateTime.SpecifyKind(date, DateTimeKind.Utc) : null };
-        }).ToArray();
+            var deathDoc = await HandoverEvidence.FindDeathCertificate(r, store, protection, ct);
+            if ((deathDoc is not null || (hasDeathRecord && r.Status is not ("Cancelled" or "Rejected" or "Declined"))) && dto.Documents.Count > 0)
+            {
+                var targetId = deathDoc?.HandoverDocumentId ?? dto.Documents[0].DocumentId;
+                dto = dto with
+                {
+                    Documents = dto.Documents.Select(d => d.DocumentId == targetId ? d with { Purpose = "DeathCertificate" } : d).ToArray()
+                };
+            }
+            if (declines.TryGetValue(r.RequestId, out var decline))
+            {
+                var prefix = $"Handover #{r.RequestId}: ";
+                dto = dto with
+                {
+                    DeclineReason = decline.Message?.StartsWith(prefix, StringComparison.Ordinal) == true ? decline.Message[prefix.Length..] : null,
+                    DeclinedAt = decline.DeclinedAt is { } date ? DateTime.SpecifyKind(date, DateTimeKind.Utc) : null
+                };
+            }
+            result[i] = dto;
+        }
+        return result;
     }
 
     public async Task<ExecutorDetailDto> OwnerExecutorDetail(int user, int executorId, int? vaultId, CancellationToken ct)
