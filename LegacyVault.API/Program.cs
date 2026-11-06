@@ -90,9 +90,22 @@ builder.Services.AddScoped<SubscriptionQuotaService>();
 builder.Services.AddSingleton(builder.Configuration.GetSection("SubscriptionQuota").Get<SubscriptionQuotaOptions>() ?? new SubscriptionQuotaOptions());
 builder.Services.AddSingleton(builder.Configuration.GetSection("Security").Get<SecurityOptions>() ?? new SecurityOptions());
 
-var mailOptions = builder.Configuration.GetSection("MailOptions").Get<MailOptions>()
-    ?? builder.Configuration.GetSection("Mail").Get<MailOptions>()
-    ?? new MailOptions();
+var mailOptions = new MailOptions();
+builder.Configuration.GetSection("Mail").Bind(mailOptions);
+builder.Configuration.GetSection("MailOptions").Bind(mailOptions);
+if (string.IsNullOrWhiteSpace(mailOptions.Host)) mailOptions.Host = builder.Configuration["Mail:Host"] ?? "";
+if (string.IsNullOrWhiteSpace(mailOptions.Username)) mailOptions.Username = builder.Configuration["Mail:Username"] ?? "";
+if (string.IsNullOrWhiteSpace(mailOptions.Password)) mailOptions.Password = builder.Configuration["Mail:Password"] ?? "";
+if (string.IsNullOrWhiteSpace(mailOptions.From)) mailOptions.From = builder.Configuration["Mail:From"] ?? "";
+
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
+        | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
+        | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 builder.Services.AddSingleton(mailOptions);
 builder.Services.AddSingleton<DocumentProtection>();
@@ -163,6 +176,7 @@ using (var scope = app.Services.CreateScope())
     await DbInitializer.SeedAsync(db);
 }
 
+app.UseForwardedHeaders();
 app.UseVaultErrors();
 app.UseHttpsRedirection();
 app.UseSwagger();

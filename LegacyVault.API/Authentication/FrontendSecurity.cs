@@ -22,7 +22,15 @@ public static class FrontendSecurity
         try
         {
             if (context.Request.Path.StartsWithSegments("/api/auth/google") && context.Request.Method is not ("GET" or "HEAD" or "OPTIONS") && context.Request.Headers["X-Vault-Request"] != "1")
-                throw new WorkflowException(400, "Set X-Vault-Request: 1 for Google cookie-bound mutations.");
+            {
+                var allowedOrigins = context.RequestServices.GetService<IConfiguration>()?.GetSection("Cors:Origins").Get<string[]>() ?? Array.Empty<string>();
+                var origin = context.Request.Headers.Origin.ToString();
+                var isTrustedJsonOrigin = !string.IsNullOrEmpty(origin) &&
+                    allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase) &&
+                    context.Request.HasJsonContentType();
+                if (!isTrustedJsonOrigin)
+                    throw new WorkflowException(400, "Set X-Vault-Request: 1 for Google cookie-bound mutations.");
+            }
             await next(context);
         }
         catch (WorkflowException ex)

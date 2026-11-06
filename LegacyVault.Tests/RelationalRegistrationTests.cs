@@ -39,7 +39,7 @@ internal static class RelationalRegistrationTests
             setup.Roles.Add(new Role { RoleName = VaultService.AdminRole });
             await setup.SaveChangesAsync();
         }
-        RegisterInput Input(string email) => new() { FullName = "Relational Test", Email = email, Password = "Registration123!", ConfirmPassword = "Registration123!", Phone = "0901234567" };
+        RegisterInput Input(string email, string phone = "0901234567", string? identityNumber = "001200012345") => new() { FullName = "Relational Test", Email = email, Password = "Registration123!", ConfirmPassword = "Registration123!", Phone = phone, IdentityNumber = identityNumber };
         RegistrationDto first;
         await using (var db = new LegacyVaultDbContext(options))
         {
@@ -59,7 +59,7 @@ internal static class RelationalRegistrationTests
         }
         await using (var db = new LegacyVaultDbContext(options))
         {
-            await new IdentityService(new VaultRepository(db)).Register(Input("second@example.test"), default);
+            await new IdentityService(new VaultRepository(db)).Register(Input("second@example.test", "0901234568", "001200012346"), default);
         }
         await using (var db = new LegacyVaultDbContext(options))
         {
@@ -69,8 +69,14 @@ internal static class RelationalRegistrationTests
         }
         await using (var db = new LegacyVaultDbContext(options))
         {
-            try { await new IdentityService(new VaultRepository(db)).Register(Input("FIRST@EXAMPLE.TEST"), default); throw new Exception("Expected duplicate email rejection"); }
+            try { await new IdentityService(new VaultRepository(db)).Register(Input("FIRST@EXAMPLE.TEST", "0901234599", "001200099999"), default); throw new Exception("Expected duplicate email rejection"); }
             catch (WorkflowException ex) { check(ex.StatusCode == 409 && await db.Users.CountAsync() == 2, "case-insensitive duplicate registration leaves database unchanged"); }
+
+            try { await new IdentityService(new VaultRepository(db)).Register(Input("dupphone@example.test", "0901234567", "001200099998"), default); throw new Exception("Expected duplicate phone rejection"); }
+            catch (WorkflowException ex) { check(ex.StatusCode == 409 && await db.Users.CountAsync() == 2, "duplicate phone number is rejected across accounts"); }
+
+            try { await new IdentityService(new VaultRepository(db)).Register(Input("dupcccd@example.test", "0901234577", "001200012345"), default); throw new Exception("Expected duplicate CCCD rejection"); }
+            catch (WorkflowException ex) { check(ex.StatusCode == 409 && await db.Users.CountAsync() == 2, "duplicate CCCD (IdentityNumber) is rejected across accounts"); }
         }
 
         await using var rollbackConnection = new SqliteConnection("Data Source=:memory:");

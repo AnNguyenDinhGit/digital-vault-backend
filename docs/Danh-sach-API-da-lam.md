@@ -19,7 +19,8 @@ Cập nhật ngày 28/10/2026, đối chiếu controller và middleware hiện t
 | POST | `/api/auth/change-password/confirm` | Xác nhận OTP và hoàn tất đổi mật khẩu |
 | POST | `/api/auth/logout` | Kết thúc phiên phía client và thu hồi OTP grant beneficiary |
 
-API nghiệp vụ dùng JWT Bearer. Đăng ký tài khoản thường nhận Owner do server gán; cấp quyền nhân viên được thực hiện qua Admin.
+API nghiệp vụ dùng JWT Bearer. Đăng ký tài khoản thường nhận Owner do server gán và tự động gán Gói Miễn Phí (`Price == 0`) vô thời hạn; cấp quyền nhân viên được thực hiện qua Admin.
+- **Ràng buộc dữ liệu duy nhất & kiểm tra định dạng**: `Email`, `Phone` (số điện thoại 10 chữ số bắt đầu bằng `0` hoặc `+84`), và `IdentityNumber` (số CCCD gồm đúng 12 chữ số) được kiểm tra định dạng hợp lệ (`400 Bad Request` nếu sai định dạng) và **chỉ được phép gán với duy nhất 1 chủ sở hữu** (`409 Conflict` nếu tài khoản khác đã đăng ký). Kiểm tra này áp dụng tại tất cả API đăng ký, cập nhật hồ sơ cá nhân và tạo/sửa người dùng của Admin.
 
 ## 2. Đăng nhập Google
 
@@ -173,13 +174,21 @@ Các endpoint dưới đây yêu cầu role `Admin`.
 | Method | Endpoint | Quyền | Chức năng |
 | --- | --- | --- | --- |
 | GET | `/api/payments/plans` | Công khai | Danh sách gói đang hoạt động |
-| GET | `/api/payments/me/subscription` | Đăng nhập | Gói đang hoạt động; trả `hasActiveSubscription=false` nếu hiện không có |
+| GET | `/api/payments/quote` | Đăng nhập | Báo giá và kiểm tra quy tắc đổi gói/gia hạn (`?planId=`) |
+| GET | `/api/payments/me/subscription` | Đăng nhập | Gói hiện tại kèm `scheduledSubscription`, `upgradeWindowEndsAt`, `renewalWindowStartsAt`, `daysLeft`, `isReadOnly` |
+| POST | `/api/payments/select-free` | Đăng nhập | Chọn gói miễn phí (chặn 409 nếu đang có gói trả phí hiệu lực) |
 | GET | `/api/payments/me/transactions` | Đăng nhập | Lịch sử giao dịch cá nhân; hỗ trợ phân trang và lọc trạng thái |
-| POST | `/api/payments/vnpay/checkout` | Đăng nhập | Tạo giao dịch chờ và nhận URL thanh toán |
-| GET | `/api/payments/vnpay/return` | Callback công khai | Xác minh chữ ký/giá trị trả về cho trình duyệt |
-| GET | `/api/payments/vnpay/ipn` | Callback công khai | Nhận IPN; cập nhật giao dịch và kích hoạt gói khi thành công |
+| POST | `/api/payments/vnpay/checkout` | Đăng nhập | Tạo giao dịch chờ (tự động tính tiền theo Quote) và nhận URL thanh toán |
+| GET | `/api/payments/vnpay/return` | Callback công khai | Xác minh chữ ký/giá trị trả về và chuyển hướng về trang kết quả Frontend |
+| GET | `/api/payments/vnpay/ipn` | Callback công khai | Nhận IPN; cập nhật giao dịch và kích hoạt gói (`Active`/`Replaced`/`Scheduled`) |
+| GET | `/api/admin/subscription-plans` | Admin | Danh sách toàn bộ gói dịch vụ (cả đang bán và đã ngừng) |
+| POST | `/api/admin/subscription-plans` | Admin | Tạo gói dịch vụ mới |
+| PUT | `/api/admin/subscription-plans/{planId}` | Admin | Cập nhật gói dịch vụ |
+| DELETE | `/api/admin/subscription-plans/{planId}` | Admin | Ngừng kích hoạt gói (`IsActive = false`), hoặc xóa vĩnh viễn khi truyền `?permanent=true` |
+| DELETE | `/api/admin/subscription-plans/{planId}/permanent` | Admin | Xóa vĩnh viễn một gói dịch vụ đã ngừng sử dụng (`IsActive = false`) |
+| DELETE | `/api/admin/subscription-plans/inactive` | Admin | Xóa hàng loạt toàn bộ các gói dịch vụ thanh toán VNPay đã ngừng sử dụng |
 
-Admin quản lý gói tại `GET/POST /api/admin/subscription-plans`, `PUT/DELETE /api/admin/subscription-plans/{planId}`; DELETE sẽ ngừng bán gói (soft deactivate), không xóa lịch sử. Admin tra giao dịch qua `GET /api/admin/payment-transactions` (lọc userId/status, phân trang) và `GET /api/admin/payment-transactions/{transactionId}`. Trạng thái giao dịch được xác định bởi callback VNPay, không có API sửa trạng thái thanh toán thủ công.
+Chi tiết quy tắc đổi gói, cửa sổ thời gian (3 ngày đầu nâng cấp bù chênh lệch, khóa giữa kỳ, 5 ngày cuối đặt lịch `Scheduled`) và chế độ chỉ xem (`SUBSCRIPTION_EXPIRED`) xem tại [Quy-tac-doi-goi-va-het-han-subscription.md](Quy-tac-doi-goi-va-het-han-subscription.md) và [VNPay.md](VNPay.md).
 
 Callback kiểm tra HMAC-SHA512 và số tiền khớp giao dịch. IPN là thông báo máy chủ cập nhật trạng thái; không dùng riêng redirect từ trình duyệt làm bằng chứng thanh toán. Cần cấu hình `VnPay:TmnCode`, `VnPay:HashSecret`, `VnPay:PaymentUrl`, `VnPay:ReturnUrl` và URL IPN trên VNPay. Hướng dẫn tại [VNPay.md](VNPay.md).
 

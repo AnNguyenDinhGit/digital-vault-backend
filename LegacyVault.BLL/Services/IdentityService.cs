@@ -137,6 +137,74 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         return $"PBKDF2-SHA256$600000${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
     }
 
+    public static string NormalizeAndValidateEmail(string? rawEmail)
+    {
+        var email = rawEmail?.Trim().ToLowerInvariant() ?? "";
+        if (string.IsNullOrEmpty(email) || email.Length > 150 ||
+            !new EmailAddressAttribute().IsValid(email) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(email, @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
+        {
+            throw new WorkflowException(400, "Email không hợp lệ.");
+        }
+        return email;
+    }
+
+    public static string? NormalizeAndValidatePhone(string? rawPhone)
+    {
+        if (string.IsNullOrWhiteSpace(rawPhone)) return null;
+        var phone = rawPhone.Trim();
+        if (System.Text.RegularExpressions.Regex.IsMatch(phone, @"^\+84\d{9}$"))
+        {
+            phone = "0" + phone[3..];
+        }
+        if (!System.Text.RegularExpressions.Regex.IsMatch(phone, @"^0\d{9}$"))
+        {
+            throw new WorkflowException(400, "Số điện thoại không hợp lệ (phải gồm 10 chữ số bắt đầu bằng 0 hoặc +84).");
+        }
+        return phone;
+    }
+
+    public static string? NormalizeAndValidateIdentityNumber(string? rawIdentityNumber)
+    {
+        if (string.IsNullOrWhiteSpace(rawIdentityNumber)) return null;
+        var identityNumber = rawIdentityNumber.Trim();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(identityNumber, @"^\d{12}$"))
+        {
+            throw new WorkflowException(400, "Số CCCD không hợp lệ (phải gồm đúng 12 chữ số).");
+        }
+        return identityNumber;
+    }
+
+    public static async Task EnsureUniqueUserFieldsAsync(
+        IVaultRepository repository,
+        string? email,
+        string? phone,
+        string? identityNumber,
+        int? excludeUserId,
+        CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(email))
+        {
+            var existingEmail = await repository.LoginUser(email, ct);
+            if (existingEmail is not null && existingEmail.UserId != excludeUserId)
+                throw new WorkflowException(409, "Email này đã được đăng ký bởi một chủ sở hữu khác.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(phone))
+        {
+            var existingPhone = await repository.UserByPhone(phone, ct);
+            if (existingPhone is not null && existingPhone.UserId != excludeUserId)
+                throw new WorkflowException(409, "Số điện thoại này đã được đăng ký bởi một chủ sở hữu khác.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(identityNumber))
+        {
+            var existingIdentity = await repository.UserByIdentityNumber(identityNumber, ct);
+            if (existingIdentity is not null && existingIdentity.UserId != excludeUserId)
+                throw new WorkflowException(409, "Số CCCD này đã được đăng ký bởi một chủ sở hữu khác.");
+        }
+    }
+
     public async Task<RegisterChallengeDto> RequestRegister(RegisterInput input, CancellationToken ct)
     {
         var errors = new List<ValidationResult>();
@@ -144,13 +212,14 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
             throw new WorkflowException(400, "Thông tin đăng ký không hợp lệ.");
 
         var name = input.FullName.Trim();
-        var email = input.Email.Trim().ToLowerInvariant();
+        var email = NormalizeAndValidateEmail(input.Email);
+        var phone = NormalizeAndValidatePhone(input.Phone);
+        var identityNumber = NormalizeAndValidateIdentityNumber(input.IdentityNumber);
 
-        if (name.Length == 0 || !new EmailAddressAttribute().IsValid(email) || input.Password != input.ConfirmPassword)
+        if (name.Length == 0 || input.Password != input.ConfirmPassword)
             throw new WorkflowException(400, "Họ tên/email không hợp lệ hoặc mật khẩu xác nhận không khớp.");
 
-        if (await repository.LoginUser(email, ct) is not null)
-            throw new WorkflowException(409, "Email này đã được đăng ký tài khoản.");
+        await EnsureUniqueUserFieldsAsync(repository, email, phone, identityNumber, null, ct);
 
         if (sender is null)
             throw new WorkflowException(503, "Dịch vụ gửi email OTP chưa được cấu hình.");
@@ -234,10 +303,11 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         }
 
         var name = input.FullName.Trim();
-        var email = input.Email.Trim().ToLowerInvariant();
+        var email = NormalizeAndValidateEmail(input.Email);
+        var phone = NormalizeAndValidatePhone(input.Phone);
+        var identityNumber = NormalizeAndValidateIdentityNumber(input.IdentityNumber);
 
         if (name.Length == 0 ||
-            !new EmailAddressAttribute().IsValid(email) ||
             input.Password != input.ConfirmPassword)
         {
             throw new WorkflowException(
@@ -245,12 +315,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
                 "Full name/email is invalid or passwords do not match.");
         }
 
-        if (await repository.LoginUser(email, ct) is not null)
-        {
-            throw new WorkflowException(
-                409,
-                "Email is already registered.");
-        }
+        await EnsureUniqueUserFieldsAsync(repository, email, phone, identityNumber, null, ct);
 
         var now = DateTime.UtcNow;
 
@@ -258,12 +323,8 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         {
             FullName = name,
             Email = email,
-            Phone = string.IsNullOrWhiteSpace(input.Phone)
-                ? null
-                : input.Phone.Trim(),
-            IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber)
-                ? null
-                : input.IdentityNumber.Trim(),
+            Phone = phone,
+            IdentityNumber = identityNumber,
             Status = "Active",
             CreatedAt = now,
             UpdatedAt = now
@@ -333,19 +394,28 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
             user.FullName = input.FullName.Trim();
         }
 
+        string? normalizedPhone = null;
         if (input.Phone != null)
         {
-            user.Phone = string.IsNullOrWhiteSpace(input.Phone)
-                ? null
-                : input.Phone.Trim();
+            normalizedPhone = NormalizeAndValidatePhone(input.Phone);
+        }
+
+        string? normalizedIdentityNumber = null;
+        if (input.IdentityNumber != null)
+        {
+            normalizedIdentityNumber = NormalizeAndValidateIdentityNumber(input.IdentityNumber);
+        }
+
+        await EnsureUniqueUserFieldsAsync(repository, null, normalizedPhone, normalizedIdentityNumber, userId, ct);
+
+        if (input.Phone != null)
+        {
+            user.Phone = normalizedPhone;
         }
 
         if (input.IdentityNumber != null)
         {
-            user.IdentityNumber =
-                string.IsNullOrWhiteSpace(input.IdentityNumber)
-                    ? null
-                    : input.IdentityNumber.Trim();
+            user.IdentityNumber = normalizedIdentityNumber;
         }
 
         user.UpdatedAt = DateTime.UtcNow;

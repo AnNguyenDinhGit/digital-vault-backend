@@ -226,6 +226,38 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         await repository.Save(ct);
     }
 
+    public async Task DeleteInactivePlan(int adminUserId, int planId, CancellationToken ct)
+    {
+        var plan = await repository.Plan(planId, ct) ?? throw new WorkflowException(404, "Không tìm thấy gói dịch vụ.");
+        if (plan.IsActive)
+        {
+            throw new WorkflowException(
+                409,
+                "Chỉ được xóa các gói dịch vụ đã ngừng sử dụng (IsActive = false). Vui lòng ngừng kích hoạt gói trước khi xóa.",
+                "PLAN_STILL_ACTIVE");
+        }
+
+        if (await repository.HasActiveOrScheduledSubscribers(planId, DateTime.UtcNow, ct))
+        {
+            throw new WorkflowException(
+                409,
+                "Không thể xóa gói dịch vụ đang có người dùng còn hạn sử dụng hoặc đang chờ kích hoạt.",
+                "PLAN_HAS_ACTIVE_SUBSCRIBERS");
+        }
+
+        await repository.DeleteInactivePlan(plan, adminUserId, ct);
+    }
+
+    public async Task<DeleteInactivePlansResultDto> DeleteAllInactivePlans(int adminUserId, CancellationToken ct)
+    {
+        var (deletedIds, skippedIds) = await repository.DeleteAllInactivePlans(adminUserId, DateTime.UtcNow, ct);
+        return new DeleteInactivePlansResultDto(
+            DeletedCount: deletedIds.Count,
+            DeletedPlanIds: deletedIds,
+            SkippedPlanIds: skippedIds,
+            Message: $"Đã xóa {deletedIds.Count} gói dịch vụ ngừng sử dụng.");
+    }
+
     public async Task<PaymentTransactionPageDto> AdminHistory(int page, int pageSize, int? userId, string? status, CancellationToken ct)
     {
         ValidatePaging(page, pageSize);
