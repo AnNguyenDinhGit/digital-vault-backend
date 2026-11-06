@@ -100,12 +100,8 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
         db.HandoverRequests.AsNoTracking().AnyAsync(r =>
             r.Vault.OwnerId == ownerId &&
             r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Declined" &&
-            (r.RequestType == "DeadManSwitch" ||
-             r.Status == "Pending_Legal" || r.Status == "Additional_Info" ||
-             r.Status == "Approved" || r.Status == "In_Progress" || r.Status == "Completed" ||
-             db.AuditLogs.Any(a =>
-                 (a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId) ||
-                 ((a.Action == "ReportOwnerDeceased" || a.Action == "ConfirmOwnerDeceased") && a.EntityType == "User" && a.EntityId == ownerId))),
+            db.AuditLogs.Any(a =>
+                a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId),
             ct);
 
     public Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()
