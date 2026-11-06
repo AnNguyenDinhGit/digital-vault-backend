@@ -19,13 +19,9 @@ public static class HandoverEvidence
     public static async Task EnsureOwnerNotDeceased(int ownerId, IWorkflowRepository? workflow, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
     {
         if (workflow is null) return;
-        foreach (var verified in await workflow.ApprovedOwnerRequests(ownerId, ct))
+        if (await workflow.HasOwnerDeathRecord(ownerId, ct))
         {
-            if (string.Equals(verified.RequestType, "DeadManSwitch", StringComparison.OrdinalIgnoreCase) ||
-                await FindDeathCertificate(verified, store, protection, ct) is not null)
-            {
-                throw new WorkflowException(409, "Chủ sở hữu đã được xác nhận qua đời theo hồ sơ bàn giao di sản, không thể tạo mới hoặc chỉnh sửa kho và tài sản.");
-            }
+            throw new WorkflowException(409, "Chủ sở hữu đang có hồ sơ báo tử hoặc đơn bàn giao di sản đã được xác nhận, không thể tạo mới hoặc chỉnh sửa kho và tài sản.");
         }
         foreach (var report in await workflow.OwnerDeathReports(ownerId, ct))
         {
