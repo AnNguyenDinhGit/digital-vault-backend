@@ -98,7 +98,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         Ready(request.Vault);
         request.Status = "Draft"; Touch(request.Vault);
         Audit(user, "AcceptHandover", "HandoverRequest", id);
-        Notify(request.Vault.OwnerId, "Handover", "Executor accepted handover", "The assigned Executor accepted your handover request.");
+        Notify(request.Vault.OwnerId, "Handover", "Executor đã tiếp nhận hồ sơ bàn giao", "Executor được giao đã tiếp nhận hồ sơ bàn giao của bạn.");
         await repository.Save(ct); return Map(request);
     }
 
@@ -347,7 +347,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         else b.Status = "Revoked";
         b.UpdatedAt = DateTime.UtcNow; a.UpdatedAt = RecordVersion.Next(a.UpdatedAt); Touch(a.Vault);
         Audit(user, input is null ? "RevokeAllocation" : "UpdateAllocation", "BeneficiaryAssignment", assignmentId);
-        Notify(b.BeneficiaryId, "Allocation", "Allocation changed", "Your asset allocation was changed by its owner.");
+        Notify(b.BeneficiaryId, "Allocation", "Tỷ lệ phân bổ tài sản đã thay đổi", "Chủ sở hữu kho đã cập nhật hoặc thu hồi tỷ lệ phân bổ tài sản số của bạn.");
         await repository.Save(ct); return Map(b);
     }
     public async Task<PageDto<ManagedDocumentDto>> Documents(int user, int asset, int page, int size, CancellationToken ct)
@@ -389,7 +389,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             throw new WorkflowException(409, "Tài khoản Người thi hành đã có hồ sơ báo tử kèm giấy chứng tử, không thể chỉ định.");
         foreach (var a in v.ExecutorAssignments.Where(Assigned)) a.Status = "Revoked";
         repository.Add(new ExecutorAssignment { VaultId = vault, ExecutorId = input.ExecutorId, Status = "Active", AssignedAt = DateTime.UtcNow }); Touch(v);
-        Notify(input.ExecutorId, "Assignment", "Vault assigned", "An Owner assigned you to a vault. Review your assignments for the handover workflow.");
+        Notify(input.ExecutorId, "Assignment", "Kho được giao cho Executor", "Một chủ sở hữu đã phân công bạn làm Người thi hành cho kho di sản. Vui lòng kiểm tra danh sách phân công để xử lý quy trình bàn giao khi cần.");
         Audit(user, "AssignExecutor", "DigitalVault", vault); await repository.Save(ct);
     }
     private static void Ready(DigitalVault v)
@@ -406,7 +406,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         foreach (var a in v.DigitalAssets.Where(a => a.Status == "Active"))
             foreach (var b in a.BeneficiaryAssignments.Where(b => b.Status == "Active")) request.HandoverCases.Add(new HandoverCase { AssignmentId = b.AssignmentId, Assignment = b, Status = "Pending" });
         repository.Add(request); Audit(actor, "CreateHandover", "DigitalVault", v.VaultId);
-        Notify(executor, "Handover", "Handover assigned", "A handover has been assigned to you.");
+        Notify(executor, "Handover", "Có hồ sơ bàn giao mới được giao cho bạn", "Một hồ sơ bàn giao di sản đã được giao cho bạn xử lý.");
         return request;
     }
     public async Task<HandoverDto> CreateRequest(int user, int vault, CancellationToken ct, string requestType = "Inheritance")
@@ -589,11 +589,11 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             }
             foreach (var c in r.HandoverCases) c.Status = "In_Progress";
             foreach (var d in r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).Where(d => d.Status == "Pending_Legal")) d.Status = "Active";
-            foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct()) Notify(recipient, "Inheritance", "Inheritance available", "Verify your identity to review the assigned inheritance.");
+            foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct()) Notify(recipient, "Inheritance", "Di sản thừa kế đã sẵn sàng", "Hồ sơ bàn giao di sản đã được duyệt pháp lý. Vui lòng xác thực danh tính để kiểm tra tài sản thừa kế được phân bổ cho bạn.");
         }
         else r.Status = decision == "Additional_Info" ? "Additional_Info" : "Rejected";
         v.Status = decision; v.Comment = input.Comment.Trim(); v.ReviewedAt = DateTime.UtcNow; Touch(r.Vault);
-        Audit(user, "LegalReview", "LegalVerification", v.VerificationId); Notify(r.ExecutorId, "LegalReview", "Legal review updated", "Review the assigned handover for the legal decision.");
+        Audit(user, "LegalReview", "LegalVerification", v.VerificationId); Notify(r.ExecutorId, "LegalReview", "Đã có kết quả thẩm định pháp lý", "Hồ sơ bàn giao bạn phụ trách đã có kết quả thẩm định pháp lý. Vui lòng kiểm tra chi tiết hồ sơ.");
         await repository.Save(ct); return new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt);
     }
     public async Task<PageDto<CaseDto>> Cases(int user, int page, int size, CancellationToken ct)
@@ -627,12 +627,31 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         if (c.Status != "Completed" || c.Request.Status != "Completed" || c.BeneficiaryReceipts.Any()) throw new WorkflowException(409, "Only a completed, unreceived handover can be confirmed.");
         var receipt = new BeneficiaryReceipt { HandoverId = id, BeneficiaryId = user, Status = "Confirmed", ConfirmationNote = input.Note?.Trim(), ConfirmedAt = DateTime.UtcNow };
         repository.Add(receipt); c.Status = "Received"; Touch(c.Request.Vault);
-        Audit(user, "ConfirmReceipt", "HandoverCase", id); Notify(c.Request.ExecutorId, "Receipt", "Receipt confirmed", "The beneficiary confirmed receipt of their handover.");
+        Audit(user, "ConfirmReceipt", "HandoverCase", id); Notify(c.Request.ExecutorId, "Receipt", "Người thụ hưởng đã xác nhận nhận di sản", "Người thụ hưởng đã xác nhận nhận đầy đủ tài sản từ hồ sơ bàn giao.");
         await repository.Save(ct); return Map(receipt);
     }
     public async Task<PageDto<NotificationDto>> Notifications(int user, int page, int size, CancellationToken ct)
     {
-        Paging(page, size); var rows = await workflow.Notifications(user, page, size, ct); return new(page, size, rows.Select(n => new NotificationDto(n.NotificationId, n.Type, n.Title, n.Message, n.IsRead, n.CreatedAt)).ToArray());
+        Paging(page, size); var rows = await workflow.Notifications(user, page, size, ct); return new(page, size, rows.Select(LocalizeNotification).ToArray());
+    }
+    private static NotificationDto LocalizeNotification(Notification n)
+    {
+        var (title, message) = n.Title switch
+        {
+            "Beneficiary designated" => ("Bạn đã được chỉ định làm người thụ hưởng", "Một chủ sở hữu kho di sản đã chỉ định bạn làm người thụ hưởng tài sản số. Quyền truy cập sẽ được mở sau khi hồ sơ bàn giao được duyệt pháp lý và xác thực danh tính."),
+            "Allocation changed" => ("Tỷ lệ phân bổ tài sản đã thay đổi", "Chủ sở hữu kho đã cập nhật hoặc thu hồi tỷ lệ phân bổ tài sản số của bạn."),
+            "Vault assigned" => ("Kho được giao cho Executor", "Một chủ sở hữu đã phân công bạn làm Người thi hành cho kho di sản. Vui lòng kiểm tra danh sách phân công để xử lý quy trình bàn giao khi cần."),
+            "Vault assignment revoked" => ("Phân công Executor đã bị thu hồi", "Phân công Executor của bạn với kho này đã bị thu hồi."),
+            "Handover assigned" => ("Có hồ sơ bàn giao mới được giao cho bạn", "Một hồ sơ bàn giao di sản đã được giao cho bạn xử lý."),
+            "Executor accepted handover" => ("Executor đã tiếp nhận hồ sơ bàn giao", "Executor được giao đã tiếp nhận hồ sơ bàn giao của bạn."),
+            "Legal review assigned" => ("Có hồ sơ mới cần thẩm định pháp lý", "Một hồ sơ bàn giao di sản đang chờ bạn thẩm định pháp lý độc lập."),
+            "Legal review updated" => ("Đã có kết quả thẩm định pháp lý", "Hồ sơ bàn giao bạn phụ trách đã có kết quả thẩm định pháp lý. Vui lòng kiểm tra chi tiết hồ sơ."),
+            "Inheritance available" => ("Di sản thừa kế đã sẵn sàng", "Hồ sơ bàn giao di sản đã được duyệt pháp lý. Vui lòng xác thực danh tính để kiểm tra tài sản thừa kế được phân bổ cho bạn."),
+            "Handover completed" => ("Bàn giao di sản đã hoàn tất", "Người thi hành đã hoàn tất bàn giao di sản của bạn. Vui lòng kiểm tra tài sản thừa kế và xác nhận đã nhận."),
+            "Receipt confirmed" => ("Người thụ hưởng đã xác nhận nhận di sản", "Người thụ hưởng đã xác nhận nhận đầy đủ tài sản từ hồ sơ bàn giao."),
+            _ => (n.Title, n.Message)
+        };
+        return new(n.NotificationId, n.Type, title, message, n.IsRead, n.CreatedAt);
     }
     public async Task ReadNotification(int user, int id, CancellationToken ct)
     {
