@@ -20,6 +20,7 @@ public interface IWorkflowRepository
     Task<List<ExecutorOptionRow>> ExecutorOptions(int ownerId, int? vaultId, string? search, int page, int size, DateTime now, CancellationToken ct);
     Task<DateTime?> LastLifeConfirmation(int ownerId, CancellationToken ct);
     Task<DateTime> ConfirmLife(int ownerId, DateTime now, CancellationToken ct);
+    Task<List<ProofOfLife>> ActiveProofOfLives(CancellationToken ct);
     Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct);
     Task<List<HandoverOverviewRow>> Overview(int executor, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct);
     Task<(int TotalCount, List<AdminHandoverRow> Items)> AdminHandovers(int page, int size, string? status, int? ownerId, CancellationToken ct);
@@ -88,6 +89,11 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
         await transaction.CommitAsync(ct);
         return now;
     }
+
+    public Task<List<ProofOfLife>> ActiveProofOfLives(CancellationToken ct) => db.ProofOfLives
+        .Include(p => p.User).ThenInclude(u => u.DigitalVaults)
+        .Where(p => p.Status == "Active" || p.Status == "Warning")
+        .ToListAsync(ct);
 
     public Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()
         .Include(r => r.HandoverDocuments).AsSplitQuery()
