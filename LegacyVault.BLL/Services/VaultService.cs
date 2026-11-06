@@ -214,7 +214,7 @@ public sealed class VaultService(
         repository.Add(assignment);
         asset.UpdatedAt = RecordVersion.Next(asset.UpdatedAt);
         Audit(owner, "AssignBeneficiary", "DigitalAsset", assetId, "Success");
-        repository.Add(new Notification { UserId = recipient.UserId, Type = "Allocation", Title = "Beneficiary designated", Message = "An owner designated you as a beneficiary. Access requires a legally approved handover and identity verification.", CreatedAt = now });
+        repository.Add(new Notification { UserId = recipient.UserId, Type = "Allocation", Title = "Bạn đã được chỉ định làm người thụ hưởng", Message = "Một chủ sở hữu kho di sản đã chỉ định bạn làm người thụ hưởng tài sản số. Quyền truy cập sẽ được mở sau khi hồ sơ bàn giao được duyệt pháp lý và xác thực danh tính.", CreatedAt = now });
         try
         {
             await repository.Save(ct);
@@ -438,7 +438,7 @@ public sealed class VaultService(
             r.Status = "Completed"; r.CompletedAt = DateTime.UtcNow; r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt);
             foreach (var c in r.HandoverCases) { c.Status = "Completed"; c.CompletedAt = DateTime.UtcNow; }
             foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct())
-                repository.Add(new Notification { UserId = recipient, Type = "Handover", Title = "Handover completed", Message = "Review your completed inheritance and confirm receipt.", CreatedAt = DateTime.UtcNow });
+                repository.Add(new Notification { UserId = recipient, Type = "Handover", Title = "Bàn giao di sản đã hoàn tất", Message = "Người thi hành đã hoàn tất bàn giao di sản của bạn. Vui lòng kiểm tra tài sản thừa kế và xác nhận đã nhận.", CreatedAt = DateTime.UtcNow });
             Audit(user, "CompleteHandover", "HandoverRequest", request, "Success");
             await repository.Save(ct);
         }
@@ -477,7 +477,7 @@ public sealed class VaultService(
             });
             r.Status = "Pending_Legal"; r.SubmittedAt = DateTime.UtcNow; r.Vault.UpdatedAt = RecordVersion.Next(r.Vault.UpdatedAt);
             Audit(user, "RequestLegalVerification", "HandoverRequest", request, "Success");
-            repository.Add(new Notification { UserId = verifier, Type = "LegalReview", Title = "Legal review assigned", Message = "A handover is awaiting your independent legal review.", CreatedAt = DateTime.UtcNow });
+            repository.Add(new Notification { UserId = verifier, Type = "LegalReview", Title = "Có hồ sơ mới cần thẩm định pháp lý", Message = $"Hồ sơ #{request} đã được gửi đến bạn để thẩm định pháp lý độc lập.", CreatedAt = DateTime.UtcNow });
             await repository.Save(ct);
             return verification.VerificationId;
         }
