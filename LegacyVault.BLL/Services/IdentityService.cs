@@ -144,7 +144,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
             !new EmailAddressAttribute().IsValid(email) ||
             !System.Text.RegularExpressions.Regex.IsMatch(email, @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
         {
-            throw new WorkflowException(400, "Email không hợp lệ.");
+            throw new WorkflowException(400, "Email không hợp lệ.", "INVALID_EMAIL");
         }
         return email;
     }
@@ -159,7 +159,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         }
         if (!System.Text.RegularExpressions.Regex.IsMatch(phone, @"^0\d{9}$"))
         {
-            throw new WorkflowException(400, "Số điện thoại không hợp lệ (phải gồm 10 chữ số bắt đầu bằng 0 hoặc +84).");
+            throw new WorkflowException(400, "Số điện thoại không hợp lệ (phải gồm 10 chữ số bắt đầu bằng 0 hoặc +84).", "INVALID_PHONE");
         }
         return phone;
     }
@@ -170,7 +170,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         var identityNumber = rawIdentityNumber.Trim();
         if (!System.Text.RegularExpressions.Regex.IsMatch(identityNumber, @"^\d{12}$"))
         {
-            throw new WorkflowException(400, "Số CCCD không hợp lệ (phải gồm đúng 12 chữ số).");
+            throw new WorkflowException(400, "Số CCCD không hợp lệ (phải gồm đúng 12 chữ số).", "INVALID_IDENTITY_NUMBER");
         }
         return identityNumber;
     }
@@ -187,21 +187,21 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         {
             var existingEmail = await repository.LoginUser(email, ct);
             if (existingEmail is not null && existingEmail.UserId != excludeUserId)
-                throw new WorkflowException(409, "Email này đã được đăng ký bởi một chủ sở hữu khác.");
+                throw new WorkflowException(409, "Email này đã được đăng ký bởi một chủ sở hữu khác.", "EMAIL_ALREADY_EXISTS");
         }
 
         if (!string.IsNullOrWhiteSpace(phone))
         {
             var existingPhone = await repository.UserByPhone(phone, ct);
             if (existingPhone is not null && existingPhone.UserId != excludeUserId)
-                throw new WorkflowException(409, "Số điện thoại này đã được đăng ký bởi một chủ sở hữu khác.");
+                throw new WorkflowException(409, "Số điện thoại này đã được đăng ký bởi một chủ sở hữu khác.", "PHONE_ALREADY_EXISTS");
         }
 
         if (!string.IsNullOrWhiteSpace(identityNumber))
         {
             var existingIdentity = await repository.UserByIdentityNumber(identityNumber, ct);
             if (existingIdentity is not null && existingIdentity.UserId != excludeUserId)
-                throw new WorkflowException(409, "Số CCCD này đã được đăng ký bởi một chủ sở hữu khác.");
+                throw new WorkflowException(409, "Số CCCD này đã được đăng ký bởi một chủ sở hữu khác.", "IDENTITY_NUMBER_ALREADY_EXISTS");
         }
     }
 
