@@ -84,7 +84,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var executor = await repository.User(executorId, ct);
         if (executor is null || executor.UserId == user || executor.Status != "Active" ||
             !executor.Roles.Any(r => r.RoleName == VaultService.ExecutorRole) || executor.Authentications.Any(a => a.LockedUntil > DateTime.UtcNow) ||
-            (vault is not null && vault.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == executorId))))
+            (vault is not null && vault.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == executorId))) ||
+            await HandoverEvidence.IsUserDeceased(executorId, workflow, store, protection, ct))
             throw new WorkflowException(404, "Eligible Executor not found.");
         return new(executor.UserId, executor.FullName, VaultService.ExecutorRole, executor.Status, DateTime.SpecifyKind(executor.CreatedAt, DateTimeKind.Utc));
     }
@@ -189,6 +190,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task<LifeConfirmationDto> ConfirmAlive(int user, CancellationToken ct)
     {
         await Require(user, ct, VaultService.OwnerRole);
+        if (await workflow.HasOwnerDeathRecord(user, ct))
+            throw new WorkflowException(409, "A death report or legally confirmed handover exists. Resolve the conflicting report before confirming alive.");
         foreach (var verified in await workflow.ApprovedOwnerRequests(user, ct))
             if (string.Equals(verified.RequestType, "DeadManSwitch", StringComparison.OrdinalIgnoreCase) ||
                 await HandoverEvidence.FindDeathCertificate(verified, store, protection, ct) is not null)
@@ -334,7 +337,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         {
             Validate(input);
             var recipient = await repository.User(b.BeneficiaryId, ct);
-            if (recipient is null || recipient.Status != "Active" || recipient.UserId == user) throw new WorkflowException(409, "Recipient unavailable.");
+            if (recipient is null || recipient.Status != "Active" || recipient.UserId == user ||
+                await HandoverEvidence.IsUserDeceased(b.BeneficiaryId, workflow, store, protection, ct))
+                throw new WorkflowException(409, "Recipient unavailable.");
             if (decimal.Round(input.Allocation, 2) != input.Allocation) throw new WorkflowException(400, "Allocation precision exceeds two decimals.");
             if (a.BeneficiaryAssignments.Where(x => x.Status == "Active" && x.AssignmentId != assignmentId).Sum(x => x.Allocation) + input.Allocation > 100) throw new WorkflowException(409, "Allocation total exceeds 100 percent.");
             b.Allocation = input.Allocation;
@@ -380,6 +385,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         Mutable(v);
         await Require(input.ExecutorId, ct, VaultService.ExecutorRole);
         if (input.ExecutorId == user || v.DigitalAssets.Any(a => a.BeneficiaryAssignments.Any(b => b.Status == "Active" && b.BeneficiaryId == input.ExecutorId))) throw new WorkflowException(400, "Executor must be independent.");
+        if (await HandoverEvidence.IsUserDeceased(input.ExecutorId, workflow, store, protection, ct))
+            throw new WorkflowException(409, "Tài khoản Người thi hành đã có hồ sơ báo tử kèm giấy chứng tử, không thể chỉ định.");
         foreach (var a in v.ExecutorAssignments.Where(Assigned)) a.Status = "Revoked";
         repository.Add(new ExecutorAssignment { VaultId = vault, ExecutorId = input.ExecutorId, Status = "Active", AssignedAt = DateTime.UtcNow }); Touch(v);
         Notify(input.ExecutorId, "Assignment", "Vault assigned", "An Owner assigned you to a vault. Review your assignments for the handover workflow.");
