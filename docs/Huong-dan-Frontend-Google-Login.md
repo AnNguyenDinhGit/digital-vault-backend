@@ -30,7 +30,7 @@ sequenceDiagram
     BE->>FE: Redirect về https://digitalvault-zeta.vercel.app/auth/google/callback
     
     Note over FE: Tại trang Callback URL
-    FE->>BE: GET /api/auth/google/challenge (withCredentials: true)
+    FE->>BE: GET /api/auth/gCallbakhoallenge (withCredentials: true)
     BE-->>FE: Trả về { challengeId, requiresOtp, expiresAt }
     
     alt Trường hợp 1: requiresOtp == false (Email đã có tài khoản)
@@ -250,7 +250,7 @@ export default function GoogleCallbackPage() {
 Để sửa lỗi đăng nhập Google OAuth (`Error 400: redirect_uri_mismatch`), người giữ tài khoản quản trị Google Cloud Console cần cập nhật cấu hình cho OAuth 2.0 Client ID theo các bước sau:
 
 1. **Truy cập trang quản lý**: Đi tới trang **Google Cloud Console > APIs & Services > Credentials** (`https://console.cloud.google.com/apis/credentials`).
-2. **Chọn Client ID**: Trong danh sách **OAuth 2.0 Client IDs**, bấm chọn Client ID tương ứng của dự án (mã ID bắt đầu bằng `714072924020-muq14f196c63tmq9uattqmv45r3gm3dt...`).
+2. **Chọn Client ID**: Trong danh sách **OAuth 2.0 Client IDs**, bấm chọn Client ID tương ứng của dự án (mã ID bắt đầu bằng `654216346433-0ubl52nuqmumaqm8unvv1v7rkhtin0qg...`).
 3. **Thêm Authorized JavaScript origins**: Tại mục **Authorized JavaScript origins**, bấm **+ ADD URI** và thêm các đường dẫn sau:
    ```text
    https://vault-owner-be.huydevops.id.vn
