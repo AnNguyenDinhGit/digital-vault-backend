@@ -110,7 +110,60 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     public async Task<LifeConfirmationDto> LifeConfirmation(int user, CancellationToken ct)
     {
         await Require(user, ct, VaultService.OwnerRole);
+        await ProcessOverdueProofOfLives(DateTime.UtcNow, ct);
         return new(user, await LastConfirmedAlive(user, ct));
+    }
+
+    public async Task<int> ProcessOverdueProofOfLives(DateTime now, CancellationToken ct)
+    {
+        var proofs = await workflow.ActiveProofOfLives(ct);
+        var triggeredCount = 0;
+        var changed = false;
+
+        foreach (var proof in proofs)
+        {
+            var nextDue = proof.NextPingDue != default ? proof.NextPingDue : proof.LastPingAt.AddDays(proof.FrequencyDays);
+            var graceEndsAt = nextDue.AddDays(proof.GracePeriodDays);
+
+            if (now > graceEndsAt)
+            {
+                proof.Status = "Triggered";
+                proof.MissedCount = Math.Max(proof.MissedCount, 2);
+                proof.UpdatedAt = now;
+                changed = true;
+
+                var activeVaults = proof.User?.DigitalVaults?.Where(v => v.Status == "Active").ToArray() ?? Array.Empty<DigitalVault>();
+                foreach (var vaultSummary in activeVaults)
+                {
+                    try
+                    {
+                        _ = await CreateRequest(proof.UserId, vaultSummary.VaultId, ct);
+                        Audit(proof.UserId, "DeadManSwitchTriggered", "DigitalVault", vaultSummary.VaultId);
+                        Notify(proof.UserId, "ProofOfLife", "Đã kích hoạt bàn giao tự động", $"Kho '{vaultSummary.VaultName}' đã được tự động khởi tạo yêu cầu bàn giao do quá hạn điểm danh và hết thời gian ân hạn.");
+                        triggeredCount++;
+                    }
+                    catch (WorkflowException)
+                    {
+                        // Kho chưa đủ điều kiện bàn giao (chưa đủ 100% phân bổ/tài liệu) hoặc đã có đơn bàn giao đang xử lý -> bỏ qua kho này
+                    }
+                }
+            }
+            else if (now > nextDue && proof.Status != "Warning")
+            {
+                proof.Status = "Warning";
+                proof.MissedCount = Math.Max(proof.MissedCount, 1);
+                proof.UpdatedAt = now;
+                Notify(proof.UserId, "ProofOfLife", "Cảnh báo quá hạn điểm danh", "Bạn đã quá hạn điểm danh định kỳ. Vui lòng xác nhận còn sống trong thời gian ân hạn để tránh hệ thống tự động kích hoạt bàn giao.");
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            await repository.Save(ct);
+        }
+
+        return triggeredCount;
     }
 
     public async Task<LifeConfirmationDto> ConfirmAlive(int user, CancellationToken ct)

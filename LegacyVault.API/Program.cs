@@ -80,6 +80,7 @@ builder.Services.AddScoped<IVaultRepository, VaultRepository>();
 builder.Services.AddScoped<VaultService>();
 builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
 builder.Services.AddScoped<ManagementService>();
+builder.Services.AddHostedService<LegacyVault.API.Services.DeadManSwitchBackgroundService>();
 builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
 builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
