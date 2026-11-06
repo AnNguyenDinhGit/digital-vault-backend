@@ -111,8 +111,8 @@ var downloaded = await signedService.RequestDocument(6, 20, saved.HandoverDocume
 Check(downloaded.Content.SequenceEqual(file.Content) && downloaded.SignatureValid, "executor reads entire decrypted document and signature status");
 var registrationRepo = new FakeRepository();
 var identity = new IdentityService(registrationRepo);
-RegisterInput Registration(string email = " NewUser@Example.test ", string password = "Registration123!", string? confirmation = null) =>
-    new() { FullName = " Test User ", Email = email, Password = password, ConfirmPassword = confirmation ?? password, Phone = " 0901234567 " };
+RegisterInput Registration(string email = " NewUser@Example.test ", string password = "Registration123!", string? confirmation = null, string? phone = " 0901234567 ") =>
+    new() { FullName = " Test User ", Email = email, Password = password, ConfirmPassword = confirmation ?? password, Phone = phone };
 var registered = await identity.Register(Registration(), default);
 var account = registrationRepo.RegisteredUsers.Single();
 Check(registered.UserId > 0 && registered.Email == "newuser@example.test" && registered.FullName == "Test User" && account.Phone == "0901234567", "registration creates normalized account");
@@ -120,10 +120,13 @@ Check(account.Status == "Active" && account.Roles.Single().RoleName == VaultServ
 Check(account.Authentications.Single().PasswordHash != "Registration123!" && IdentityService.VerifyPassword("Registration123!", account.Authentications.Single().PasswordHash), "registration hashes password compatible with login");
 var login = await identity.Login("NEWUSER@example.test", "Registration123!", default);
 Check(login.UserId == registered.UserId, "registered user can log in immediately");
-await Reject(() => identity.Register(Registration("NEWUSER@EXAMPLE.TEST"), default), 409, "registration rejects case-insensitive duplicate email");
-await Reject(() => identity.Register(Registration("second@example.test", password: "short"), default), 400, "registration rejects short password");
-await Reject(() => identity.Register(Registration("second@example.test", confirmation: "DoesNotMatch123!"), default), 400, "registration requires matching password confirmation");
-await Reject(() => identity.Register(Registration("invalid-email"), default), 400, "registration rejects invalid email");
+await Reject(() => identity.Register(Registration("NEWUSER@EXAMPLE.TEST", phone: "0901234599"), default), 409, "registration rejects case-insensitive duplicate email");
+await Reject(() => identity.Register(Registration("dupphone@example.test", phone: "0901234567"), default), 409, "registration rejects duplicate phone number");
+await Reject(() => identity.Register(Registration("badphone@example.test", phone: "12345"), default), 400, "registration rejects invalid phone number format");
+await Reject(() => identity.Register(new RegisterInput { FullName = "Test", Email = "badcccd@example.test", Password = "Registration123!", ConfirmPassword = "Registration123!", IdentityNumber = "12345" }, default), 400, "registration rejects invalid CCCD format");
+await Reject(() => identity.Register(Registration("second@example.test", password: "short", phone: "0901234599"), default), 400, "registration rejects short password");
+await Reject(() => identity.Register(Registration("second@example.test", confirmation: "DoesNotMatch123!", phone: "0901234599"), default), 400, "registration requires matching password confirmation");
+await Reject(() => identity.Register(Registration("invalid-email", phone: "0901234599"), default), 400, "registration rejects invalid email");
 await Reject(() => identity.Register(new RegisterInput { FullName = " ", Email = "space@example.test", Password = "Registration123!", ConfirmPassword = "Registration123!" }, default), 400, "registration rejects blank name");
 foreach (var role in new[] { VaultService.ExecutorRole, VaultService.VerifierRole, VaultService.AdminRole, VaultService.BeneficiaryRole })
 {
@@ -135,14 +138,14 @@ foreach (var role in new[] { VaultService.ExecutorRole, VaultService.VerifierRol
     }
     catch (System.Text.Json.JsonException) { Check(true, "registration rejects caller-supplied role: " + role); }
 }
-var fiveFields = System.Text.Json.JsonSerializer.Deserialize<RegisterInput>("{\"fullName\":\"Test User\",\"email\":\"five@example.test\",\"password\":\"Registration123!\",\"confirmPassword\":\"Registration123!\",\"phone\":\"0901234567\"}", new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+var fiveFields = System.Text.Json.JsonSerializer.Deserialize<RegisterInput>("{\"fullName\":\"Test User\",\"email\":\"five@example.test\",\"password\":\"Registration123!\",\"confirmPassword\":\"Registration123!\",\"phone\":\"0901234568\"}", new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
 var fiveFieldResult = await identity.Register(fiveFields!, default);
 Check(fiveFieldResult.Roles.SequenceEqual(new[] { VaultService.OwnerRole }), "five-field public registration always assigns owner role");
 registrationRepo.MissingRole = true;
-var missingRoleRegistration = await identity.Register(Registration("missing@example.test"), default);
+var missingRoleRegistration = await identity.Register(Registration("missing@example.test", phone: "0901234569"), default);
 Check(missingRoleRegistration.Roles.Single() == VaultService.OwnerRole && registrationRepo.CreatedRoles.Single().RoleName == VaultService.OwnerRole, "registration initializes missing owner role instead of returning 503");
 registrationRepo.MissingRole = false; registrationRepo.DuplicateOnSave = true;
-await Reject(() => identity.Register(Registration("race@example.test"), default), 409, "concurrent duplicate database insert maps to conflict");
+await Reject(() => identity.Register(Registration("race@example.test", phone: "0901234560"), default), 409, "concurrent duplicate database insert maps to conflict");
 await RelationalRegistrationTests.Run(Check);
 await MainFlowTests.Run(Check);
 await BeneficiaryAssignmentTests.Run(Check);
@@ -205,6 +208,8 @@ sealed class FakeRepository : IVaultRepository
     }
     public Task<User?> LoginUser(string email, CancellationToken ct) => Task.FromResult(RegisteredUsers.SingleOrDefault(x => string.Equals(x.Email, email, StringComparison.OrdinalIgnoreCase)));
     public Task<User?> UserByEmail(string email, CancellationToken ct) => LoginUser(email, ct);
+    public Task<User?> UserByPhone(string phone, CancellationToken ct) => Task.FromResult(RegisteredUsers.FirstOrDefault(x => x.Phone == phone));
+    public Task<User?> UserByIdentityNumber(string identityNumber, CancellationToken ct) => Task.FromResult(RegisteredUsers.FirstOrDefault(x => x.IdentityNumber == identityNumber));
     public async Task<List<User>> UsersByRole(string role, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

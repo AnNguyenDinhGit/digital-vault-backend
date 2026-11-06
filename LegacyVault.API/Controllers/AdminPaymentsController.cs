@@ -23,11 +23,27 @@ public sealed class AdminPaymentsController(VnPayService service) : VaultControl
         service.UpdatePlan(UserId, planId, input, ct);
 
     [HttpDelete("subscription-plans/{planId:int}")]
-    public async Task<IActionResult> DeactivatePlan(int planId, CancellationToken ct)
+    public async Task<IActionResult> DeactivatePlan(int planId, [FromQuery] bool permanent = false, CancellationToken ct = default)
     {
+        if (permanent)
+        {
+            await service.DeleteInactivePlan(UserId, planId, ct);
+            return NoContent();
+        }
         await service.DeactivatePlan(UserId, planId, ct);
         return NoContent();
     }
+
+    [HttpDelete("subscription-plans/{planId:int}/permanent")]
+    public async Task<IActionResult> DeleteInactivePlan(int planId, CancellationToken ct)
+    {
+        await service.DeleteInactivePlan(UserId, planId, ct);
+        return NoContent();
+    }
+
+    [HttpDelete("subscription-plans/inactive")]
+    public async Task<ActionResult<DeleteInactivePlansResultDto>> DeleteAllInactivePlans(CancellationToken ct) =>
+        Ok(await service.DeleteAllInactivePlans(UserId, ct));
 
     [HttpGet("payment-transactions")]
     public Task<PaymentTransactionPageDto> Transactions([FromQuery] int page = 1, [FromQuery] int pageSize = 20,

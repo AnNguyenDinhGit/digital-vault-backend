@@ -27,6 +27,7 @@ public static class GoogleAuthentication
     public const string Scheme = "Google";
     public const string BrowserCookie = "LegacyVault.GoogleBrowser";
     public const string ChallengeCookie = "LegacyVault.GoogleChallenge";
+    public const string ReturnCookie = "LegacyVault.GoogleReturn";
     public static CookieOptions PendingCookie => new()
     {
         HttpOnly = true, Secure = true, SameSite = SameSiteMode.None,
@@ -36,7 +37,8 @@ public static class GoogleAuthentication
     public static IServiceCollection AddGoogleEmailAuthentication(this IServiceCollection services, IConfiguration configuration)
     {
         var settings = configuration.GetSection("Google").Get<GoogleOptions>() ?? new GoogleOptions();
-        settings.ValidateFrontendCallback(configuration.GetSection("Cors:Origins").Get<string[]>() ?? Array.Empty<string>());
+        var allowedOrigins = configuration.GetSection("Cors:Origins").Get<string[]>() ?? Array.Empty<string>();
+        settings.ValidateFrontendCallback(allowedOrigins);
         services.AddSingleton(settings);
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         services.AddSingleton<GoogleLoginOtp>();
@@ -55,6 +57,14 @@ public static class GoogleAuthentication
             options.UsePkce = true;
             options.MapInboundClaims = false;
             options.SaveTokens = false;
+            options.CorrelationCookie.SameSite = SameSiteMode.None;
+            options.CorrelationCookie.SecurePolicy = CookieSecurePolicy.Always;
+            options.CorrelationCookie.HttpOnly = true;
+            options.CorrelationCookie.IsEssential = true;
+            options.NonceCookie.SameSite = SameSiteMode.None;
+            options.NonceCookie.SecurePolicy = CookieSecurePolicy.Always;
+            options.NonceCookie.HttpOnly = true;
+            options.NonceCookie.IsEssential = true;
             options.TokenValidationParameters.ValidIssuers = new[] { "https://accounts.google.com", "accounts.google.com" };
             options.TokenValidationParameters.ValidAlgorithms = new[] { "RS256" };
             options.Scope.Clear();
@@ -62,6 +72,12 @@ public static class GoogleAuthentication
             options.Events.OnRedirectToIdentityProvider = context =>
             {
                 context.ProtocolMessage.Prompt = "select_account";
+                if (!context.Request.Host.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
+                    !context.Request.Host.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) &&
+                    context.ProtocolMessage.RedirectUri?.StartsWith("http://", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    context.ProtocolMessage.RedirectUri = "https://" + context.ProtocolMessage.RedirectUri["http://".Length..];
+                }
                 return Task.CompletedTask;
             };
             options.Events.OnTicketReceived = async context =>
@@ -70,6 +86,8 @@ public static class GoogleAuthentication
                 context.HandleResponse(); // Never sign the Google principal into the application cookie.
                 string? browser = null;
                 context.Properties?.Items.TryGetValue("browser", out browser);
+                string? returnTo = null;
+                context.Properties?.Items.TryGetValue("returnTo", out returnTo);
                 var email = context.Principal?.FindFirst("email")?.Value;
                 if (string.IsNullOrEmpty(browser) || context.Request.Cookies[BrowserCookie] != browser ||
                     string.IsNullOrWhiteSpace(email) || !bool.TryParse(context.Principal?.FindFirst("email_verified")?.Value, out var verified) || !verified)
@@ -94,6 +112,8 @@ public static class GoogleAuthentication
                         challengeId = challenge.ChallengeId;
                     }
                     context.Response.Cookies.Append(ChallengeCookie, challengeId, PendingCookie);
+                    if (!string.IsNullOrEmpty(returnTo))
+                        context.Response.Cookies.Append(ReturnCookie, returnTo, PendingCookie);
                     context.Response.Redirect("/api/auth/google/callback");
                 }
                 catch (LegacyVault.BLL.DTOs.WorkflowException ex)
@@ -104,6 +124,9 @@ public static class GoogleAuthentication
             };
             options.Events.OnRemoteFailure = context =>
             {
+                context.HttpContext.RequestServices.GetService<ILoggerFactory>()
+                    ?.CreateLogger("GoogleAuth")
+                    .LogWarning(context.Failure, "Google OIDC remote failure: {Message}", context.Failure?.Message);
                 context.HandleResponse();
                 context.Response.Redirect("/api/auth/google/error");
                 return Task.CompletedTask;

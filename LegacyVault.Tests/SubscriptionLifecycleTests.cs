@@ -310,6 +310,31 @@ public static class SubscriptionLifecycleTests
             // Test POST /api/owner/life-confirmation is still allowed when expired
             var lifeConfirmRes = await client.PostAsJsonAsync("/api/owner/life-confirmation", new { });
             check(lifeConfirmRes.StatusCode == HttpStatusCode.OK, "owner life-confirmation remains allowed when subscription is expired");
+
+            // Test deleting discontinued/inactive VNPay subscription plans
+            await using (var db = new LegacyVaultDbContext(dbOptions))
+            {
+                var service = new VnPayService(new PaymentRepository(db), new VnPayOptions());
+                var discontinuedPlan = await service.CreatePlan(ownerUserId, new SaveSubscriptionPlanInput
+                {
+                    PlanName = "Discontinued Plan",
+                    MaxVaults = 2,
+                    MaxStorageBytes = 100_000,
+                    Price = 50_000m,
+                    DurationDays = 30,
+                    IsActive = true
+                }, default);
+
+                var activeDeleteBlocked = false;
+                try { await service.DeleteInactivePlan(ownerUserId, discontinuedPlan.PlanId, default); }
+                catch (WorkflowException ex) when (ex.StatusCode == 409 && ex.ErrorCode == "PLAN_STILL_ACTIVE") { activeDeleteBlocked = true; }
+                check(activeDeleteBlocked, "active subscription plan cannot be permanently deleted before deactivation");
+
+                await service.DeactivatePlan(ownerUserId, discontinuedPlan.PlanId, default);
+
+                var deleteAllRes = await service.DeleteAllInactivePlans(ownerUserId, default);
+                check(deleteAllRes.DeletedCount == 1 && deleteAllRes.DeletedPlanIds.Contains(discontinuedPlan.PlanId), "DeleteAllInactivePlans removes discontinued VNPay subscription plan");
+            }
         }
     }
 }

@@ -13,6 +13,9 @@ public interface IPaymentRepository
     Task<List<SubscriptionPlan>> AllPlans(CancellationToken ct);
     Task<SubscriptionPlan?> Plan(int planId, CancellationToken ct);
     Task AddPlan(SubscriptionPlan plan, int adminUserId, CancellationToken ct);
+    Task<bool> HasActiveOrScheduledSubscribers(int planId, DateTime now, CancellationToken ct);
+    Task DeleteInactivePlan(SubscriptionPlan plan, int adminUserId, CancellationToken ct);
+    Task<(List<int> DeletedPlanIds, List<int> SkippedPlanIds)> DeleteAllInactivePlans(int adminUserId, DateTime now, CancellationToken ct);
     Task<UserSubscription?> CurrentSubscription(int userId, DateTime now, CancellationToken ct);
     Task<UserSubscription?> CurrentPaidSubscription(int userId, DateTime now, CancellationToken ct);
     Task<UserSubscription?> ScheduledSubscription(int userId, CancellationToken ct);
@@ -51,6 +54,62 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
     }
+
+    public Task<bool> HasActiveOrScheduledSubscribers(int planId, DateTime now, CancellationToken ct) =>
+        db.UserSubscriptions.AnyAsync(
+            x => x.PlanId == planId && ((x.Status == "Active" && x.EndDate > now) || x.Status == "Scheduled"),
+            ct);
+
+    public async Task DeleteInactivePlan(SubscriptionPlan plan, int adminUserId, CancellationToken ct)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        var subs = await db.UserSubscriptions.Where(x => x.PlanId == plan.PlanId).ToListAsync(ct);
+        if (subs.Count > 0)
+        {
+            var subIds = subs.Select(x => (int?)x.SubscriptionId).ToList();
+            var txs = await db.PaymentTransactions.Where(x => subIds.Contains(x.SubscriptionId)).ToListAsync(ct);
+            foreach (var tx in txs)
+            {
+                tx.SubscriptionId = null;
+            }
+            db.UserSubscriptions.RemoveRange(subs);
+        }
+
+        var planId = plan.PlanId;
+        db.SubscriptionPlans.Remove(plan);
+        db.AuditLogs.Add(new AuditLog
+        {
+            UserId = adminUserId,
+            Action = "DeleteSubscriptionPlan",
+            EntityType = "SubscriptionPlan",
+            EntityId = planId,
+            Result = "Success",
+            Timestamp = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+    }
+
+    public async Task<(List<int> DeletedPlanIds, List<int> SkippedPlanIds)> DeleteAllInactivePlans(int adminUserId, DateTime now, CancellationToken ct)
+    {
+        var inactivePlans = await db.SubscriptionPlans.Where(x => !x.IsActive).OrderBy(x => x.PlanId).ToListAsync(ct);
+        var deletedIds = new List<int>();
+        var skippedIds = new List<int>();
+
+        foreach (var plan in inactivePlans)
+        {
+            if (await HasActiveOrScheduledSubscribers(plan.PlanId, now, ct))
+            {
+                skippedIds.Add(plan.PlanId);
+                continue;
+            }
+            await DeleteInactivePlan(plan, adminUserId, ct);
+            deletedIds.Add(plan.PlanId);
+        }
+
+        return (deletedIds, skippedIds);
+    }
+
     public async Task ActivateScheduledSubscriptionsIfDue(int userId, DateTime now, CancellationToken ct)
     {
         var dueScheduled = await db.UserSubscriptions

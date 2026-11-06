@@ -17,6 +17,8 @@ public interface IVaultRepository
     Task<User?> User(int id, CancellationToken ct);
     Task<User?> LoginUser(string email, CancellationToken ct);
     Task<User?> UserByEmail(string email, CancellationToken ct);
+    Task<User?> UserByPhone(string phone, CancellationToken ct);
+    Task<User?> UserByIdentityNumber(string identityNumber, CancellationToken ct);
     Task<List<User>> UsersByRole(string role, CancellationToken ct);
     Task<Role?> Role(string name, CancellationToken ct);
     Task Register(User user, string defaultRole, CancellationToken ct);
@@ -52,6 +54,12 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
 
     public Task<User?> UserByEmail(string email, CancellationToken ct)
         => db.Users.Include(x => x.Roles).SingleOrDefaultAsync(x => x.Email.ToUpper() == email.ToUpper(), ct);
+
+    public Task<User?> UserByPhone(string phone, CancellationToken ct)
+        => db.Users.FirstOrDefaultAsync(x => x.Phone == phone, ct);
+
+    public Task<User?> UserByIdentityNumber(string identityNumber, CancellationToken ct)
+        => db.Users.FirstOrDefaultAsync(x => x.IdentityNumber == identityNumber, ct);
 
     public Task<List<User>> UsersByRole(string role, CancellationToken ct) =>
         db.Users

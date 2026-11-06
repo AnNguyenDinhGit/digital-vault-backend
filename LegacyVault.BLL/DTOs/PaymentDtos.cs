@@ -37,3 +37,8 @@ public sealed class SaveSubscriptionPlanInput
 public sealed record PaymentCheckoutDto(string TransactionCode, decimal Amount, string PaymentUrl);
 public sealed record PaymentStatusDto(string TransactionCode, string Status, decimal Amount, string GatewayResponseCode);
 public sealed record VnPayIpnResult(PaymentStatusDto Payment, bool AlreadyProcessed);
+public sealed record DeleteInactivePlansResultDto(
+    int DeletedCount,
+    IReadOnlyList<int> DeletedPlanIds,
+    IReadOnlyList<int> SkippedPlanIds,
+    string Message);

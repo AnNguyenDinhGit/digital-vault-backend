@@ -368,17 +368,19 @@ public sealed class AdminService(IVaultRepository repository)
     {
         await RequireAdmin(adminUserId, ct);
 
-        var email = input.Email.Trim().ToLowerInvariant();
-        if (await repository.LoginUser(email, ct) is not null)
-            throw new WorkflowException(409, "Email đã được sử dụng.");
+        var email = IdentityService.NormalizeAndValidateEmail(input.Email);
+        var phone = IdentityService.NormalizeAndValidatePhone(input.Phone);
+        var identityNumber = IdentityService.NormalizeAndValidateIdentityNumber(input.IdentityNumber);
+
+        await IdentityService.EnsureUniqueUserFieldsAsync(repository, email, phone, identityNumber, null, ct);
 
         var now = DateTime.UtcNow;
         var user = new User
         {
             FullName = input.FullName.Trim(),
             Email = email,
-            Phone = string.IsNullOrWhiteSpace(input.Phone) ? null : input.Phone.Trim(),
-            IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber) ? null : input.IdentityNumber.Trim(),
+            Phone = phone,
+            IdentityNumber = identityNumber,
             Status = "Active",
             CreatedAt = now,
             UpdatedAt = now
@@ -440,11 +442,21 @@ public sealed class AdminService(IVaultRepository repository)
         if (!string.IsNullOrWhiteSpace(input.FullName))
             targetUser.FullName = input.FullName.Trim();
 
+        string? normalizedPhone = null;
         if (input.Phone is not null)
-            targetUser.Phone = string.IsNullOrWhiteSpace(input.Phone) ? null : input.Phone.Trim();
+            normalizedPhone = IdentityService.NormalizeAndValidatePhone(input.Phone);
+
+        string? normalizedIdentityNumber = null;
+        if (input.IdentityNumber is not null)
+            normalizedIdentityNumber = IdentityService.NormalizeAndValidateIdentityNumber(input.IdentityNumber);
+
+        await IdentityService.EnsureUniqueUserFieldsAsync(repository, null, normalizedPhone, normalizedIdentityNumber, targetUserId, ct);
+
+        if (input.Phone is not null)
+            targetUser.Phone = normalizedPhone;
 
         if (input.IdentityNumber is not null)
-            targetUser.IdentityNumber = string.IsNullOrWhiteSpace(input.IdentityNumber) ? null : input.IdentityNumber.Trim();
+            targetUser.IdentityNumber = normalizedIdentityNumber;
 
         targetUser.UpdatedAt = DateTime.UtcNow;
         repository.Add(new AuditLog

@@ -32,14 +32,43 @@ public sealed class GoogleAuthController(
     private string ChallengeId => Request.Cookies[GoogleAuthentication.ChallengeCookie] ?? "";
 
     [HttpGet("start"), EnableRateLimiting("login")]
-    public IActionResult Start()
+    public IActionResult Start([FromQuery] string? mode = null, [FromQuery] string? origin = null)
     {
         if (!options.Configured) throw new WorkflowException(503, "Configure Google:ClientId and Google:ClientSecret first.");
         var browser = Guid.NewGuid().ToString("N");
         Response.Cookies.Append(GoogleAuthentication.BrowserCookie, browser, GoogleAuthentication.PendingCookie);
         Response.Cookies.Delete(GoogleAuthentication.ChallengeCookie, GoogleAuthentication.PendingCookie);
+        Response.Cookies.Delete(GoogleAuthentication.ReturnCookie, GoogleAuthentication.PendingCookie);
         var properties = new AuthenticationProperties { RedirectUri = "/api/auth/google/callback" };
         properties.Items["browser"] = browser;
+
+        var referer = Request.Headers.Referer.ToString();
+        if (string.Equals(mode, "swagger", StringComparison.OrdinalIgnoreCase) ||
+            referer.Contains("/swagger", StringComparison.OrdinalIgnoreCase))
+        {
+            properties.Items["returnTo"] = "swagger";
+        }
+        else
+        {
+            var candidateOrigin = !string.IsNullOrWhiteSpace(origin) ? origin : referer;
+            if (Uri.TryCreate(candidateOrigin, UriKind.Absolute, out var refUri))
+            {
+                var authority = refUri.GetLeftPart(UriPartial.Authority);
+                var allowedOrigins = HttpContext.RequestServices.GetService<IConfiguration>()
+                    ?.GetSection("Cors:Origins").Get<string[]>() ?? Array.Empty<string>();
+                if (allowedOrigins.Contains(authority, StringComparer.OrdinalIgnoreCase))
+                {
+                    var callbackPath = "/auth/google/callback";
+                    if (Uri.TryCreate(options.FrontendCallbackUrl, UriKind.Absolute, out var configuredUri) &&
+                        !string.IsNullOrWhiteSpace(configuredUri.AbsolutePath) && configuredUri.AbsolutePath != "/")
+                    {
+                        callbackPath = configuredUri.AbsolutePath;
+                    }
+                    properties.Items["returnTo"] = authority + callbackPath;
+                }
+            }
+        }
+
         return Challenge(properties, GoogleAuthentication.Scheme);
     }
 
@@ -47,7 +76,18 @@ public sealed class GoogleAuthController(
     public async Task<IActionResult> Callback(CancellationToken ct)
     {
         var challenge = await ChallengeState(ct);
-        if (!string.IsNullOrEmpty(options.FrontendCallbackUrl)) return Redirect(options.FrontendCallbackUrl);
+        var returnTo = Request.Cookies[GoogleAuthentication.ReturnCookie];
+        if (!string.IsNullOrEmpty(returnTo))
+        {
+            Response.Cookies.Delete(GoogleAuthentication.ReturnCookie, GoogleAuthentication.PendingCookie);
+            if (!string.Equals(returnTo, "swagger", StringComparison.OrdinalIgnoreCase))
+                return Redirect(returnTo);
+        }
+        else if (!string.IsNullOrEmpty(options.FrontendCallbackUrl))
+        {
+            return Redirect(options.FrontendCallbackUrl);
+        }
+
         Response.Headers["Cache-Control"] = "no-store";
         Response.Headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
         Response.Headers["Referrer-Policy"] = "no-referrer";
