@@ -21,8 +21,34 @@ public sealed record SubscriptionQuoteDto(
 public sealed record UserSubscriptionDto(int SubscriptionId, string Status, DateTime StartDate, DateTime EndDate, SubscriptionPlanDto Plan);
 public sealed record PaymentTransactionDto(long TransactionId, string? TransactionCode, decimal Amount, string PaymentMethod, string Status, DateTime CreatedAt, int? SubscriptionId, string? PlanName);
 public sealed record PaymentTransactionPageDto(int Page, int PageSize, int Total, IReadOnlyList<PaymentTransactionDto> Items);
-public sealed record AdminSubscriptionPlanDto(int PlanId, string PlanName, int MaxVaults, long MaxStorageBytes, decimal Price, int DurationDays, bool IsActive, DateTime CreatedAt);
+public sealed record AdminSubscriptionPlanDto(int PlanId, string PlanName, int MaxVaults, long MaxStorageBytes, decimal Price, int DurationDays, bool IsActive, DateTime CreatedAt, int ActiveUsersCount = 0, int TotalSubscribersCount = 0);
+public sealed record SubscriptionPlanStatisticsDto(
+    int PlanId,
+    string PlanName,
+    decimal Price,
+    int DurationDays,
+    bool IsActive,
+    int ActiveUsersCount,
+    int ScheduledUsersCount,
+    int ExpiredUsersCount,
+    int TotalSubscribersCount,
+    decimal TotalRevenue);
 public sealed record AdminPaymentTransactionDto(long TransactionId, int UserId, string? UserEmail, string? TransactionCode, decimal Amount, string PaymentMethod, string Status, DateTime CreatedAt, int? SubscriptionId, int? PlanId, string? PlanName);
+public sealed record AdminUserSubscriptionDto(
+    int SubscriptionId,
+    int UserId,
+    string? UserEmail,
+    int PlanId,
+    string? PlanName,
+    decimal Price,
+    string Status,
+    DateTime StartDate,
+    DateTime EndDate);
+public sealed record AdminUserSubscriptionPageDto(
+    int Page,
+    int PageSize,
+    int Total,
+    IReadOnlyList<AdminUserSubscriptionDto> Items);
 
 public sealed class SaveSubscriptionPlanInput
 {
