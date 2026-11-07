@@ -192,8 +192,37 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         return new(page, pageSize, total, rows.Select(ToDto).ToArray());
     }
 
-    public async Task<IReadOnlyList<AdminSubscriptionPlanDto>> AdminPlans(CancellationToken ct) =>
-        (await repository.AllPlans(ct)).Select(ToAdminDto).ToArray();
+    public async Task<IReadOnlyList<AdminSubscriptionPlanDto>> AdminPlans(CancellationToken ct)
+    {
+        var plans = await repository.AllPlans(ct);
+        var stats = await repository.PlanUsageStatistics(DateTime.UtcNow, ct);
+        return plans.Select(plan =>
+        {
+            stats.TryGetValue(plan.PlanId, out var row);
+            return ToAdminDto(plan, row?.ActiveUsersCount ?? 0, row?.TotalSubscribersCount ?? 0);
+        }).ToArray();
+    }
+
+    public async Task<IReadOnlyList<SubscriptionPlanStatisticsDto>> AdminPlanStatistics(CancellationToken ct)
+    {
+        var plans = await repository.AllPlans(ct);
+        var stats = await repository.PlanUsageStatistics(DateTime.UtcNow, ct);
+        return plans.Select(plan =>
+        {
+            stats.TryGetValue(plan.PlanId, out var row);
+            return new SubscriptionPlanStatisticsDto(
+                PlanId: plan.PlanId,
+                PlanName: plan.PlanName,
+                Price: plan.Price,
+                DurationDays: plan.DurationDays,
+                IsActive: plan.IsActive,
+                ActiveUsersCount: row?.ActiveUsersCount ?? 0,
+                ScheduledUsersCount: row?.ScheduledUsersCount ?? 0,
+                ExpiredUsersCount: row?.ExpiredUsersCount ?? 0,
+                TotalSubscribersCount: row?.TotalSubscribersCount ?? 0,
+                TotalRevenue: row?.TotalRevenue ?? 0m);
+        }).ToArray();
+    }
 
     public async Task<AdminSubscriptionPlanDto> CreatePlan(int adminUserId, SaveSubscriptionPlanInput input, CancellationToken ct)
     {
@@ -237,14 +266,6 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
                 "PLAN_STILL_ACTIVE");
         }
 
-        if (await repository.HasActiveOrScheduledSubscribers(planId, DateTime.UtcNow, ct))
-        {
-            throw new WorkflowException(
-                409,
-                "Không thể xóa gói dịch vụ đang có người dùng còn hạn sử dụng hoặc đang chờ kích hoạt.",
-                "PLAN_HAS_ACTIVE_SUBSCRIBERS");
-        }
-
         await repository.DeleteInactivePlan(plan, adminUserId, ct);
     }
 
@@ -256,6 +277,63 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
             DeletedPlanIds: deletedIds,
             SkippedPlanIds: skippedIds,
             Message: $"Đã xóa {deletedIds.Count} gói dịch vụ ngừng sử dụng.");
+    }
+
+    public async Task<AdminUserSubscriptionPageDto> AdminUserSubscriptions(
+        int page,
+        int pageSize,
+        string? search,
+        string? status,
+        int? planId,
+        CancellationToken ct)
+    {
+        ValidatePaging(page, pageSize);
+        if (planId is <= 0) throw new WorkflowException(400, "planId must be positive.");
+        if (search?.Length > 100) throw new WorkflowException(400, "search must be at most 100 characters.");
+
+        string? normalizedStatus = null;
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            normalizedStatus = status.Trim() switch
+            {
+                var s when s.Equals("Active", StringComparison.OrdinalIgnoreCase) => "Active",
+                var s when s.Equals("Scheduled", StringComparison.OrdinalIgnoreCase) => "Scheduled",
+                var s when s.Equals("Expired", StringComparison.OrdinalIgnoreCase) => "Expired",
+                _ => throw new WorkflowException(400, "Status must be Active, Scheduled or Expired.")
+            };
+        }
+
+        var now = DateTime.UtcNow;
+        var (total, rows) = await repository.AdminUserSubscriptions(
+            string.IsNullOrWhiteSpace(search) ? null : search.Trim(),
+            normalizedStatus,
+            planId,
+            now,
+            (page - 1) * pageSize,
+            pageSize,
+            ct);
+
+        var items = rows.Select(row =>
+        {
+            var effectiveStatus = row.Status == "Scheduled" && row.StartDate > now
+                ? "Scheduled"
+                : row.Status != "Expired" && row.EndDate > now
+                    ? "Active"
+                    : "Expired";
+
+            return new AdminUserSubscriptionDto(
+                SubscriptionId: row.SubscriptionId,
+                UserId: row.UserId,
+                UserEmail: row.User?.Email,
+                PlanId: row.PlanId,
+                PlanName: row.Plan?.PlanName,
+                Price: row.Plan?.Price ?? 0m,
+                Status: effectiveStatus,
+                StartDate: DateTime.SpecifyKind(row.StartDate, DateTimeKind.Utc),
+                EndDate: DateTime.SpecifyKind(row.EndDate, DateTimeKind.Utc));
+        }).ToArray();
+
+        return new AdminUserSubscriptionPageDto(page, pageSize, total, items);
     }
 
     public async Task<PaymentTransactionPageDto> AdminHistory(int page, int pageSize, int? userId, string? status, CancellationToken ct)
@@ -446,8 +524,8 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
     private static UserSubscriptionDto ToUserSubDto(UserSubscription sub) =>
         new(sub.SubscriptionId, sub.Status, sub.StartDate, sub.EndDate, ToDto(sub.Plan));
 
-    private static AdminSubscriptionPlanDto ToAdminDto(SubscriptionPlan plan) =>
-        new(plan.PlanId, plan.PlanName, plan.MaxVaults, plan.MaxStorageBytes, plan.Price, plan.DurationDays, plan.IsActive, plan.CreatedAt);
+    private static AdminSubscriptionPlanDto ToAdminDto(SubscriptionPlan plan, int activeUsersCount = 0, int totalSubscribersCount = 0) =>
+        new(plan.PlanId, plan.PlanName, plan.MaxVaults, plan.MaxStorageBytes, plan.Price, plan.DurationDays, plan.IsActive, plan.CreatedAt, activeUsersCount, totalSubscribersCount);
 
     private static PaymentTransactionDto ToDto(PaymentTransaction transaction) =>
         new(transaction.TransactionId, transaction.TransactionCode, transaction.Amount, transaction.PaymentMethod, transaction.Status,
