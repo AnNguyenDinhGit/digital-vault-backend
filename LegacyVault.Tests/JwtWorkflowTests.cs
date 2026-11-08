@@ -482,6 +482,7 @@ internal static class JwtWorkflowTests
         await Expect(await client.GetAsync("/api/legal/handovers/2147483647/assets"), HttpStatusCode.NotFound, "legal asset list does not invent a missing request");
         await using (var db = new LegacyVaultDbContext(dbOptions)) deathDocument = (await db.HandoverDocuments.FirstAsync(d => d.RequestId == request.RequestId)).HandoverDocumentId;
         await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/documents/{deathDocument}/content"), HttpStatusCode.OK, "assigned LegalVerifier can download death evidence without upload permission");
+        await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/asset-documents/{doc.DocumentId}/content"), HttpStatusCode.Forbidden, "LegalVerifier cannot download sealed Owner asset document content");
         check((await client.GetFromJsonAsync<DocumentDto[]>($"/api/legal/handovers/{request.RequestId}/documents"))!.Any(d => d.Purpose == "DeathCertificate"), "LegalVerifier sees evidence types for the assigned review");
         As("legal"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/request-additional-information", new { comment = "Need more evidence" }), HttpStatusCode.OK, "legal requests additional information");
         await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Premature" }), HttpStatusCode.Conflict, "legal cannot approve before evidence resubmission");

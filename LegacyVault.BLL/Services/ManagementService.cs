@@ -540,12 +540,24 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var (request, _) = await Legal(user, id, ct);
         Paging(page, size);
         var assetIds = request.HandoverCases.Select(c => c.Assignment.AssetId).ToHashSet();
-        var items = request.Vault.DigitalAssets.Where(a => assetIds.Contains(a.AssetId)).OrderBy(a => a.AssetId)
-            .Skip((page - 1) * size).Take(size)
-            .Select(a => new LegalAssetDto(a.AssetId, a.AssetName, a.AssetType, a.Description, a.Status,
-                a.AssetDocuments.Where(d => d.Status != "Revoked").OrderBy(d => d.DocumentId)
-                    .Select(d => new ManagedDocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted, d.Status)).ToArray()))
-            .ToArray();
+        var scopedAssets = request.Vault.DigitalAssets.Where(a => assetIds.Contains(a.AssetId)).OrderBy(a => a.AssetId)
+            .Skip((page - 1) * size).Take(size).ToArray();
+        var items = new LegalAssetDto[scopedAssets.Length];
+        for (var i = 0; i < scopedAssets.Length; i++)
+        {
+            var a = scopedAssets[i];
+            var docs = a.AssetDocuments.Where(d => d.Status != "Revoked").OrderBy(d => d.DocumentId).ToArray();
+            var docDtos = new ManagedDocumentDto[docs.Length];
+            for (var j = 0; j < docs.Length; j++)
+            {
+                var d = docs[j];
+                bool? sigValid = null;
+                try { sigValid = (await Read(d.StoragePath, ct)).SignatureValid; }
+                catch { sigValid = false; }
+                docDtos[j] = new ManagedDocumentDto(d.DocumentId, d.FileName, d.FileType, d.IsEncrypted, d.Status, sigValid);
+            }
+            items[i] = new LegalAssetDto(a.AssetId, a.AssetName, a.AssetType, a.Description, a.Status, docDtos);
+        }
         return new(page, size, items);
     }
 
@@ -554,8 +566,8 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var (r, _) = await Legal(user, id, ct);
         if (assetDocument)
         {
-            var d = r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).SingleOrDefault(d => d.DocumentId == document && d.Status != "Revoked") ?? throw new WorkflowException(404, "Document not found.");
-            return await Read(d.StoragePath, ct);
+            _ = r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).SingleOrDefault(d => d.DocumentId == document && d.Status != "Revoked") ?? throw new WorkflowException(404, "Document not found.");
+            throw new WorkflowException(403, "Nội dung tệp đính kèm của tài sản được niêm phong bảo mật, chỉ Chủ sở hữu và Người thụ hưởng hợp pháp mới được phép giải mã tải về.");
         }
         var doc = r.HandoverDocuments.SingleOrDefault(d => d.HandoverDocumentId == document) ?? throw new WorkflowException(404, "Document not found.");
         return await Read(doc.StoragePath, ct);
