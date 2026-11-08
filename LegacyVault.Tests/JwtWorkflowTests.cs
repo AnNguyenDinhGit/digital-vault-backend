@@ -515,7 +515,16 @@ internal static class JwtWorkflowTests
         var otpResponse = await client.PostAsJsonAsync("/api/beneficiary/otp/request", new { }); var inheritedOtp = (await otpResponse.Content.ReadFromJsonAsync<OtpChallenge>())!; var inheritedCode = ((FakeSender)app.Services.GetRequiredService<IOtpSender>()).Code;
         await Expect(await client.PostAsJsonAsync("/api/beneficiary/otp/verify", new { challengeId = inheritedOtp.ChallengeId, code = inheritedCode }), HttpStatusCode.OK, "beneficiary OTP opens inheritance only for current JWT session");
         var cases = (await client.GetFromJsonAsync<PageDto<CaseDto>>("/api/beneficiary/handovers"))!; var caseId = cases.Items.Single().HandoverId;
-        await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { note = "Too soon" }), HttpStatusCode.Conflict, "receipt cannot precede completed handover");
+        async Task<HttpResponseMessage> ConfirmReceiptRequest(int targetCaseId, string? note = "Received", bool wrongKey = false)
+        {
+            using var form = new MultipartFormDataContent();
+            var bytes = "signed beneficiary receipt confirmation"u8.ToArray();
+            var file = new ByteArrayContent(bytes); file.Headers.ContentType = new("text/plain"); form.Add(file, "File", "receipt.txt");
+            form.Add(new ByteArrayContent((wrongKey ? executorKey : ownerKey).SignData(bytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)), "Signature", "receipt.sig");
+            if (note is not null) form.Add(new StringContent(note), "Note");
+            return await client.PostAsync($"/api/beneficiary/handovers/{targetCaseId}/receipt", form);
+        }
+        await Expect(await ConfirmReceiptRequest(caseId, "Too soon"), HttpStatusCode.Conflict, "receipt cannot precede completed handover");
         var beneficiaryAuthorization = client.DefaultRequestHeaders.Authorization;
         As("executor");
         await Expect(await client.PostAsJsonAsync($"/api/executor/handovers/{request.RequestId}/start", new { }), HttpStatusCode.NoContent, "Executor starts handover only after legal approval");
@@ -533,8 +542,9 @@ internal static class JwtWorkflowTests
         var completedOverview = (await client.GetFromJsonAsync<PageDto<HandoverOverviewDto>>("/api/executor/handovers/completed?page=1&pageSize=20"))!;
         check(completedOverview.Items.Any(r => r.RequestId == request.RequestId) && completedOverview.Items.All(r => r.Status == "Completed"), "latest main completed overview endpoint retains pagination and completed-only filter");
         client.DefaultRequestHeaders.Authorization = beneficiaryAuthorization;
-        await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { note = "Received" }), HttpStatusCode.OK, "beneficiary confirms completed receipt without claiming digital signature");
-        await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { }), HttpStatusCode.Conflict, "receipt confirmation cannot repeat");
+        await Expect(await ConfirmReceiptRequest(caseId, "Received", wrongKey: true), HttpStatusCode.BadRequest, "beneficiary receipt rejects invalid digital signature");
+        await Expect(await ConfirmReceiptRequest(caseId, "Received"), HttpStatusCode.OK, "beneficiary confirms completed receipt with verified digital signature");
+        await Expect(await ConfirmReceiptRequest(caseId, null), HttpStatusCode.Conflict, "receipt confirmation cannot repeat");
         check((await client.GetFromJsonAsync<PageDto<InheritanceDto>>("/api/beneficiary/assets"))!.Items.Count == 1, "received inheritance remains available");
         check((await client.GetFromJsonAsync<ReceiptDto>($"/api/beneficiary/handovers/{caseId}/receipt"))!.Status == "Confirmed", "beneficiary can read their persisted receipt");
         await Expect(await client.GetAsync($"/api/beneficiary/handovers/{caseId}/documents"), HttpStatusCode.OK, "beneficiary lists handover documents after OTP and legal approval");
@@ -542,7 +552,7 @@ internal static class JwtWorkflowTests
         As("other"); await Expect(await client.PostAsJsonAsync($"/api/notifications/{notifications.Items[0].NotificationId}/read", new { }), HttpStatusCode.NotFound, "notification access is limited to its recipient");
         var otherOtpResponse = await client.PostAsJsonAsync("/api/beneficiary/otp/request", new { }); var otherOtp = (await otherOtpResponse.Content.ReadFromJsonAsync<OtpChallenge>())!;
         await client.PostAsJsonAsync("/api/beneficiary/otp/verify", new { challengeId = otherOtp.ChallengeId, code = ((FakeSender)app.Services.GetRequiredService<IOtpSender>()).Code });
-        await Expect(await client.PostAsJsonAsync($"/api/beneficiary/handovers/{caseId}/receipt", new { }), HttpStatusCode.NotFound, "verified beneficiary cannot confirm another person's receipt");
+        await Expect(await ConfirmReceiptRequest(caseId, null), HttpStatusCode.NotFound, "verified beneficiary cannot confirm another person's receipt");
         await Expect(await client.GetAsync($"/api/beneficiary/assets/{handover.Asset}/documents/{doc.DocumentId}/content"), HttpStatusCode.NotFound, "verified beneficiary cannot download another person's inheritance");
 
         var eligibility = await CreateFixture("Executor eligibility"); await UploadAsset(eligibility.Asset);

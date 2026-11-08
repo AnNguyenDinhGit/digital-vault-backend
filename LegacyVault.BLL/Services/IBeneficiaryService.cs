@@ -8,5 +8,5 @@ public interface IBeneficiaryService
     Task<IReadOnlyList<DocumentDto>> Documents(int user, string session, int id, CancellationToken ct);
     Task<DocumentContent> Document(int user, string session, int id, int document, CancellationToken ct);
     Task<ReceiptDto> Receipt(int user, string session, int id, CancellationToken ct);
-    Task<ReceiptDto> Confirm(int user, string session, int id, ReceiptInput input, CancellationToken ct);
+    Task<ReceiptDto> Confirm(int user, string session, int id, ReceiptInput input, UploadFile file, byte[] signature, CancellationToken ct);
 }

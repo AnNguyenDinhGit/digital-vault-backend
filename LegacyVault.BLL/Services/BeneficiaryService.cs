@@ -13,5 +13,5 @@ public sealed class BeneficiaryService(ManagementService management, OtpService 
     public Task<IReadOnlyList<DocumentDto>> Documents(int user, string session, int id, CancellationToken ct) { otp.RequireVerified(session); return management.CaseDocuments(user, id, ct); }
     public Task<DocumentContent> Document(int user, string session, int id, int document, CancellationToken ct) { otp.RequireVerified(session); return management.CaseDocument(user, id, document, ct); }
     public Task<ReceiptDto> Receipt(int user, string session, int id, CancellationToken ct) { otp.RequireVerified(session); return management.Receipt(user, id, ct); }
-    public Task<ReceiptDto> Confirm(int user, string session, int id, ReceiptInput input, CancellationToken ct) { otp.RequireVerified(session); return management.ConfirmReceipt(user, id, input, ct); }
+    public Task<ReceiptDto> Confirm(int user, string session, int id, ReceiptInput input, UploadFile file, byte[] signature, CancellationToken ct) { otp.RequireVerified(session); return management.ConfirmReceipt(user, id, input, file, signature, ct); }
 }

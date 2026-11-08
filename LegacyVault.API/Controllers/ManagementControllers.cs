@@ -118,13 +118,22 @@ public sealed class LegalController(ManagementService service) : VaultController
     [HttpPost("{requestId:int}/request-additional-information")] public Task<ReviewDto> Additional(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Additional_Info", input, ct);
 }
 
+public sealed class BeneficiaryReceiptForm
+{
+    [System.ComponentModel.DataAnnotations.Required] public IFormFile File { get; set; } = null!;
+    [System.ComponentModel.DataAnnotations.Required] public IFormFile Signature { get; set; } = null!;
+    [System.ComponentModel.DataAnnotations.StringLength(2000)] public string? Note { get; set; }
+}
+
 [ApiController, Authorize, Route("api/beneficiary/handovers")]
 public sealed class BeneficiaryHandoverController(IBeneficiaryService service) : VaultController
 {
     [HttpGet] public Task<PageDto<CaseDto>> Cases([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default) => service.Cases(UserId, SessionId, page, pageSize, ct);
     [HttpGet("{handoverId:int}")] public Task<CaseDto> Case(int handoverId, CancellationToken ct) => service.Detail(UserId, SessionId, handoverId, ct);
     [HttpGet("{handoverId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int handoverId, int documentId, CancellationToken ct) => ContentFile(await service.Document(UserId, SessionId, handoverId, documentId, ct));
-    [HttpPost("{handoverId:int}/receipt")] public Task<ReceiptDto> Receipt(int handoverId, ReceiptInput input, CancellationToken ct) => service.Confirm(UserId, SessionId, handoverId, input, ct);
+    [HttpPost("{handoverId:int}/receipt"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<ReceiptDto> Receipt(int handoverId, [FromForm] BeneficiaryReceiptForm form, CancellationToken ct) =>
+        await service.Confirm(UserId, SessionId, handoverId, new ReceiptInput(form.Note), await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct);
     [HttpGet("{handoverId:int}/receipt")] public Task<ReceiptDto> ReadReceipt(int handoverId, CancellationToken ct) => service.Receipt(UserId, SessionId, handoverId, ct);
     [HttpGet("{handoverId:int}/documents")] public Task<IReadOnlyList<DocumentDto>> Documents(int handoverId, CancellationToken ct) => service.Documents(UserId, SessionId, handoverId, ct);
 }

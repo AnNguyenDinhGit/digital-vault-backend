@@ -611,24 +611,63 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     {
         var c = await BeneficiaryCase(user, id, ct); var d = c.Request.HandoverDocuments.SingleOrDefault(d => d.HandoverDocumentId == document) ?? throw new WorkflowException(404, "Document not found."); return await Read(d.StoragePath, ct);
     }
-    public async Task<IReadOnlyList<DocumentDto>> CaseDocuments(int user, int id, CancellationToken ct)
-    {
-        var c = await BeneficiaryCase(user, id, ct);
-        return c.Request.HandoverDocuments.Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted)).ToArray();
-    }
+    public async Task<IReadOnlyList<DocumentDto>> CaseDocuments(int user, int id, CancellationToken ct) =>
+        await EvidenceMetadata((await BeneficiaryCase(user, id, ct)).Request, ct);
     public async Task<ReceiptDto> Receipt(int user, int id, CancellationToken ct)
     {
         var c = await BeneficiaryCase(user, id, ct);
         return Map(c.BeneficiaryReceipts.SingleOrDefault(r => r.BeneficiaryId == user) ?? throw new WorkflowException(404, "Receipt not found."));
     }
-    public async Task<ReceiptDto> ConfirmReceipt(int user, int id, ReceiptInput input, CancellationToken ct)
+    private static void ValidateReceiptFile(UploadFile file)
+    {
+        if (file.Content.Length > 10 * 1024 * 1024) throw new WorkflowException(413, "Document exceeds 10 MB.");
+        if (file.Content.Length == 0 || string.IsNullOrWhiteSpace(file.FileName) || file.FileName.Length > 255 || file.FileName is "." or ".." || file.FileName.Any(char.IsControl) || file.FileName.IndexOfAny(new[] { '/', '\\', '\0' }) >= 0)
+            throw new WorkflowException(400, "A document of 1 byte to 10 MB with a valid filename is required.");
+        if (file.FileType.Length > 50 || !new[] { "application/pdf", "image/png", "image/jpeg", "text/plain" }.Contains(file.FileType))
+            throw new WorkflowException(400, "Supported document types: PDF, PNG, JPEG and plain text.");
+        var bytes = file.Content;
+        var valid = file.FileType switch
+        {
+            "application/pdf" => bytes.AsSpan().StartsWith("%PDF-"u8),
+            "image/png" => bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+            "image/jpeg" => bytes.Length >= 3 && bytes[0] == 255 && bytes[1] == 216 && bytes[2] == 255,
+            _ => !bytes.Contains((byte)0)
+        };
+        if (!valid) throw new WorkflowException(400, "Document content does not match its declared type.");
+        if (file.FileType == "text/plain")
+        {
+            try { var text = new System.Text.UTF8Encoding(false, true).GetString(bytes); if (text.Any(c => char.IsControl(c) && c is not ('\n' or '\r' or '\t'))) throw new WorkflowException(400, "Invalid text content."); }
+            catch (System.Text.DecoderFallbackException) { throw new WorkflowException(400, "Text must be UTF-8."); }
+        }
+    }
+    public async Task<ReceiptDto> ConfirmReceipt(int user, int id, ReceiptInput input, UploadFile file, byte[] signature, CancellationToken ct)
     {
         Validate(input); var c = await BeneficiaryCase(user, id, ct);
         if (c.Status != "Completed" || c.Request.Status != "Completed" || c.BeneficiaryReceipts.Any()) throw new WorkflowException(409, "Only a completed, unreceived handover can be confirmed.");
-        var receipt = new BeneficiaryReceipt { HandoverId = id, BeneficiaryId = user, Status = "Confirmed", ConfirmationNote = input.Note?.Trim(), ConfirmedAt = DateTime.UtcNow };
-        repository.Add(receipt); c.Status = "Received"; Touch(c.Request.Vault);
-        Audit(user, "ConfirmReceipt", "HandoverCase", id); Notify(c.Request.ExecutorId, "Receipt", "Người thụ hưởng đã xác nhận nhận di sản", "Người thụ hưởng đã xác nhận nhận đầy đủ tài sản từ hồ sơ bàn giao.");
-        await repository.Save(ct); return Map(receipt);
+        ValidateReceiptFile(file);
+        if (!protection.Verify(file.Content, signature, user))
+            throw new WorkflowException(400, "Chữ ký số không hợp lệ, chứng thư số hết hạn hoặc không khớp với tệp biên nhận.");
+        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, signature, "BeneficiaryReceipt"));
+        var path = await store.Write(protectedBytes, ct);
+        try
+        {
+            repository.Add(new HandoverDocument
+            {
+                RequestId = c.RequestId,
+                FileName = Path.GetFileName(file.FileName),
+                FileType = file.FileType,
+                StoragePath = path,
+                IsEncrypted = true,
+                UploadedBy = user,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            });
+            var receipt = new BeneficiaryReceipt { HandoverId = id, BeneficiaryId = user, Status = "Confirmed", ConfirmationNote = input.Note?.Trim(), ConfirmedAt = DateTime.UtcNow };
+            repository.Add(receipt); c.Status = "Received"; Touch(c.Request.Vault);
+            Audit(user, "ConfirmReceipt", "HandoverCase", id); Notify(c.Request.ExecutorId, "Receipt", "Người thụ hưởng đã xác nhận nhận di sản", "Người thụ hưởng đã xác nhận nhận đầy đủ tài sản từ hồ sơ bàn giao.");
+            await repository.Save(ct); return Map(receipt);
+        }
+        catch { await store.Delete(path); throw; }
     }
     public async Task<PageDto<NotificationDto>> Notifications(int user, int page, int size, CancellationToken ct)
     {
