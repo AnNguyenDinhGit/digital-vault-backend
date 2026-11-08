@@ -14,6 +14,19 @@ public sealed class AdminPaymentsController(VnPayService service) : VaultControl
     [HttpGet("subscription-plans/statistics")]
     public Task<IReadOnlyList<SubscriptionPlanStatisticsDto>> PlanStatistics(CancellationToken ct) => service.AdminPlanStatistics(ct);
 
+    [HttpGet("subscription-plans/stats")]
+    public Task<SubscriptionPlanMonthlyStatsDto> PlanMonthlyStats([FromQuery] string? month = null, CancellationToken ct = default) =>
+        service.AdminPlanMonthlyStats(month, ct);
+
+    [HttpGet("subscription-plans/{planId:int}/subscribers")]
+    public Task<PlanSubscriberPageDto> PlanSubscribers(
+        int planId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null,
+        CancellationToken ct = default) =>
+        service.AdminPlanSubscribers(planId, page, pageSize, status, ct);
+
     [HttpPost("subscription-plans")]
     public async Task<ActionResult<AdminSubscriptionPlanDto>> CreatePlan([FromBody] SaveSubscriptionPlanInput input, CancellationToken ct)
     {

@@ -13,13 +13,21 @@ public sealed record PlanUsageStatsRow(
     int ExpiredUsersCount,
     int TotalSubscribersCount,
     decimal TotalRevenue);
+public sealed record PlanMonthlyStatsRow(
+    int PlanId,
+    string PlanName,
+    int SoldCount,
+    decimal Revenue,
+    int ActiveUsers);
 
 public interface IPaymentRepository
 {
     Task<List<SubscriptionPlan>> ActivePlans(CancellationToken ct);
     Task<List<SubscriptionPlan>> AllPlans(CancellationToken ct);
     Task<Dictionary<int, PlanUsageStatsRow>> PlanUsageStatistics(DateTime now, CancellationToken ct);
+    Task<List<PlanMonthlyStatsRow>> PlanMonthlyStatistics(DateTime monthStart, DateTime monthEnd, DateTime now, CancellationToken ct);
     Task<SubscriptionPlan?> Plan(int planId, CancellationToken ct);
+    Task<bool> PlanExistsAny(int planId, CancellationToken ct);
     Task AddPlan(SubscriptionPlan plan, int adminUserId, CancellationToken ct);
     Task<bool> HasActiveOrScheduledSubscribers(int planId, DateTime now, CancellationToken ct);
     Task DeleteInactivePlan(SubscriptionPlan plan, int adminUserId, CancellationToken ct);
@@ -36,6 +44,7 @@ public interface IPaymentRepository
     Task<List<PaymentTransaction>> Transactions(int? userId, string? status, int skip, int take, CancellationToken ct);
     Task<PaymentTransaction?> Transaction(long transactionId, CancellationToken ct);
     Task<(int Total, List<UserSubscription> Items)> AdminUserSubscriptions(string? search, string? status, int? planId, DateTime now, int skip, int take, CancellationToken ct);
+    Task<(int Total, List<UserSubscription> Items)> PlanSubscribers(int planId, string? status, DateTime now, int skip, int take, CancellationToken ct);
     Task<List<string>> StorageDocumentPaths(int ownerId, CancellationToken ct);
     void AuditPlanChange(int adminUserId, string action, int planId);
     Task Save(CancellationToken ct);
@@ -90,8 +99,69 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
         return result;
     }
 
+    public async Task<List<PlanMonthlyStatsRow>> PlanMonthlyStatistics(DateTime monthStart, DateTime monthEnd, DateTime now, CancellationToken ct)
+    {
+        var allPlans = await db.SubscriptionPlans.AsNoTracking()
+            .OrderBy(x => x.Price)
+            .ThenBy(x => x.PlanId)
+            .ToListAsync(ct);
+
+        var deletedPlanIds = (await db.AuditLogs.AsNoTracking()
+            .Where(a => a.Action == "DeleteSubscriptionPlan" && a.EntityType == "SubscriptionPlan" && a.EntityId != null)
+            .Select(a => a.EntityId!.Value)
+            .Distinct()
+            .ToListAsync(ct)).ToHashSet();
+
+        var monthlySales = await db.PaymentTransactions.AsNoTracking()
+            .Where(x => x.Status == "Success" && x.CreatedAt >= monthStart && x.CreatedAt < monthEnd && x.SubscriptionId != null && x.Subscription != null)
+            .GroupBy(x => x.Subscription!.PlanId)
+            .Select(g => new
+            {
+                PlanId = g.Key,
+                SoldCount = g.Count(),
+                Revenue = g.Sum(x => x.Amount)
+            })
+            .ToDictionaryAsync(x => x.PlanId, ct);
+
+        var activeSubRows = await db.UserSubscriptions.AsNoTracking()
+            .Where(x => (x.Status == "Active" && x.EndDate > now) || (x.Status == "Scheduled" && x.StartDate <= now && x.EndDate > now))
+            .Select(x => new { x.PlanId, x.UserId })
+            .ToListAsync(ct);
+
+        var activeUsersByPlan = activeSubRows
+            .GroupBy(x => x.PlanId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.UserId).Distinct().Count());
+
+        var rows = new List<PlanMonthlyStatsRow>();
+        foreach (var plan in allPlans)
+        {
+            monthlySales.TryGetValue(plan.PlanId, out var sale);
+            activeUsersByPlan.TryGetValue(plan.PlanId, out var activeUsers);
+            var soldCount = sale?.SoldCount ?? 0;
+            var revenue = sale?.Revenue ?? 0m;
+
+            // Các gói đã bị xóa khỏi giao diện nhưng có phát sinh giao dịch trong tháng hoặc còn người đang dùng vẫn trả về để khớp tổng doanh thu
+            if (deletedPlanIds.Contains(plan.PlanId) && soldCount == 0 && activeUsers == 0)
+            {
+                continue;
+            }
+
+            rows.Add(new PlanMonthlyStatsRow(
+                PlanId: plan.PlanId,
+                PlanName: plan.PlanName,
+                SoldCount: soldCount,
+                Revenue: revenue,
+                ActiveUsers: activeUsers));
+        }
+
+        return rows;
+    }
+
     public Task<SubscriptionPlan?> Plan(int planId, CancellationToken ct) => db.SubscriptionPlans
         .SingleOrDefaultAsync(x => x.PlanId == planId && !db.AuditLogs.Any(a => a.Action == "DeleteSubscriptionPlan" && a.EntityType == "SubscriptionPlan" && a.EntityId == x.PlanId), ct);
+
+    public Task<bool> PlanExistsAny(int planId, CancellationToken ct) => db.SubscriptionPlans
+        .AnyAsync(x => x.PlanId == planId, ct);
     public async Task AddPlan(SubscriptionPlan plan, int adminUserId, CancellationToken ct)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
@@ -271,6 +341,42 @@ public sealed class PaymentRepository(LegacyVaultDbContext db) : IPaymentReposit
                 (x.User != null && x.User.Email.ToLower().Contains(term)) ||
                 (x.User != null && x.User.FullName.ToLower().Contains(term)) ||
                 (x.Plan != null && x.Plan.PlanName.ToLower().Contains(term)));
+        }
+
+        var total = await query.CountAsync(ct);
+        var items = await query
+            .OrderByDescending(x => x.StartDate)
+            .ThenByDescending(x => x.SubscriptionId)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(ct);
+
+        return (total, items);
+    }
+
+    public async Task<(int Total, List<UserSubscription> Items)> PlanSubscribers(
+        int planId,
+        string? status,
+        DateTime now,
+        int skip,
+        int take,
+        CancellationToken ct)
+    {
+        var query = db.UserSubscriptions.AsNoTracking()
+            .Include(x => x.User)
+            .Include(x => x.Plan)
+            .Where(x => x.PlanId == planId && x.Status != "Pending" && x.Status != "Failed");
+
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            query = status switch
+            {
+                "Active" => query.Where(x => (x.Status == "Active" && x.EndDate > now) || (x.Status == "Scheduled" && x.StartDate <= now && x.EndDate > now)),
+                "Scheduled" => query.Where(x => x.Status == "Scheduled" && x.StartDate > now),
+                "Expired" => query.Where(x => x.Status == "Expired" || x.Status == "Replaced" || ((x.Status == "Active" || x.Status == "Scheduled") && x.EndDate <= now)),
+                "Replaced" => query.Where(x => x.Status == "Replaced"),
+                _ => query
+            };
         }
 
         var total = await query.CountAsync(ct);

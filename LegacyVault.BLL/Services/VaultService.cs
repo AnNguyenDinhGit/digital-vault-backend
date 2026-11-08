@@ -104,6 +104,14 @@ public sealed class VaultService(
         Editable(vault); vault.UpdatedAt = RecordVersion.Next(vault.UpdatedAt);
         var now = DateTime.UtcNow;
         var asset = new DigitalAsset { VaultId = vault.VaultId, AssetName = input.Name.Trim(), AssetType = input.Type.Trim(), Description = input.Description?.Trim(), Status = "Active", CreatedAt = now, UpdatedAt = now };
+        asset.EncryptionKeys.Add(new EncryptionKey
+        {
+            EncryptedKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)),
+            Algorithm = "AES-256-GCM",
+            KeyVersion = 1,
+            Status = "Active",
+            CreatedAt = now
+        });
         repository.Add(asset);
         Audit(user, "CreateAsset", "DigitalVault", vault.VaultId, "Success");
         await repository.Save(ct);

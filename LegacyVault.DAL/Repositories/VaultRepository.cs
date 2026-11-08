@@ -13,6 +13,7 @@ public interface IVaultRepository
     IQueryable<Role> QueryRoles();
     IQueryable<EncryptionKey> QueryEncryptionKeys();
     Task<List<EncryptionKey>> ActiveEncryptionKeys(CancellationToken ct);
+    Task EnsureAssetEncryptionKeys(CancellationToken ct);
     Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct);
     Task<User?> User(int id, CancellationToken ct);
     Task<User?> LoginUser(string email, CancellationToken ct);
@@ -42,6 +43,45 @@ public sealed class VaultRepository(LegacyVaultDbContext db) : IVaultRepository
     public IQueryable<EncryptionKey> QueryEncryptionKeys() => db.EncryptionKeys.Include(k => k.Asset).AsNoTracking();
     public Task<List<EncryptionKey>> ActiveEncryptionKeys(CancellationToken ct)
         => db.EncryptionKeys.Include(k => k.Asset).Where(k => k.Status == "Active").ToListAsync(ct);
+
+    public async Task EnsureAssetEncryptionKeys(CancellationToken ct)
+    {
+        var missingAssets = await db.DigitalAssets.AsNoTracking()
+            .Where(a => !db.EncryptionKeys.Any(k => k.AssetId == a.AssetId))
+            .Select(a => new { a.AssetId, a.Status, a.CreatedAt })
+            .ToListAsync(ct);
+
+        var changed = false;
+        foreach (var asset in missingAssets)
+        {
+            db.EncryptionKeys.Add(new EncryptionKey
+            {
+                AssetId = asset.AssetId,
+                EncryptedKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)),
+                Algorithm = "AES-256-GCM",
+                KeyVersion = 1,
+                Status = asset.Status == "Active" ? "Active" : "Revoked",
+                CreatedAt = asset.CreatedAt
+            });
+            changed = true;
+        }
+
+        var revokedAssetKeys = await db.EncryptionKeys
+            .Include(k => k.Asset)
+            .Where(k => k.Status == "Active" && k.Asset.Status != "Active")
+            .ToListAsync(ct);
+
+        foreach (var key in revokedAssetKeys)
+        {
+            key.Status = "Revoked";
+            changed = true;
+        }
+
+        if (changed)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+    }
 
     public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct)
         => db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == token, ct);
