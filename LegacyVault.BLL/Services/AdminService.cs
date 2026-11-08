@@ -218,12 +218,16 @@ public sealed class AdminService(IVaultRepository repository)
     public async Task<KeyRotationSummaryDto> GetKeyRotationSummaryAsync(int adminUserId, CancellationToken ct)
     {
         await RequireAdmin(adminUserId, ct);
+        await repository.EnsureAssetEncryptionKeys(ct);
 
         int intervalDays;
         lock (ConfigLock) { intervalDays = _encryptionPolicy.KeyRotationIntervalDays; }
 
         var cutoff = DateTime.UtcNow.AddDays(-intervalDays);
-        var keys = await repository.QueryEncryptionKeys().ToListAsync(ct);
+        var keys = await repository.QueryEncryptionKeys()
+            .OrderByDescending(k => k.CreatedAt)
+            .ThenByDescending(k => k.KeyId)
+            .ToListAsync(ct);
 
         var keyItems = keys.Select(k =>
         {
@@ -253,12 +257,14 @@ public sealed class AdminService(IVaultRepository repository)
     public async Task<KeyRotationSummaryDto> RotateEncryptionKeysAsync(int adminUserId, CancellationToken ct)
     {
         await RequireAdmin(adminUserId, ct);
+        await repository.EnsureAssetEncryptionKeys(ct);
 
         var activeKeys = await repository.ActiveEncryptionKeys(ct);
         var now = DateTime.UtcNow;
 
         foreach (var key in activeKeys)
         {
+            key.EncryptedKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
             key.KeyVersion += 1;
             key.RotatedAt = now;
         }
