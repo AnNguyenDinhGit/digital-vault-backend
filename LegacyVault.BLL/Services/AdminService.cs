@@ -340,12 +340,47 @@ public sealed class AdminService(IVaultRepository repository)
         );
     }
 
-    public async Task<PageDto<UserAdminDto>> GetUsersAsync(int adminUserId, int page, int pageSize, string? role, string? status, CancellationToken ct)
+    public async Task<PageDto<UserAdminDto>> GetUsersAsync(
+        int adminUserId,
+        int page,
+        int pageSize,
+        string? role,
+        string? status,
+        CancellationToken ct,
+        int? userId = null,
+        string? search = null)
     {
         await RequireAdmin(adminUserId, ct);
         ManagementService.Paging(page, pageSize);
 
-        var query = repository.QueryUsers(); // Giả định có Queryable từ Repository
+        var query = repository.QueryUsers();
+
+        if (userId.HasValue)
+        {
+            if (userId.Value < 1) throw new WorkflowException(400, "UserId phải là số nguyên dương.");
+            query = query.Where(u => u.UserId == userId.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var keyword = search.Trim();
+            var idCandidate = keyword.TrimStart('#');
+            if (int.TryParse(idCandidate, out var parsedId) && parsedId > 0)
+            {
+                query = query.Where(u =>
+                    u.UserId == parsedId ||
+                    u.FullName.Contains(keyword) ||
+                    u.Email.Contains(keyword) ||
+                    (u.Phone != null && u.Phone.Contains(keyword)));
+            }
+            else
+            {
+                query = query.Where(u =>
+                    u.FullName.Contains(keyword) ||
+                    u.Email.Contains(keyword) ||
+                    (u.Phone != null && u.Phone.Contains(keyword)));
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(role))
             query = query.Where(u => u.Roles.Any(r => r.RoleName == role));

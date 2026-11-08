@@ -21,8 +21,10 @@ public sealed class AdminController(AdminService adminService, ManagementService
         [FromQuery] int pageSize = 20,
         [FromQuery] string? role = null,
         [FromQuery] string? status = null,
+        [FromQuery] int? userId = null,
+        [FromQuery] string? search = null,
         CancellationToken ct = default)
-        => adminService.GetUsersAsync(UserId, page, pageSize, role, status, ct);
+        => adminService.GetUsersAsync(UserId, page, pageSize, role, status, ct, userId, search);
 
     [HttpPost("users")]
     public async Task<ActionResult<UserAdminDto>> CreateUser([FromBody] CreateUserByAdminInput input, CancellationToken ct)
