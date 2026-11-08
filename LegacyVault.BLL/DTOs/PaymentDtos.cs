@@ -33,6 +33,30 @@ public sealed record SubscriptionPlanStatisticsDto(
     int ExpiredUsersCount,
     int TotalSubscribersCount,
     decimal TotalRevenue);
+public sealed record SubscriptionPlanMonthlyStatItemDto(
+    int PlanId,
+    string PlanName,
+    int SoldCount,
+    decimal Revenue,
+    int ActiveUsers);
+public sealed record SubscriptionPlanMonthlyStatsDto(
+    string Month,
+    int TotalSold,
+    decimal TotalRevenue,
+    IReadOnlyList<SubscriptionPlanMonthlyStatItemDto> Items);
+public sealed record PlanSubscriberItemDto(
+    int SubscriptionId,
+    int UserId,
+    string FullName,
+    string Email,
+    string Status,
+    DateTime StartDate,
+    DateTime EndDate);
+public sealed record PlanSubscriberPageDto(
+    int Page,
+    int PageSize,
+    int Total,
+    IReadOnlyList<PlanSubscriberItemDto> Items);
 public sealed record AdminPaymentTransactionDto(long TransactionId, int UserId, string? UserEmail, string? TransactionCode, decimal Amount, string PaymentMethod, string Status, DateTime CreatedAt, int? SubscriptionId, int? PlanId, string? PlanName);
 public sealed record AdminUserSubscriptionDto(
     int SubscriptionId,

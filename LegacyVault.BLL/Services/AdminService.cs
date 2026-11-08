@@ -84,12 +84,15 @@ public sealed class AdminService(IVaultRepository repository)
             .ToListAsync(ct);
 
         var total24h = recentLogs.Count;
-        var failedLogs = recentLogs.Where(a => !string.Equals(a.Result, "Success", StringComparison.OrdinalIgnoreCase)).ToList();
+        var failedLogs = recentLogs.Where(a =>
+            !string.Equals(a.Result, "Success", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(a.Result, "Alive_Signed", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(a.Result, "ReportedDeceased", StringComparison.OrdinalIgnoreCase)).ToList();
         var failed24h = failedLogs.Count;
         var failureRate = total24h > 0 ? Math.Round((double)failed24h * 100.0 / total24h, 2) : 0.0;
 
         var topFailed = failedLogs
-            .GroupBy(a => a.Action)
+            .GroupBy(a => LocalizeAuditAction(a.Action))
             .OrderByDescending(g => g.Count())
             .Take(5)
             .Select(g => new KeyValuePair<string, int>(g.Key, g.Count()))
@@ -524,7 +527,6 @@ public sealed class AdminService(IVaultRepository repository)
 
 
     // 1. Lấy danh sách Audit Logs cho Step 2 (Giám sát & Cảnh báo)
-    // 1. Lấy danh sách Audit Logs cho Step 2 (Giám sát & Cảnh báo)
     public async Task<PageDto<AuditLogDto>> GetAuditLogsAsync(int adminUserId, int page, int pageSize, string? action, CancellationToken ct)
     {
         await RequireAdmin(adminUserId, ct);
@@ -533,25 +535,142 @@ public sealed class AdminService(IVaultRepository repository)
         var query = repository.QueryAuditLogs();
 
         if (!string.IsNullOrWhiteSpace(action))
-            query = query.Where(a => a.Action == action);
+        {
+            var matchedActions = MatchAuditActionFilter(action.Trim());
+            query = query.Where(a => matchedActions.Contains(a.Action));
+        }
 
-        var total = await query.CountAsync(ct);
-        var logs = await query.OrderByDescending(a => a.Timestamp)
+        var rows = await query.OrderByDescending(a => a.Timestamp)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .Select(a => new AuditLogDto(
+            .Select(a => new
+            {
                 a.LogId,
                 a.UserId,
-                a.User != null ? a.User.Email : null,
+                UserEmail = a.User != null ? a.User.Email : null,
                 a.Action,
                 a.EntityType,
                 a.EntityId,
                 a.Result,
                 a.Ipaddress,
                 a.Timestamp
-            ))
+            })
             .ToListAsync(ct);
+
+        var logs = rows.Select(a => new AuditLogDto(
+            a.LogId,
+            a.UserId,
+            a.UserEmail,
+            LocalizeAuditAction(a.Action),
+            LocalizeAuditEntityType(a.EntityType),
+            a.EntityId,
+            LocalizeAuditResult(a.Result),
+            a.Ipaddress,
+            a.Timestamp
+        )).ToList();
 
         return new PageDto<AuditLogDto>(page, pageSize, logs);
     }
+
+    private static readonly Dictionary<string, string> AuditActionLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Xác thực & Tài khoản
+        ["PasswordLogin"] = "Đăng nhập bằng mật khẩu",
+        ["GoogleLogin"] = "Đăng nhập bằng Google",
+        ["ChangePassword"] = "Đổi mật khẩu",
+        ["ConfirmAlive"] = "Xác nhận còn sống (Check-in)",
+        ["AdminCreateUser"] = "Quản trị viên tạo tài khoản",
+        ["UpdateUserRoles"] = "Cập nhật vai trò người dùng",
+        ["UpdateUserStatus"] = "Cập nhật trạng thái tài khoản",
+        ["AdminUpdateUserProfile"] = "Quản trị viên cập nhật hồ sơ",
+        ["AdminResetUserPassword"] = "Quản trị viên đặt lại mật khẩu",
+
+        // Kho & Tài sản số
+        ["CreateVault"] = "Tạo kho di sản",
+        ["UpdateVault"] = "Cập nhật kho di sản",
+        ["CloseVault"] = "Đóng kho di sản",
+        ["CreateAsset"] = "Tạo tài sản số",
+        ["UpdateAsset"] = "Cập nhật tài sản số",
+        ["RevokeAsset"] = "Thu hồi tài sản số",
+        ["UploadAssetDocument"] = "Tải lên giấy tờ",
+        ["RevokeDocument"] = "Thu hồi giấy tờ tài sản",
+
+        // Người thụ hưởng & Người thi hành
+        ["AssignBeneficiary"] = "Chỉ định người thụ hưởng",
+        ["UpdateAllocation"] = "Cập nhật tỷ lệ phân bổ",
+        ["RevokeAllocation"] = "Thu hồi phân bổ thụ hưởng",
+        ["AcceptBeneficiaryAssignment"] = "Chấp nhận quyền thụ hưởng",
+        ["RejectBeneficiaryAssignment"] = "Từ chối quyền thụ hưởng",
+        ["AssignExecutor"] = "Gán người thi hành",
+        ["AutoAssignExecutor"] = "Tự động gán người thi hành",
+        ["RevokeExecutor"] = "Thu hồi người thi hành",
+
+        // Quy trình bàn giao & Pháp lý
+        ["CreateHandover"] = "Tạo yêu cầu bàn giao",
+        ["AcceptHandover"] = "Tiếp nhận hồ sơ bàn giao",
+        ["DeclineHandover"] = "Từ chối hồ sơ bàn giao",
+        ["CancelHandover"] = "Hủy yêu cầu bàn giao",
+        ["UploadHandoverDocument"] = "Tải lên tài liệu bàn giao",
+        ["UploadDeathCertificate"] = "Tải lên giấy chứng tử",
+        ["ReportOwnerDeceased"] = "Báo cáo chủ sở hữu qua đời",
+        ["RequestLegalVerification"] = "Gửi xác minh pháp lý",
+        ["LegalReview"] = "Thẩm định pháp lý",
+        ["ConfirmOwnerDeceased"] = "Xác nhận chủ sở hữu qua đời",
+        ["DeadManSwitchTriggered"] = "Kích hoạt bàn giao tự động",
+        ["StartHandover"] = "Bắt đầu bàn giao",
+        ["CompleteHandover"] = "Hoàn tất bàn giao",
+        ["ConfirmReceipt"] = "Xác nhận nhận di sản",
+
+        // Gói dịch vụ & Quản trị hệ thống
+        ["CreateSubscriptionPlan"] = "Tạo gói dịch vụ",
+        ["UpdateSubscriptionPlan"] = "Cập nhật gói dịch vụ",
+        ["DeactivateSubscriptionPlan"] = "Ngừng kích hoạt gói dịch vụ",
+        ["DeleteSubscriptionPlan"] = "Xóa gói dịch vụ ngừng bán",
+        ["UpdateSystemConfig"] = "Cập nhật cấu hình hệ thống",
+        ["RotateEncryptionKeys"] = "Xoay vòng khóa mã hóa",
+        ["TestIntegrationConnection"] = "Kiểm tra kết nối tích hợp"
+    };
+
+    private static string LocalizeAuditAction(string? action)
+    {
+        if (string.IsNullOrWhiteSpace(action)) return "";
+        return AuditActionLabels.TryGetValue(action.Trim(), out var label) ? label : action;
+    }
+
+    private static List<string> MatchAuditActionFilter(string filter)
+    {
+        var matches = AuditActionLabels
+            .Where(kv => string.Equals(kv.Key, filter, StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(kv.Value, filter, StringComparison.OrdinalIgnoreCase))
+            .Select(kv => kv.Key)
+            .Distinct()
+            .ToList();
+        if (!matches.Contains(filter)) matches.Add(filter);
+        return matches;
+    }
+
+    private static string? LocalizeAuditEntityType(string? entityType) => entityType switch
+    {
+        "User" => "Tài khoản",
+        "DigitalVault" => "Kho",
+        "DigitalAsset" => "Tài sản",
+        "AssetDocument" => "Giấy tờ tài sản",
+        "BeneficiaryAssignment" => "Phân bổ thụ hưởng",
+        "HandoverRequest" => "Đơn bàn giao",
+        "LegalVerification" => "Thẩm định pháp lý",
+        "HandoverCase" => "Hồ sơ thừa kế",
+        "SubscriptionPlan" => "Gói dịch vụ",
+        "SystemConfig" => "Cấu hình hệ thống",
+        "EncryptionKey" => "Khóa mã hóa",
+        "Integration" => "Tích hợp dịch vụ",
+        _ => entityType
+    };
+
+    private static string LocalizeAuditResult(string? result) => result switch
+    {
+        null => "",
+        "ReportedDeceased" => "Đã báo tử",
+        "Failed" => "Thất bại",
+        _ => result
+    };
 }

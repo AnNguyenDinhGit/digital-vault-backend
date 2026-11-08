@@ -224,6 +224,98 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
         }).ToArray();
     }
 
+    public async Task<SubscriptionPlanMonthlyStatsDto> AdminPlanMonthlyStats(string? month, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        DateTime monthStart;
+        if (string.IsNullOrWhiteSpace(month))
+        {
+            monthStart = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        }
+        else if (DateTime.TryParseExact(month.Trim(), "yyyy-MM", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+        {
+            monthStart = new DateTime(parsed.Year, parsed.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        }
+        else
+        {
+            throw new WorkflowException(400, "Invalid month format. Expected yyyy-MM (e.g., 2026-10).");
+        }
+
+        var monthEnd = monthStart.AddMonths(1);
+        var rows = await repository.PlanMonthlyStatistics(monthStart, monthEnd, now, ct);
+        var items = rows.Select(r => new SubscriptionPlanMonthlyStatItemDto(
+            PlanId: r.PlanId,
+            PlanName: r.PlanName,
+            SoldCount: r.SoldCount,
+            Revenue: r.Revenue,
+            ActiveUsers: r.ActiveUsers)).ToArray();
+
+        return new SubscriptionPlanMonthlyStatsDto(
+            Month: monthStart.ToString("yyyy-MM", CultureInfo.InvariantCulture),
+            TotalSold: items.Sum(x => x.SoldCount),
+            TotalRevenue: items.Sum(x => x.Revenue),
+            Items: items);
+    }
+
+    public async Task<PlanSubscriberPageDto> AdminPlanSubscribers(
+        int planId,
+        int page,
+        int pageSize,
+        string? status,
+        CancellationToken ct)
+    {
+        ValidatePaging(page, pageSize);
+        if (planId <= 0) throw new WorkflowException(400, "planId must be positive.");
+        if (!await repository.PlanExistsAny(planId, ct))
+        {
+            throw new WorkflowException(404, "Subscription plan not found.");
+        }
+
+        string? normalizedStatus = null;
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            normalizedStatus = status.Trim() switch
+            {
+                var s when s.Equals("Active", StringComparison.OrdinalIgnoreCase) => "Active",
+                var s when s.Equals("Scheduled", StringComparison.OrdinalIgnoreCase) => "Scheduled",
+                var s when s.Equals("Expired", StringComparison.OrdinalIgnoreCase) => "Expired",
+                var s when s.Equals("Replaced", StringComparison.OrdinalIgnoreCase) => "Replaced",
+                _ => throw new WorkflowException(400, "Status must be Active, Scheduled, Expired or Replaced.")
+            };
+        }
+
+        var now = DateTime.UtcNow;
+        var (total, rows) = await repository.PlanSubscribers(
+            planId,
+            normalizedStatus,
+            now,
+            (page - 1) * pageSize,
+            pageSize,
+            ct);
+
+        var items = rows.Select(row =>
+        {
+            var effectiveStatus = row.Status == "Scheduled" && row.StartDate > now
+                ? "Scheduled"
+                : (row.Status == "Active" || row.Status == "Scheduled") && row.EndDate > now
+                    ? "Active"
+                    : row.Status == "Replaced"
+                        ? "Replaced"
+                        : "Expired";
+
+            return new PlanSubscriberItemDto(
+                SubscriptionId: row.SubscriptionId,
+                UserId: row.UserId,
+                FullName: row.User?.FullName ?? "",
+                Email: row.User?.Email ?? "",
+                Status: effectiveStatus,
+                StartDate: DateTime.SpecifyKind(row.StartDate, DateTimeKind.Utc),
+                EndDate: DateTime.SpecifyKind(row.EndDate, DateTimeKind.Utc));
+        }).ToArray();
+
+        return new PlanSubscriberPageDto(page, pageSize, total, items);
+    }
+
     public async Task<AdminSubscriptionPlanDto> CreatePlan(int adminUserId, SaveSubscriptionPlanInput input, CancellationToken ct)
     {
         ValidatePlan(input);
