@@ -26,7 +26,7 @@ public sealed record DeclineHandoverInput([Required, StringLength(2000, MinimumL
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ReceiptInput([StringLength(2000)] string? Note);
 public sealed record AssignmentDto(int AssignmentId, int AssetId, int BeneficiaryId, string FullName, decimal Allocation, string Status);
-public sealed record ManagedDocumentDto(int DocumentId, string FileName, string FileType, bool IsEncrypted, string Status);
+public sealed record ManagedDocumentDto(int DocumentId, string FileName, string FileType, bool IsEncrypted, string Status, bool? SignatureValid = null);
 public sealed record ReviewDto(int VerificationId, int RequestId, int VerifierId, string Status, string? Comment, DateTime SubmittedAt, DateTime? ReviewedAt);
 public sealed record ReceiptDto(int ReceiptId, int HandoverId, int BeneficiaryId, string Status, string? Note, DateTime ConfirmedAt);
 public sealed record NotificationDto(int NotificationId, string Type, string Title, string Message, bool IsRead, DateTime CreatedAt);
