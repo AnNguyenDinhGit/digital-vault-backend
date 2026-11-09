@@ -1,4 +1,4 @@
-﻿using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.DTOs;
 using LegacyVault.DAL.Entities;
 
 namespace LegacyVault.BLL.Extensions;
