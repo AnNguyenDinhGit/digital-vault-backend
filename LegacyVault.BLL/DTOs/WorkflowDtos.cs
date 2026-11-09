@@ -13,6 +13,10 @@ public sealed record HandoverDto(int RequestId, int VaultId, string RequestType,
     public DateTime? DeclinedAt { get; init; }
     public DateTime? SubmittedAt { get; init; }
     public DateTime? CompletedAt { get; init; }
+    public string? LegalStatus { get; init; }
+    public string? LegalComment { get; init; }
+    public string? LegalVerifierName { get; init; }
+    public DateTime? LegalReviewedAt { get; init; }
 }
 public sealed record CaseDto(int HandoverId, int AssetId, int BeneficiaryId, string Status)
 {

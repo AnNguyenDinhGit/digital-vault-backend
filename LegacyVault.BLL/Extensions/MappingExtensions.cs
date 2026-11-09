@@ -22,7 +22,12 @@ public static class MappingExtensions
         );
 
     public static HandoverDto ToDto(this HandoverRequest r)
-        => new(
+    {
+        var latestReview = r.LegalVerifications
+            .OrderByDescending(v => v.ReviewedAt ?? v.SubmittedAt)
+            .ThenByDescending(v => v.VerificationId)
+            .FirstOrDefault();
+        return new(
             r.RequestId,
             r.VaultId,
             r.RequestType,
@@ -43,8 +48,13 @@ public static class MappingExtensions
         {
             Owner = new(r.Vault.OwnerId, r.Vault.Owner?.FullName ?? ""), VaultName = r.Vault.VaultName,
             ExecutorId = r.ExecutorId, ExecutorName = r.Executor?.FullName,
-            SubmittedAt = r.SubmittedAt, CompletedAt = r.CompletedAt
+            SubmittedAt = r.SubmittedAt, CompletedAt = r.CompletedAt,
+            LegalStatus = latestReview?.Status,
+            LegalComment = latestReview?.Comment,
+            LegalVerifierName = latestReview?.Verifier?.FullName,
+            LegalReviewedAt = latestReview?.ReviewedAt
         };
+    }
 
     public static AssignmentDto ToDto(this BeneficiaryAssignment a)
         => new(a.AssignmentId, a.AssetId, a.BeneficiaryId, a.Beneficiary.FullName, a.Allocation, a.Status);

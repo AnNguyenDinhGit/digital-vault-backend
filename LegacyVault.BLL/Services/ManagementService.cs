@@ -633,7 +633,14 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         try
         {
             v.Status = decision; v.Comment = input.Comment.Trim(); v.ReviewedAt = DateTime.UtcNow; Touch(r.Vault);
-            Audit(user, "LegalReview", "LegalVerification", v.VerificationId); Notify(r.ExecutorId, "LegalReview", "Đã có kết quả thẩm định pháp lý", "Hồ sơ bàn giao bạn phụ trách đã có kết quả thẩm định pháp lý. Vui lòng kiểm tra chi tiết hồ sơ.");
+            var reviewDecisionLabel = decision switch
+            {
+                "Approved" => "Đã phê duyệt",
+                "Additional_Info" => "Yêu cầu bổ sung thông tin",
+                _ => "Bị từ chối / Yêu cầu bổ sung"
+            };
+            Audit(user, "LegalReview", "LegalVerification", v.VerificationId);
+            Notify(r.ExecutorId, "LegalReview", $"Kết quả thẩm định pháp lý hồ sơ #{id}: {reviewDecisionLabel}", $"Hồ sơ #{id} ({reviewDecisionLabel}): {v.Comment}");
             await repository.Save(ct); return new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt);
         }
         catch
