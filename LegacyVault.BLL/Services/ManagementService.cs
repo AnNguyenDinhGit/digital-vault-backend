@@ -578,7 +578,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         if (decision is not ("Approved" or "Rejected" or "Additional_Info")) throw new WorkflowException(400, "Unsupported legal decision.");
         var (r, v) = await Legal(user, id, ct);
         if (r.Status != "Pending_Legal" || v.Status != "Pending" || r.LegalVerifications.Where(x => x.Status == "Pending").Any(x => x.VerifierId != user)) throw new WorkflowException(409, "Verification is not pending exclusively for this reviewer.");
-        if (decision is "Approved" or "Rejected")
+        if (decision is "Approved" or "Rejected" && (file is not null || signature is not null))
         {
             if (file is null || signature is null)
                 throw new WorkflowException(400, "Vui lòng tải lên tệp quyết định thẩm định kèm chữ ký số (.sig).");
