@@ -43,7 +43,22 @@ public sealed class DocumentProtection(SecurityOptions options)
             if (rsa is null) return false;
 
             // Verify an toàn với chuẩn PKCS#1 v1.5
-            return rsa.VerifyData(content, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            if (rsa.VerifyData(content, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
+                return true;
+
+            if (signature.Length == 256)
+            {
+                var marker = "%LV-EMBEDDED-SIG:"u8;
+                var idx = content.AsSpan().LastIndexOf(marker);
+                if (idx > 0)
+                {
+                    var b64Text = System.Text.Encoding.ASCII.GetString(content.AsSpan(idx + marker.Length)).Trim();
+                    var embeddedSig = Convert.FromBase64String(b64Text);
+                    if (rsa.VerifyData(content.AsSpan(0, idx), embeddedSig, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
+                        return true;
+                }
+            }
+            return false;
         }
         catch (CryptographicException)
         {
