@@ -572,12 +572,20 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
         var doc = r.HandoverDocuments.SingleOrDefault(d => d.HandoverDocumentId == document) ?? throw new WorkflowException(404, "Document not found.");
         return await Read(doc.StoragePath, ct);
     }
-    public async Task<ReviewDto> Review(int user, int id, string decision, ReviewInput input, CancellationToken ct)
+    public async Task<ReviewDto> Review(int user, int id, string decision, ReviewInput input, UploadFile? file = null, byte[]? signature = null, CancellationToken ct = default)
     {
         Validate(input); if (string.IsNullOrWhiteSpace(input.Comment)) throw new WorkflowException(400, "Review comment required.");
         if (decision is not ("Approved" or "Rejected" or "Additional_Info")) throw new WorkflowException(400, "Unsupported legal decision.");
         var (r, v) = await Legal(user, id, ct);
         if (r.Status != "Pending_Legal" || v.Status != "Pending" || r.LegalVerifications.Where(x => x.Status == "Pending").Any(x => x.VerifierId != user)) throw new WorkflowException(409, "Verification is not pending exclusively for this reviewer.");
+        if (decision is "Approved" or "Rejected")
+        {
+            if (file is null || signature is null)
+                throw new WorkflowException(400, "Vui lòng tải lên tệp quyết định thẩm định kèm chữ ký số (.sig).");
+            ValidateReceiptFile(file);
+            if (!protection.Verify(file.Content, signature, user))
+                throw new WorkflowException(400, "Chữ ký số của người thẩm định pháp lý không hợp lệ, chứng thư số hết hạn hoặc không khớp với tệp quyết định thẩm định.");
+        }
         if (decision == "Approved")
         {
             await Require(r.ExecutorId, ct, VaultService.ExecutorRole);
@@ -604,9 +612,35 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             foreach (var recipient in r.HandoverCases.Select(c => c.Assignment.BeneficiaryId).Distinct()) Notify(recipient, "Inheritance", "Di sản thừa kế đã sẵn sàng", "Hồ sơ bàn giao di sản đã được duyệt pháp lý. Vui lòng xác thực danh tính để kiểm tra tài sản thừa kế được phân bổ cho bạn.");
         }
         else r.Status = decision == "Additional_Info" ? "Additional_Info" : "Rejected";
-        v.Status = decision; v.Comment = input.Comment.Trim(); v.ReviewedAt = DateTime.UtcNow; Touch(r.Vault);
-        Audit(user, "LegalReview", "LegalVerification", v.VerificationId); Notify(r.ExecutorId, "LegalReview", "Đã có kết quả thẩm định pháp lý", "Hồ sơ bàn giao bạn phụ trách đã có kết quả thẩm định pháp lý. Vui lòng kiểm tra chi tiết hồ sơ.");
-        await repository.Save(ct); return new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt);
+        string? storedPath = null;
+        if (decision is "Approved" or "Rejected" && file is not null && signature is not null)
+        {
+            var purpose = decision == "Approved" ? "LegalApproval" : "LegalRejection";
+            var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, signature, purpose));
+            storedPath = await store.Write(protectedBytes, ct);
+            repository.Add(new HandoverDocument
+            {
+                RequestId = r.RequestId,
+                FileName = Path.GetFileName(file.FileName),
+                FileType = file.FileType,
+                StoragePath = storedPath,
+                IsEncrypted = true,
+                UploadedBy = user,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            });
+        }
+        try
+        {
+            v.Status = decision; v.Comment = input.Comment.Trim(); v.ReviewedAt = DateTime.UtcNow; Touch(r.Vault);
+            Audit(user, "LegalReview", "LegalVerification", v.VerificationId); Notify(r.ExecutorId, "LegalReview", "Đã có kết quả thẩm định pháp lý", "Hồ sơ bàn giao bạn phụ trách đã có kết quả thẩm định pháp lý. Vui lòng kiểm tra chi tiết hồ sơ.");
+            await repository.Save(ct); return new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt);
+        }
+        catch
+        {
+            if (storedPath is not null) await store.Delete(storedPath);
+            throw;
+        }
     }
     public async Task<PageDto<CaseDto>> Cases(int user, int page, int size, CancellationToken ct)
     {

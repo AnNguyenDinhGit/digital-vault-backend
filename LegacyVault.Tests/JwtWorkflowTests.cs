@@ -458,7 +458,16 @@ internal static class JwtWorkflowTests
             form.Add(new StringContent(ids["legal"].ToString()), "VerifierId"); var bytes = new ByteArrayContent("%PDF-1.7 legal evidence"u8.ToArray()); bytes.Headers.ContentType = new("application/pdf"); form.Add(bytes, "Evidence", "evidence.pdf");
             await Expect(await client.PostAsync($"/api/executor/handovers/{request.RequestId}/legal-verifications", form), HttpStatusCode.OK, "Executor submits assigned request for independent legal review");
         }
-        As("legal2"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Unauthorized" }), HttpStatusCode.NotFound, "legal reviewer cannot approve another reviewer's case");
+        async Task<HttpResponseMessage> LegalDecisionRequest(int targetRequestId, string action, string comment, bool wrongKey = false)
+        {
+            using var form = new MultipartFormDataContent();
+            var bytes = Encoding.UTF8.GetBytes($"legal-{action}-{comment}");
+            var file = new ByteArrayContent(bytes); file.Headers.ContentType = new("text/plain"); form.Add(file, "File", $"legal-{action}.txt");
+            form.Add(new ByteArrayContent((wrongKey ? executorKey : ownerKey).SignData(bytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)), "Signature", $"legal-{action}.sig");
+            form.Add(new StringContent(comment), "Comment");
+            return await client.PostAsync($"/api/legal/handovers/{targetRequestId}/{action}", form);
+        }
+        As("legal2"); await Expect(await LegalDecisionRequest(request.RequestId, "approve", "Unauthorized"), HttpStatusCode.NotFound, "legal reviewer cannot approve another reviewer's case");
         await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/owner-status"), HttpStatusCode.NotFound, "unassigned legal reviewer cannot inspect Owner death status");
         await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/assets"), HttpStatusCode.NotFound, "unassigned LegalVerifier cannot list handover assets");
         client.DefaultRequestHeaders.Authorization = null;
@@ -485,7 +494,7 @@ internal static class JwtWorkflowTests
         await Expect(await client.GetAsync($"/api/legal/handovers/{request.RequestId}/asset-documents/{doc.DocumentId}/content"), HttpStatusCode.Forbidden, "LegalVerifier cannot download sealed Owner asset document content");
         check((await client.GetFromJsonAsync<DocumentDto[]>($"/api/legal/handovers/{request.RequestId}/documents"))!.Any(d => d.Purpose == "DeathCertificate"), "LegalVerifier sees evidence types for the assigned review");
         As("legal"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/request-additional-information", new { comment = "Need more evidence" }), HttpStatusCode.OK, "legal requests additional information");
-        await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Premature" }), HttpStatusCode.Conflict, "legal cannot approve before evidence resubmission");
+        await Expect(await LegalDecisionRequest(request.RequestId, "approve", "Premature"), HttpStatusCode.Conflict, "legal cannot approve before evidence resubmission");
         As("executor");
         using (var form = new MultipartFormDataContent())
         {
@@ -493,14 +502,15 @@ internal static class JwtWorkflowTests
             await Expect(await client.PostAsync($"/api/executor/handovers/{request.RequestId}/legal-verifications", form), HttpStatusCode.OK, "Executor resubmits additional evidence");
         }
         As("legal");
+        await Expect(await LegalDecisionRequest(request.RequestId, "approve", "Invalid signature", wrongKey: true), HttpStatusCode.BadRequest, "legal approval rejects invalid digital signature");
         string assetPath;
         await using (var db = new LegacyVaultDbContext(dbOptions)) assetPath = (await db.AssetDocuments.SingleAsync(d => d.DocumentId == doc.DocumentId)).StoragePath;
         var documentStore = (FakeStore)app.Services.GetRequiredService<IDocumentStore>();
         var originalBytes = documentStore.Files[assetPath].ToArray(); documentStore.Files[assetPath][^1] ^= 1;
-        await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Tampered asset evidence" }), HttpStatusCode.Conflict, "legal approval rejects tampered AES-GCM asset content");
+        await Expect(await LegalDecisionRequest(request.RequestId, "approve", "Tampered asset evidence"), HttpStatusCode.Conflict, "legal approval rejects tampered AES-GCM asset content");
         documentStore.Files[assetPath] = originalBytes;
         await using (var db = new LegacyVaultDbContext(dbOptions)) check((await db.HandoverRequests.SingleAsync(r => r.RequestId == request.RequestId)).Status == "Pending_Legal", "invalid evidence cannot partially approve handover");
-        await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/approve", new { comment = "Evidence reviewed" }), HttpStatusCode.OK, "legal approves validated handover with review time");
+        await Expect(await LegalDecisionRequest(request.RequestId, "approve", "Evidence reviewed"), HttpStatusCode.OK, "legal approves validated handover with review time");
         var confirmed = (await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/legal/handovers/{request.RequestId}/owner-status"))!;
         check(confirmed.Status == "ConfirmedDeceased" && confirmed.VerifierId == ids["legal"] && confirmed.VerifiedAt is not null && confirmed.EvidenceRequestId == request.RequestId, "legal approval confirms Owner death using persisted evidence and reviewer provenance");
         check(confirmed.LastConfirmedAliveAt == lastLife.LastConfirmedAliveAt, "legal reviewer sees historical life confirmation without cancelling legal outcome");
@@ -510,7 +520,7 @@ internal static class JwtWorkflowTests
         check(history.Length == 2 && history.Any(h => h.Status == "Additional_Info") && history.Any(h => h.Status == "Approved" && h.VerifierName == "legal"), "legal history retains additional-info and final decision with reviewer identity");
         await using (var db = new LegacyVaultDbContext(dbOptions))
             check((await db.Users.SingleAsync(u => u.UserId == ids["owner"])).Status == "Active" && await db.AuditLogs.AnyAsync(a => a.Action == "ConfirmOwnerDeceased" && a.EntityId == ids["owner"]), "death confirmation persists audit without changing account status");
-        await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{request.RequestId}/reject", new { comment = "Too late" }), HttpStatusCode.Conflict, "review cannot overwrite an approved outcome");
+        await Expect(await LegalDecisionRequest(request.RequestId, "reject", "Too late"), HttpStatusCode.Conflict, "review cannot overwrite an approved outcome");
         As("executor"); await Expect(await UploadCertificate(request.RequestId), HttpStatusCode.Conflict, "approved request cannot accept replacement death certificate");
         As("recipient"); await Expect(await client.GetAsync("/api/beneficiary/assets"), HttpStatusCode.Forbidden, "inheritance still requires separate beneficiary OTP after legal approval");
         var otpResponse = await client.PostAsJsonAsync("/api/beneficiary/otp/request", new { }); var inheritedOtp = (await otpResponse.Content.ReadFromJsonAsync<OtpChallenge>())!; var inheritedCode = ((FakeSender)app.Services.GetRequiredService<IOtpSender>()).Code;
@@ -661,7 +671,8 @@ internal static class JwtWorkflowTests
         var assetPage2 = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{rejectedRequest.RequestId}/assets?page=2&pageSize=1"))!;
         var assetPage3 = (await client.GetFromJsonAsync<PageDto<LegalAssetDto>>($"/api/legal/handovers/{rejectedRequest.RequestId}/assets?page=3&pageSize=1"))!;
         check(assetPage1.Items.Count == 1 && assetPage2.Items.Count == 1 && assetPage1.Items[0].AssetId < assetPage2.Items[0].AssetId && assetPage2.Page == 2 && assetPage3.Items.Count == 0, "legal asset pagination has stable ordering, no duplicate cases and an empty trailing page");
-        await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{rejectedRequest.RequestId}/reject", new { comment = "Evidence insufficient" }), HttpStatusCode.OK, "LegalVerifier persists independent rejection");
+        await Expect(await LegalDecisionRequest(rejectedRequest.RequestId, "reject", "Invalid signature", wrongKey: true), HttpStatusCode.BadRequest, "legal rejection rejects invalid digital signature");
+        await Expect(await LegalDecisionRequest(rejectedRequest.RequestId, "reject", "Evidence insufficient"), HttpStatusCode.OK, "LegalVerifier persists independent rejection");
         As("owner");
         await Expect(await client.PostAsJsonAsync($"/api/owner/handovers/{rejectedRequest.RequestId}/cancel", new { }), HttpStatusCode.NoContent, "Owner can cancel rejected request to repair evidence without deleting history");
         await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{rejectedFlow.Vault}", new { name = "Corrected after rejection" }), HttpStatusCode.OK, "cancelled rejection releases mutation gate while completed records remain protected");
@@ -686,17 +697,20 @@ internal static class JwtWorkflowTests
         await Expect(await client.PostAsync($"/api/executor/handovers/{otherRequest.RequestId}/accept", null), HttpStatusCode.OK, "Executor accepts another Owner's pending handover");
         await Expect(await UploadCertificate(otherRequest.RequestId), HttpStatusCode.OK, "different Owner death report requires own linked evidence");
         await SubmitReview(otherRequest.RequestId);
-        As("legal"); await Expect(await client.PostAsJsonAsync($"/api/legal/handovers/{otherRequest.RequestId}/reject", new { comment = "Certificate not sufficient" }), HttpStatusCode.OK, "legal rejection is persisted for separate Owner");
+        As("legal"); await Expect(await LegalDecisionRequest(otherRequest.RequestId, "reject", "Certificate not sufficient"), HttpStatusCode.OK, "legal rejection is persisted for separate Owner");
         check((await client.GetFromJsonAsync<OwnerLifeStatusDto>($"/api/legal/handovers/{otherRequest.RequestId}/owner-status"))!.Status == "Rejected", "rejected death evidence does not mark Owner confirmed deceased");
         As("other"); await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.OK, "rejected death report does not permanently block Owner life confirmation");
         As("executor"); await Expect(await client.PutAsJsonAsync($"/api/executor/handovers/{otherRequest.RequestId}/owner-status", new { status = "ConfirmedDeceased" }), HttpStatusCode.MethodNotAllowed, "Executor cannot force confirmed death through arbitrary status input");
         var raceRequest = await NewOtherOwnerRequest("Concurrent legal review");
         As("executor"); await client.PostAsync($"/api/executor/handovers/{raceRequest.RequestId}/accept", null); await UploadCertificate(raceRequest.RequestId); await SubmitReview(raceRequest.RequestId);
+        var raceBytes = "signed legal review decision"u8.ToArray();
+        var raceFile = new UploadFile("legal-review.txt", "text/plain", raceBytes);
+        var raceSig = ownerKey.SignData(raceBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         var racingReview = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
-            .AddInterceptors(new LegalReviewRace(dbOptions, raceRequest.RequestId, ids["legal"], app.Services)).Options;
+            .AddInterceptors(new LegalReviewRace(dbOptions, raceRequest.RequestId, ids["legal"], raceFile, raceSig, app.Services)).Options;
         await using (var db = new LegacyVaultDbContext(racingReview))
         {
-            try { await Service(db, app.Services).Review(ids["legal"], raceRequest.RequestId, "Approved", new("Competing approval"), default); throw new Exception("Expected legal review concurrency conflict"); }
+            try { await Service(db, app.Services).Review(ids["legal"], raceRequest.RequestId, "Approved", new("Competing approval"), raceFile, raceSig, default); throw new Exception("Expected legal review concurrency conflict"); }
             catch (RepositoryConflictException) { check(true, "competing legal decisions cannot both commit after separate DbContext SQL writes"); }
         }
         await using (var db = new LegacyVaultDbContext(dbOptions))
@@ -863,12 +877,12 @@ internal static class JwtWorkflowTests
             return result;
         }
     }
-    private sealed class LegalReviewRace(DbContextOptions<LegacyVaultDbContext> options, int request, int verifier, IServiceProvider services) : SaveChangesInterceptor
+    private sealed class LegalReviewRace(DbContextOptions<LegacyVaultDbContext> options, int request, int verifier, UploadFile file, byte[] signature, IServiceProvider services) : SaveChangesInterceptor
     {
         private bool ran;
         public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
         {
-            if (!ran) { ran = true; await using var other = new LegacyVaultDbContext(options); await Service(other, services).Review(verifier, request, "Rejected", new("Winning independent review"), ct); }
+            if (!ran) { ran = true; await using var other = new LegacyVaultDbContext(options); await Service(other, services).Review(verifier, request, "Rejected", new("Winning independent review"), file, signature, ct); }
             return result;
         }
     }
