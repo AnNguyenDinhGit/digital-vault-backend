@@ -188,11 +188,11 @@ public sealed class VaultService(
         if (recipient is null || recipient.Status != "Active")
         {
             // Tự động gửi email mời đăng ký tài khoản cho người thụ hưởng nếu chưa tồn tại hoặc chưa Active
-            string appUrl = configuration["AppUrl"] ?? "http://localhost:5173";
-            string registerUrl = $"{appUrl}/register?email={Uri.EscapeDataString(input.Email)}";
-            await SendInvitationEmailAsync(input.Email, registerUrl);
+            string appUrl = configuration["AppUrl"] ?? "https://digitalvault-zeta.vercel.app";
+            string registerUrl = $"{appUrl}/register?email={Uri.EscapeDataString(input.Email.Trim())}";
+            await SendInvitationEmailAsync(input.Email.Trim(), registerUrl, ct);
 
-            throw new WorkflowException(404, "Active recipient account not found. An invitation email has been sent to the recipient to register first.");
+            throw new WorkflowException(404, "Không tìm thấy tài khoản người nhận. Hệ thống đã gửi email mời đăng ký đến người này.");
         }
 
         if (recipient.UserId == owner) throw new WorkflowException(400, "An owner cannot designate themselves as beneficiary of their own asset.");
@@ -231,45 +231,23 @@ public sealed class VaultService(
         return new BeneficiaryDto(assetId, recipient.UserId, recipient.FullName, assignment.Allocation, assignment.Status);
     }
 
-    private async Task SendInvitationEmailAsync(string toEmail, string registerUrl)
+    private async Task SendInvitationEmailAsync(string toEmail, string registerUrl, CancellationToken ct)
     {
-        var mailHost = configuration["MailOptions:Host"];
-        var mailPortStr = configuration["MailOptions:Port"];
-        var mailUser = configuration["MailOptions:Username"];
-        var mailPass = configuration["MailOptions:Password"];
-        var mailFrom = configuration["MailOptions:From"];
-
-        if (string.IsNullOrWhiteSpace(mailHost) || string.IsNullOrWhiteSpace(mailFrom))
-        {
-            return;
-        }
+        var subject = "Lời mời đăng ký tài khoản người thụ hưởng - AeternaVault";
+        var body = $"Xin chào,\n\n" +
+                   $"Bạn đã được chỉ định làm người thụ hưởng cho một tài sản số trên hệ thống AeternaVault (LegacyVault).\n\n" +
+                   $"Để tiếp nhận quyền thụ hưởng tài sản này, vui lòng truy cập theo đường link bên dưới để đăng ký tài khoản:\n\n" +
+                   $"{registerUrl}\n\n" +
+                   $"Trân trọng,\n" +
+                   $"Đội ngũ AeternaVault";
 
         try
         {
-            var mailPort = int.TryParse(mailPortStr, out var port) ? port : 587;
-            using var client = new SmtpClient(mailHost, mailPort)
-            {
-                Credentials = new NetworkCredential(mailUser, mailPass),
-                EnableSsl = true
-            };
-
-            var mailMessage = new MailMessage
-            {
-                From = new MailAddress(mailFrom),
-                Subject = "Loi moi tro thanh nguoi thu huong tai san ky thuat so - LegacyVault",
-                Body = $"Xin chao,\n\n" +
-                       $"Ban da duoc chi dinh lam nguoi thu huong mot tai san tren he thong LegacyVault.\n" +
-                       $"Vui long tao tai khoan bằng cach truy cap vao duong dan sau de tiep nhan quyen thu huong:\n\n" +
-                       $"{registerUrl}\n\n" +
-                       $"Tran trong,\nLegacyVault Team",
-                IsBodyHtml = false
-            };
-
-            mailMessage.To.Add(toEmail);
-            await client.SendMailAsync(mailMessage);
+            await mailSender.SendEmail(toEmail, subject, body, ct);
         }
         catch
         {
+            // Không làm gián đoạn luồng chính nếu dịch vụ gửi mail bị gián đoạn
         }
     }
 

@@ -42,7 +42,7 @@ internal static class OwnerAccountTests
             var logs = await service.ActivityLogs(ownerId, default);
             check(logs.Count == 3 && logs.All(x => x.Action != "CreateVault" || x.EntityId == 7), "owner activity logs only include the caller's own audit entries");
             check(logs.Select(x => x.Timestamp).SequenceEqual(logs.Select(x => x.Timestamp).OrderByDescending(x => x)), "owner activity logs are ordered newest first");
-            check(logs.Any(x => x.Action == "Login" && x.IpAddress == "10.0.0.1"), "owner activity logs expose IP address of login entries");
+            check(logs.Any(x => x.Action == "Đăng nhập" && x.IpAddress == "10.0.0.1"), "owner activity logs expose IP address of login entries");
 
             var profile = await service.Profile(ownerId, default);
             check(profile.Email == "owner.account@example.test" && profile.Phone == "0901111111" && !profile.TwoFactorEnabled && profile.PasswordChangedAt is not null, "owner profile returns account fields, 2FA state and last password change");

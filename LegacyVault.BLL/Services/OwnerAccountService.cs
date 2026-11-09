@@ -12,16 +12,103 @@ public sealed class OwnerAccountService(IVaultRepository repository)
     public const int MaxActivityLogs = 500;
     private const string EmailFactor = "Email";
 
+    private static readonly Dictionary<string, string> ActionVietnameseLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["PasswordLogin"] = "Đăng nhập",
+        ["GoogleLogin"] = "Đăng nhập Google",
+        ["Login"] = "Đăng nhập",
+        ["Logout"] = "Đăng xuất",
+        ["CreateVault"] = "Tạo kho",
+        ["UpdateVault"] = "Chỉnh sửa kho",
+        ["CloseVault"] = "Đóng kho",
+        ["CreateAsset"] = "Tạo tài sản",
+        ["UpdateAsset"] = "Chỉnh sửa tài sản",
+        ["DeleteAsset"] = "Xóa tài sản",
+        ["RevokeAsset"] = "Thu hồi tài sản",
+        ["AssignBeneficiary"] = "Chỉ định người thụ hưởng",
+        ["UpdateAllocation"] = "Sửa phân bổ người thụ hưởng",
+        ["RemoveBeneficiary"] = "Xóa người thụ hưởng",
+        ["RevokeAllocation"] = "Thu hồi phân bổ",
+        ["AcceptBeneficiaryAssignment"] = "Chấp nhận thụ hưởng",
+        ["RejectBeneficiaryAssignment"] = "Từ chối thụ hưởng",
+        ["UploadAssetDocument"] = "Tải lên giấy tờ",
+        ["DownloadDocument"] = "Tải giấy tờ về",
+        ["RevokeDocument"] = "Thu hồi giấy tờ",
+        ["UpdateProofOfLife"] = "Cập nhật cấu hình điểm danh",
+        ["PingProofOfLife"] = "Điểm danh sự sống",
+        ["ConfirmAlive"] = "Xác nhận còn sống",
+        ["AssignExecutor"] = "Gán người thi hành",
+        ["AutoAssignExecutor"] = "Tự động gán người thi hành",
+        ["RevokeExecutor"] = "Thu hồi người thi hành",
+        ["UpdateProfile"] = "Cập nhật thông tin cá nhân",
+        ["ChangePassword"] = "Đổi mật khẩu",
+        ["ToggleTwoFactor"] = "Đổi cài đặt xác thực hai lớp",
+        ["EnableTwoFactor"] = "Bật xác thực hai lớp",
+        ["DisableTwoFactor"] = "Tắt xác thực hai lớp",
+        ["CreateHandoverRequest"] = "Tạo đơn bàn giao",
+        ["CreateHandover"] = "Tạo đơn bàn giao",
+        ["AcceptHandover"] = "Tiếp nhận hồ sơ bàn giao",
+        ["DeclineHandover"] = "Từ chối hồ sơ bàn giao",
+        ["CancelHandover"] = "Hủy yêu cầu bàn giao",
+        ["UploadHandoverDocument"] = "Tải lên tài liệu bàn giao",
+        ["UploadDeathCertificate"] = "Tải lên giấy chứng tử",
+        ["ReportOwnerDeceased"] = "Báo cáo chủ sở hữu qua đời",
+        ["RequestLegalVerification"] = "Gửi xác minh pháp lý",
+        ["LegalReview"] = "Thẩm định pháp lý",
+        ["ConfirmOwnerDeceased"] = "Xác nhận chủ sở hữu qua đời",
+        ["DeadManSwitchTriggered"] = "Kích hoạt bàn giao tự động",
+        ["StartHandover"] = "Bắt đầu bàn giao",
+        ["CompleteHandover"] = "Hoàn tất bàn giao",
+        ["ConfirmReceipt"] = "Xác nhận nhận di sản",
+        ["CreateSubscriptionPlan"] = "Tạo gói dịch vụ",
+        ["UpdateSubscriptionPlan"] = "Cập nhật gói dịch vụ",
+        ["DeactivateSubscriptionPlan"] = "Ngừng gói dịch vụ",
+        ["DeleteSubscriptionPlan"] = "Xóa gói dịch vụ",
+        ["UpdateSystemConfig"] = "Cập nhật cấu hình hệ thống",
+        ["RotateEncryptionKeys"] = "Xoay vòng khóa mã hóa",
+        ["TestIntegrationConnection"] = "Kiểm tra kết nối tích hợp",
+        ["AdminCreateUser"] = "Admin tạo người dùng",
+        ["UpdateUserRoles"] = "Admin đổi vai trò",
+        ["UpdateUserStatus"] = "Admin đổi trạng thái",
+        ["AdminUpdateUserProfile"] = "Admin sửa thông tin",
+        ["AdminResetUserPassword"] = "Admin đặt lại mật khẩu"
+    };
+
+    public static string LocalizeAction(string action)
+    {
+        if (string.IsNullOrWhiteSpace(action)) return "";
+        return ActionVietnameseLabels.TryGetValue(action.Trim(), out var label) ? label : action;
+    }
+
     public async Task<List<OwnerActivityLogDto>> ActivityLogs(int userId, CancellationToken ct)
     {
         await ActiveUser(userId, ct);
-        return await repository.QueryAuditLogs()
+        var rawLogs = await repository.QueryAuditLogs()
             .Where(x => x.UserId == userId)
             .OrderByDescending(x => x.Timestamp)
             .ThenByDescending(x => x.LogId)
             .Take(MaxActivityLogs)
-            .Select(x => new OwnerActivityLogDto(x.LogId, x.Action, x.EntityType, x.EntityId, x.Timestamp, x.Ipaddress, x.Result))
+            .Select(x => new
+            {
+                x.LogId,
+                x.Action,
+                x.EntityType,
+                x.EntityId,
+                x.Timestamp,
+                x.Ipaddress,
+                x.Result
+            })
             .ToListAsync(ct);
+
+        return rawLogs.Select(x => new OwnerActivityLogDto(
+            x.LogId,
+            LocalizeAction(x.Action),
+            x.EntityType,
+            x.EntityId,
+            x.Timestamp,
+            x.Ipaddress,
+            x.Result
+        )).ToList();
     }
 
     public async Task<OwnerProfileDto> Profile(int userId, CancellationToken ct) =>
@@ -125,4 +212,3 @@ public sealed class OwnerAccountService(IVaultRepository repository)
             Timestamp = now
         });
 }
-
