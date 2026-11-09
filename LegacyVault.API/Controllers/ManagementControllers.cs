@@ -113,9 +113,24 @@ public sealed class LegalController(ManagementService service) : VaultController
     [HttpGet("{requestId:int}")] public async Task<IActionResult> Detail(int requestId, CancellationToken ct) { var value = await service.LegalDetail(UserId, requestId, ct); return Ok(new { request = value.Request, verification = value.Verification }); }
     [HttpGet("{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, false, ct));
     [HttpGet("{requestId:int}/asset-documents/{documentId:int}/content")] public async Task<IActionResult> AssetDocument(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, true, ct));
-    [HttpPost("{requestId:int}/approve")] public Task<ReviewDto> Approve(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Approved", input, ct);
-    [HttpPost("{requestId:int}/reject")] public Task<ReviewDto> Reject(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Rejected", input, ct);
-    [HttpPost("{requestId:int}/request-additional-information")] public Task<ReviewDto> Additional(int requestId, ReviewInput input, CancellationToken ct) => service.Review(UserId, requestId, "Additional_Info", input, ct);
+    [HttpPost("{requestId:int}/approve"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<ReviewDto> Approve(int requestId, [FromForm] LegalDecisionForm form, CancellationToken ct) =>
+        await service.Review(UserId, requestId, "Approved", new ReviewInput(form.Comment), await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct);
+
+    [HttpPost("{requestId:int}/reject"), RequestSizeLimit(11 * 1024 * 1024)]
+    public async Task<ReviewDto> Reject(int requestId, [FromForm] LegalDecisionForm form, CancellationToken ct) =>
+        await service.Review(UserId, requestId, "Rejected", new ReviewInput(form.Comment), await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct);
+
+    [HttpPost("{requestId:int}/request-additional-information")]
+    public Task<ReviewDto> Additional(int requestId, ReviewInput input, CancellationToken ct) =>
+        service.Review(UserId, requestId, "Additional_Info", input, null, null, ct);
+}
+
+public sealed class LegalDecisionForm
+{
+    [System.ComponentModel.DataAnnotations.Required] public IFormFile File { get; set; } = null!;
+    [System.ComponentModel.DataAnnotations.Required] public IFormFile Signature { get; set; } = null!;
+    [System.ComponentModel.DataAnnotations.Required, System.ComponentModel.DataAnnotations.StringLength(2000, MinimumLength = 1)] public string Comment { get; set; } = "";
 }
 
 public sealed class BeneficiaryReceiptForm

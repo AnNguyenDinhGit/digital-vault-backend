@@ -191,6 +191,7 @@ sealed class FakeRepository : IVaultRepository
     public IQueryable<Role> QueryRoles() => new List<Role>().AsQueryable();
     public IQueryable<EncryptionKey> QueryEncryptionKeys() => new List<EncryptionKey>().AsQueryable();
     public Task<List<EncryptionKey>> ActiveEncryptionKeys(CancellationToken ct) => Task.FromResult(new List<EncryptionKey>());
+    public Task EnsureAssetEncryptionKeys(CancellationToken ct) => Task.CompletedTask;
     public Task<RefreshToken?> GetRefreshTokenAsync(string token, CancellationToken ct) => Task.FromResult<RefreshToken?>(null);
     public List<object> Added { get; } = new();
     public bool FailSave { get; set; }
