@@ -114,16 +114,33 @@ public sealed class LegalController(ManagementService service) : VaultController
     [HttpGet("{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, false, ct));
     [HttpGet("{requestId:int}/asset-documents/{documentId:int}/content")] public async Task<IActionResult> AssetDocument(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, true, ct));
     [HttpPost("{requestId:int}/approve"), RequestSizeLimit(11 * 1024 * 1024)]
-    public async Task<ReviewDto> Approve(int requestId, [FromForm] LegalDecisionForm form, CancellationToken ct) =>
-        await service.Review(UserId, requestId, "Approved", new ReviewInput(form.Comment), await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct);
+    public Task<ReviewDto> Approve(int requestId, CancellationToken ct) => SubmitReview(requestId, "Approved", ct);
 
     [HttpPost("{requestId:int}/reject"), RequestSizeLimit(11 * 1024 * 1024)]
-    public async Task<ReviewDto> Reject(int requestId, [FromForm] LegalDecisionForm form, CancellationToken ct) =>
-        await service.Review(UserId, requestId, "Rejected", new ReviewInput(form.Comment), await ReadUpload(form.File, ct), (await ReadSignature(form.Signature, ct))!, ct);
+    public Task<ReviewDto> Reject(int requestId, CancellationToken ct) => SubmitReview(requestId, "Rejected", ct);
 
     [HttpPost("{requestId:int}/request-additional-information")]
     public Task<ReviewDto> Additional(int requestId, ReviewInput input, CancellationToken ct) =>
         service.Review(UserId, requestId, "Additional_Info", input, null, null, ct);
+
+    private async Task<ReviewDto> SubmitReview(int requestId, string decision, CancellationToken ct)
+    {
+        if (Request.HasFormContentType)
+        {
+            var form = await Request.ReadFormAsync(ct);
+            var comment = form["Comment"].FirstOrDefault() ?? form["comment"].FirstOrDefault() ?? "";
+            var fileField = form.Files.GetFile("File") ?? form.Files.GetFile("file");
+            var sigField = form.Files.GetFile("Signature") ?? form.Files.GetFile("signature");
+            var upload = fileField is null ? null : await ReadUpload(fileField, ct);
+            var sig = await ReadSignature(sigField, ct);
+            if ((upload is not null && sig is null) || (upload is null && sig is not null))
+                throw new WorkflowException(400, "Vui lòng tải lên đầy đủ cả tệp quyết định thẩm định và tệp chữ ký số (.sig).");
+            return await service.Review(UserId, requestId, decision, new ReviewInput(comment), upload, sig, ct);
+        }
+        var input = await Request.ReadFromJsonAsync<ReviewInput>(cancellationToken: ct)
+            ?? throw new WorkflowException(400, "Invalid input.");
+        return await service.Review(UserId, requestId, decision, input, null, null, ct);
+    }
 }
 
 public sealed class LegalDecisionForm
