@@ -83,6 +83,7 @@ builder.Services.AddScoped<ManagementService>();
 builder.Services.AddHostedService<LegacyVault.API.Services.DeadManSwitchBackgroundService>();
 builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 builder.Services.AddScoped<IdentityService>();
+builder.Services.AddScoped<OwnerAccountService>();
 builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
 builder.Services.AddScoped<VnPayService>();
 builder.Services.AddScoped<LegacyVault.API.Filters.RequireActiveSubscriptionFilter>();

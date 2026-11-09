@@ -147,6 +147,7 @@ Check(missingRoleRegistration.Roles.Single() == VaultService.OwnerRole && regist
 registrationRepo.MissingRole = false; registrationRepo.DuplicateOnSave = true;
 await Reject(() => identity.Register(Registration("race@example.test", phone: "0901234560"), default), 409, "concurrent duplicate database insert maps to conflict");
 await RelationalRegistrationTests.Run(Check);
+await OwnerAccountTests.Run(Check);
 await MainFlowTests.Run(Check);
 await BeneficiaryAssignmentTests.Run(Check);
 await GoogleLoginTests.Run(Check);
