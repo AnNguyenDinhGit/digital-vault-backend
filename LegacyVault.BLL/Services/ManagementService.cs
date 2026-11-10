@@ -488,16 +488,20 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private async Task<IReadOnlyList<DocumentDto>> EvidenceMetadata(HandoverRequest request, CancellationToken ct)
     {
         var result = new List<DocumentDto>();
+        var verifications = request.LegalVerifications.OrderBy(v => v.SubmittedAt).ToList();
         foreach (var d in request.HandoverDocuments)
         {
+            int? verificationId = verifications.Count > 0
+                ? (verifications.FirstOrDefault(v => v.SubmittedAt >= d.CreatedAt.AddSeconds(-10)) ?? verifications.Last()).VerificationId
+                : null;
             try
             {
                 var content = await Read(d.StoragePath, ct);
-                result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+                result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose, d.CreatedAt, verificationId));
             }
             catch (WorkflowException ex) when (ex.StatusCode == 503)
             {
-                result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, false, null));
+                result.Add(new(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, false, null, d.CreatedAt, verificationId));
             }
         }
         return result;

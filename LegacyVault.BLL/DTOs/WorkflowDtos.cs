@@ -1,6 +1,6 @@
 namespace LegacyVault.BLL.DTOs;
 public sealed record AssetDto(int AssetId, string Name, string Type, string? Description, string Status, IReadOnlyList<DocumentDto> Documents);
-public sealed record DocumentDto(int DocumentId, string FileName, string FileType, bool IsEncrypted, bool? SignatureValid = null, string? Purpose = null);
+public sealed record DocumentDto(int DocumentId, string FileName, string FileType, bool IsEncrypted, bool? SignatureValid = null, string? Purpose = null, DateTime? SubmittedAt = null, int? VerificationId = null);
 public sealed record BeneficiaryDto(int AssetId, int BeneficiaryId, string FullName, decimal Allocation, string Status);
 public sealed record HandoverDto(int RequestId, int VaultId, string RequestType, string Status, DateTime InitiatedAt, IReadOnlyList<DocumentDto> Documents, IReadOnlyList<CaseDto> Cases)
 {
