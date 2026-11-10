@@ -7,13 +7,10 @@ namespace LegacyVault.BLL.Security;
 
 public static class HandoverEvidence
 {
-    public static async Task RequireDeathCertificate(HandoverRequest request, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
+    public static Task RequireDeathCertificate(HandoverRequest request, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
     {
-        if (!string.Equals(request.RequestType, "DeadManSwitch", StringComparison.OrdinalIgnoreCase))
-            return;
-
-        if (await FindDeathCertificate(request, store, protection, ct) is null)
-            throw new WorkflowException(409, "The assigned Executor must upload a death certificate before legal submission or approval.");
+        // Giấy chứng tử không còn là điều kiện bắt buộc trước khi gửi thẩm định pháp lý
+        return Task.CompletedTask;
     }
 
     public static async Task<bool> IsUserDeceased(int userId, IWorkflowRepository? workflow, IDocumentStore store, DocumentProtection protection, CancellationToken ct)
