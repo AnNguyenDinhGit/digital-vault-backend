@@ -32,11 +32,12 @@ public class ChatService(LegacyVaultDbContext db)
             return false; // Chủ sở hữu (Owner) hoặc các role khác tuyệt đối không có quyền
         }
 
-        // 3. Kiểm tra xem user có thực sự được phân công phụ trách đơn bàn giao (requestId) này không
-        // Sử dụng DbSet là HandoverRequests đúng với định nghĩa trong DbContext của bạn
+        // 3. Kiểm tra xem user có thực sự được phân công phụ trách đơn bàn giao (requestId) này không:
+        // - Là Executor phụ trách đơn (h.ExecutorId == userId)
+        // - HOẶC là Người thẩm định pháp lý được gán cho đơn này (db.LegalVerifications có VerifierId == userId)
         bool isAssigned = await db.HandoverRequests.AnyAsync(h =>
             h.RequestId == requestId &&
-            (h.ExecutorId == userId), ct); // Hoặc kiểm tra thêm LegalVerifierId nếu cấu trúc bảng có lưu trữ
+            (h.ExecutorId == userId || db.LegalVerifications.Any(lv => lv.RequestId == requestId && lv.VerifierId == userId)), ct);
 
         return isAssigned;
     }
