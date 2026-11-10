@@ -113,6 +113,19 @@ public sealed class LegalController(ManagementService service) : VaultController
     [HttpGet("{requestId:int}")] public async Task<IActionResult> Detail(int requestId, CancellationToken ct) { var value = await service.LegalDetail(UserId, requestId, ct); return Ok(new { request = value.Request, verification = value.Verification }); }
     [HttpGet("{requestId:int}/documents/{documentId:int}/content")] public async Task<IActionResult> Document(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, false, ct));
     [HttpGet("{requestId:int}/asset-documents/{documentId:int}/content")] public async Task<IActionResult> AssetDocument(int requestId, int documentId, CancellationToken ct) => ContentFile(await service.LegalDocument(UserId, requestId, documentId, true, ct));
+    [HttpGet("{requestId:int}/documents/{documentId:int}/signature-status")]
+    public async Task<IActionResult> DocumentSignatureStatus(int requestId, int documentId, CancellationToken ct)
+    {
+        var doc = await service.LegalDocument(UserId, requestId, documentId, false, ct);
+        return Ok(new
+        {
+            documentId,
+            fileName = doc.FileName,
+            fileType = doc.FileType,
+            signatureValid = doc.SignatureValid,
+            purpose = doc.Purpose
+        });
+    }
     [HttpPost("{requestId:int}/approve"), RequestSizeLimit(11 * 1024 * 1024)]
     public Task<ReviewDto> Approve(int requestId, CancellationToken ct) => SubmitReview(requestId, "Approved", ct);
 

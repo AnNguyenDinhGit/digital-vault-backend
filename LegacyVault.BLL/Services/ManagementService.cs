@@ -536,7 +536,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     public async Task<(HandoverDto Request, ReviewDto Verification)> LegalDetail(int user, int id, CancellationToken ct)
     {
-        var (r, v) = await Legal(user, id, ct); return (Map(r), new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt));
+        var (r, v) = await Legal(user, id, ct);
+        var docs = await EvidenceMetadata(r, ct);
+        return (Map(r) with { Documents = docs }, new(v.VerificationId, id, user, v.Status, v.Comment, v.SubmittedAt, v.ReviewedAt));
     }
     public async Task<PageDto<LegalAssetDto>> LegalAssets(int user, int id, int page, int size, CancellationToken ct)
     {
