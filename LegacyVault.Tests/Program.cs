@@ -108,7 +108,7 @@ signedRepo.Handover.HandoverDocuments.Add(saved);
 var detail = await signedService.Request(6, 20, default);
 Check(detail.Documents.Single().SignatureValid == true, "handover detail rechecks stored signature");
 var downloaded = await signedService.RequestDocument(6, 20, saved.HandoverDocumentId, default);
-Check(downloaded.Content.SequenceEqual(file.Content) && downloaded.SignatureValid, "executor reads entire decrypted document and signature status");
+Check(downloaded.Content.SequenceEqual(file.Content) && downloaded.SignatureValid == true, "executor reads entire decrypted document and signature status");
 var registrationRepo = new FakeRepository();
 var identity = new IdentityService(registrationRepo);
 RegisterInput Registration(string email = " NewUser@Example.test ", string password = "Registration123!", string? confirmation = null, string? phone = " 0901234567 ") =>

@@ -29,7 +29,10 @@ public abstract class VaultController : ControllerBase
     }
     protected IActionResult ContentFile(DocumentContent doc)
     {
-        Response.Headers["X-Signature-Valid"] = doc.SignatureValid ? "true" : "false";
+        if (doc.SignatureValid is not null)
+        {
+            Response.Headers["X-Signature-Valid"] = doc.SignatureValid.Value ? "true" : "false";
+        }
         Response.Headers["Cache-Control"] = "no-store";
         Response.Headers["X-Content-Type-Options"] = "nosniff";
         return File(doc.Content, doc.FileType, doc.FileName, enableRangeProcessing: false);
@@ -57,6 +60,7 @@ public sealed class LegalForm
     [Range(1, int.MaxValue)] public int VerifierId { get; set; }
     [StringLength(2000)] public string? Comment { get; set; }
     [Required] public IFormFile Evidence { get; set; } = null!;
+    public IFormFile? Signature { get; set; }
 }
 
 [ApiController, Authorize, Route("api/owner"), TypeFilter(typeof(RequireActiveSubscriptionFilter))]
@@ -152,7 +156,7 @@ public sealed class ExecutorController(VaultService service) : VaultController
 
     [HttpPost("{requestId:int}/legal-verifications"), RequestSizeLimit(11 * 1024 * 1024)]
     public async Task<IActionResult> Legal(int requestId, [FromForm] LegalForm form, CancellationToken ct) =>
-        Ok(new { VerificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), ct) });
+        Ok(new { VerificationId = await service.RequestLegal(UserId, requestId, form.VerifierId, form.Comment, await ReadUpload(form.Evidence, ct), await ReadSignature(form.Signature, ct), ct) });
 }
 
 [ApiController, Authorize, Route("api/beneficiary")]
