@@ -376,7 +376,10 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     private async Task<DocumentContent> Read(string path, CancellationToken ct)
     {
         var content = await protection.Read(store, path, ct);
-        return new(content.File.FileName, content.File.FileType, content.File.Content, protection.Verify(content.File.Content, content.Signature, content.SignerId), content.Purpose);
+        bool? sigValid = (content.Signature is null || content.Signature.Length == 0)
+            ? null
+            : protection.Verify(content.File.Content, content.Signature, content.SignerId);
+        return new(content.File.FileName, content.File.FileType, content.File.Content, sigValid, content.Purpose);
     }
     public async Task AssignExecutor(int user, int vault, ExecutorInput input, CancellationToken ct)
     {
@@ -598,7 +601,7 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
             foreach (var d in r.Vault.DigitalAssets.Where(a => r.HandoverCases.Any(c => c.Assignment.AssetId == a.AssetId)).SelectMany(a => a.AssetDocuments).Where(d => d.Status is "Active" or "Pending_Legal"))
             {
                 var content = await Read(d.StoragePath, ct);
-                if (d.Status == "Active" && !content.SignatureValid) throw new WorkflowException(409, "Living-owner document signature is no longer valid.");
+                if (d.Status == "Active" && content.SignatureValid != true) throw new WorkflowException(409, "Living-owner document signature is no longer valid.");
             }
             foreach (var d in r.HandoverDocuments) _ = await Read(d.StoragePath, ct);
             r.Status = "Approved";

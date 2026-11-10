@@ -363,7 +363,10 @@ public sealed class VaultService(
     private async Task<DocumentContent> Read(string path, CancellationToken ct)
     {
         var doc = await protection.Read(store, path, ct);
-        return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, protection.Verify(doc.File.Content, doc.Signature, doc.SignerId), doc.Purpose);
+        bool? sigValid = (doc.Signature is null || doc.Signature.Length == 0)
+            ? null
+            : protection.Verify(doc.File.Content, doc.Signature, doc.SignerId);
+        return new DocumentContent(doc.File.FileName, doc.File.FileType, doc.File.Content, sigValid, doc.Purpose);
     }
 
     public Task<DocumentDto> UploadDeathCertificate(int user, int request, UploadFile file, byte[]? signature, CancellationToken ct) =>
@@ -431,7 +434,10 @@ public sealed class VaultService(
         catch { await store.Delete(path); throw; }
     }
 
-    public async Task<int> RequestLegal(int user, int request, int verifier, string? comment, UploadFile file, CancellationToken ct)
+    public Task<int> RequestLegal(int user, int request, int verifier, string? comment, UploadFile file, CancellationToken ct) =>
+        RequestLegal(user, request, verifier, comment, file, null, ct);
+
+    public async Task<int> RequestLegal(int user, int request, int verifier, string? comment, UploadFile file, byte[]? signature, CancellationToken ct)
     {
         var r = await Executed(user, request, ct);
         if (r.Status is not ("Draft" or "Rejected" or "Additional_Info")) throw new WorkflowException(409, "Only draft, rejected or additional-info requests can be submitted.");
@@ -442,8 +448,9 @@ public sealed class VaultService(
         if (comment?.Length > 2000) throw new WorkflowException(400, "Comment exceeds 2000 characters.");
         await HandoverEvidence.RequireDeathCertificate(r, store, protection, ct);
         Validate(file);
+        if (signature is not null) RequireSignature(file, signature, user);
         using var quotaLock = quotas is null ? null : await quotas.LockUser(r.Vault.OwnerId, ct);
-        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, null));
+        var protectedBytes = protection.Encrypt(new ProtectedDocument(file, user, signature, "Evidence"));
         if (quotas is not null) await quotas.EnsureStorageAvailable(r.Vault.OwnerId, protectedBytes.LongLength, ct);
         var path = await store.Write(protectedBytes, ct);
         try

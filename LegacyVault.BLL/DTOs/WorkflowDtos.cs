@@ -26,7 +26,7 @@ public sealed record CaseDto(int HandoverId, int AssetId, int BeneficiaryId, str
 }
 public sealed record InheritanceDto(int HandoverId, decimal Allocation, AssetDto Asset);
 public sealed record UploadFile(string FileName, string FileType, byte[] Content);
-public sealed record DocumentContent(string FileName, string FileType, byte[] Content, bool SignatureValid, string? Purpose = null);
+public sealed record DocumentContent(string FileName, string FileType, byte[] Content, bool? SignatureValid = null, string? Purpose = null);
 public sealed record LoginDto(int UserId, string[] Roles);
 public class WorkflowException(int statusCode, string message, string? errorCode = null) : Exception(message)
 {
