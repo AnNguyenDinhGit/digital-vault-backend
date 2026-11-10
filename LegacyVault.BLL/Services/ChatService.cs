@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -35,9 +35,8 @@ public class ChatService(LegacyVaultDbContext db)
         // 3. Kiểm tra xem user có thực sự được phân công phụ trách đơn bàn giao (requestId) này không:
         // - Là Executor phụ trách đơn (h.ExecutorId == userId)
         // - HOẶC là Người thẩm định pháp lý được gán cho đơn này (db.LegalVerifications có VerifierId == userId)
-        bool isAssigned = await db.HandoverRequests.AnyAsync(h =>
-            h.RequestId == requestId &&
-            (h.ExecutorId == userId || db.LegalVerifications.Any(lv => lv.RequestId == requestId && lv.VerifierId == userId)), ct);
+        bool isAssigned = await db.HandoverRequests.AnyAsync(h => h.RequestId == requestId && h.ExecutorId == userId, ct)
+            || await db.LegalVerifications.AnyAsync(lv => lv.RequestId == requestId && lv.VerifierId == userId, ct);
 
         return isAssigned;
     }

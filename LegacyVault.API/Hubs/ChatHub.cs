@@ -11,7 +11,7 @@ namespace LegacyVault.API.Hubs;
 public class ChatHub(ChatService chatService) : Hub
 {
     // Tham gia vào phòng chat của một đơn bàn giao cụ thể (có kiểm tra phân quyền)
-    public async Task JoinHandoverChat(int requestId, CancellationToken ct)
+    public async Task JoinHandoverChat(int requestId)
     {
         // 1. Lấy thông tin định danh (UserId) từ Token của người dùng đang kết nối
         var userIdClaim = Context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -22,8 +22,8 @@ public class ChatHub(ChatService chatService) : Hub
             throw new HubException("Phiên đăng nhập không hợp lệ hoặc thiếu thông tin định danh.");
         }
 
-        // 2. Kiểm tra quyền truy cập thôngผ่าน ChatService xem user có được phân công vào đơn này không
-        bool hasAccess = await chatService.UserHasAccessToHandoverAsync(userId, requestId, ct);
+        // 2. Kiểm tra quyền truy cập thông qua ChatService xem user có được phân công vào đơn này không
+        bool hasAccess = await chatService.UserHasAccessToHandoverAsync(userId, requestId, Context.ConnectionAborted);
         if (!hasAccess)
         {
             throw new HubException("Bạn không có quyền tham gia phòng chat của đơn bàn giao này.");
