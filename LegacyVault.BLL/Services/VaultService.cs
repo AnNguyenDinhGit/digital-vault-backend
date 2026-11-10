@@ -338,16 +338,20 @@ public sealed class VaultService(
     {
         var r = await Executed(user, request, ct);
         var documents = new List<DocumentDto>();
+        var verifications = r.LegalVerifications.OrderBy(v => v.SubmittedAt).ToList();
         foreach (var d in r.HandoverDocuments)
         {
+            int? verificationId = verifications.Count > 0
+                ? (verifications.FirstOrDefault(v => v.SubmittedAt >= d.CreatedAt.AddSeconds(-10)) ?? verifications.Last()).VerificationId
+                : null;
             try
             {
                 var content = await Read(d.StoragePath, ct);
-                documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose));
+                documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, content.SignatureValid, content.Purpose, d.CreatedAt, verificationId));
             }
             catch (WorkflowException ex) when (ex.StatusCode == 503)
             {
-                documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, false, null));
+                documents.Add(new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, false, null, d.CreatedAt, verificationId));
             }
         }
         return Map(r) with { Documents = documents };

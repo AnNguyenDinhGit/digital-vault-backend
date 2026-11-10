@@ -34,7 +34,7 @@ public static class MappingExtensions
             r.Status,
             r.InitiatedAt,
             r.HandoverDocuments
-                .Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted))
+                .Select(d => new DocumentDto(d.HandoverDocumentId, d.FileName, d.FileType, d.IsEncrypted, null, null, d.CreatedAt))
                 .ToArray(),
             r.HandoverCases
                 .Select(c => new CaseDto(c.HandoverId, c.Assignment.AssetId, c.Assignment.BeneficiaryId, c.Status)

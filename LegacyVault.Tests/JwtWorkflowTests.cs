@@ -80,7 +80,7 @@ internal static class JwtWorkflowTests
         await app.StartAsync();
         security.SignerCertificates[ids["owner"]] = ownerCertificate.ExportCertificatePem();
         security.SignerCertificates[ids["other"]] = ownerCertificate.ExportCertificatePem();
-        security.SignerCertificates[ids["executor"]] = executorCertificate.ExportCertificatePem();
+        // security.SignerCertificates[ids["executor"]] = executorCertificate.ExportCertificatePem();
         security.TrustedRootCertificates.Add(executorCertificate.ExportCertificatePem());
         using var client = app.GetTestClient(); client.BaseAddress = new("https://localhost");
         var issuer = app.Services.GetRequiredService<IAccessTokenIssuer>();
