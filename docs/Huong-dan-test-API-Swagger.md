@@ -99,7 +99,7 @@ POST /api/auth/logout → Try it out → Execute. Kỳ vọng: 204, không có b
 
 ### Điều kiện mật khẩu và file ký
 
-PasswordHash hiện chỉ hỗ trợ PBKDF2-SHA256$iterations$base64Salt$base64Hash: 100.000–1.000.000 vòng, salt ≥16 byte, hash 32 byte. API đăng ký tạo hash đúng định dạng với 600.000 vòng. Không nhập chuỗi hash vào ô password. Chưa có API reset mật khẩu. Sai mật khẩu 5 lần có thể khóa tài khoản 15 phút.
+PasswordHash hiện chỉ hỗ trợ PBKDF2-SHA256$iterations$base64Salt$base64Hash: 100.000–1.000.000 vòng, salt ≥16 byte, hash 32 byte. API đăng ký tạo hash đúng định dạng với 600.000 vòng. Không nhập chuỗi hash vào ô password. Sai mật khẩu 5 lần có thể khóa tài khoản 15 phút. Nếu quên mật khẩu ở bước đăng nhập, gọi `POST /api/auth/forgot-password` với `{ "email": "..." }` để nhận mã OTP 6 số qua email, sau đó gọi `POST /api/auth/reset-password` với `{ "email": "...", "code": "<6 chữ số>", "newPassword": "...", "confirmPassword": "..." }` để đặt lại mật khẩu và mở khóa tài khoản.
 
 Signature là file binary chữ ký rời RSA-SHA256 PKCS#1 v1.5, khóa RSA ≥2048 bit, ký trên đúng toàn bộ bytes file upload. Người chuẩn bị dữ liệu cung cấp file và chữ ký tương ứng, đồng thời cấu hình chứng thư người ký. Không dùng file .p7s/CMS hoặc chỉ một PDF có chữ ký nhúng; backend hiện chưa hỗ trợ các định dạng đó. Sửa file sau khi ký sẽ làm chữ ký không hợp lệ.
 

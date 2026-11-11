@@ -17,6 +17,9 @@ Cập nhật ngày 28/10/2026, đối chiếu controller và middleware hiện t
 | PUT | `/api/auth/profile` | Cập nhật hồ sơ cá nhân |
 | POST | `/api/auth/change-password/request` | Yêu cầu đổi mật khẩu và gửi OTP email |
 | POST | `/api/auth/change-password/confirm` | Xác nhận OTP và hoàn tất đổi mật khẩu |
+| POST | `/api/auth/forgot-password` | Yêu cầu quên mật khẩu (`{ email }`), gửi OTP 6 số (luôn trả kết quả giống nhau để chống lộ tài khoản) |
+| POST | `/api/auth/forgot-password/verify-otp` | Xác nhận OTP quên mật khẩu (`{ email, code }`) và trả `resetToken` (cho luồng 2 bước) |
+| POST | `/api/auth/reset-password` | Đặt lại mật khẩu mới (`{ email, code/resetToken, newPassword, confirmPassword }`, giới hạn tối đa 5 lần thử OTP) |
 | POST | `/api/auth/logout` | Kết thúc phiên phía client và thu hồi OTP grant beneficiary |
 
 API nghiệp vụ dùng JWT Bearer. Đăng ký tài khoản thường nhận Owner do server gán và tự động gán Gói Miễn Phí (`Price == 0`) vô thời hạn; cấp quyền nhân viên được thực hiện qua Admin.

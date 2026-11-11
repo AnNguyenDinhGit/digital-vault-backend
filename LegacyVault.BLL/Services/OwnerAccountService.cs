@@ -42,6 +42,7 @@ public sealed class OwnerAccountService(IVaultRepository repository)
         ["RevokeExecutor"] = "Thu hồi người thi hành",
         ["UpdateProfile"] = "Cập nhật thông tin cá nhân",
         ["ChangePassword"] = "Đổi mật khẩu",
+        ["ResetPassword"] = "Đặt lại mật khẩu qua OTP",
         ["ToggleTwoFactor"] = "Đổi cài đặt xác thực hai lớp",
         ["EnableTwoFactor"] = "Bật xác thực hai lớp",
         ["DisableTwoFactor"] = "Tắt xác thực hai lớp",
