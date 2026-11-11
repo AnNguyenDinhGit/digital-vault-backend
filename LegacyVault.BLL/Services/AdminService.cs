@@ -619,6 +619,7 @@ public sealed class AdminService(IVaultRepository repository)
         ["PasswordLogin"] = "Đăng nhập bằng mật khẩu",
         ["GoogleLogin"] = "Đăng nhập bằng Google",
         ["ChangePassword"] = "Đổi mật khẩu",
+        ["ResetPassword"] = "Đặt lại mật khẩu qua OTP",
         ["ConfirmAlive"] = "Xác nhận còn sống (Check-in)",
         ["AdminCreateUser"] = "Quản trị viên tạo tài khoản",
         ["UpdateUserRoles"] = "Cập nhật vai trò người dùng",

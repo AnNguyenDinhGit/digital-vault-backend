@@ -10,8 +10,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LegacyVault.BLL.Services;
 
-public sealed class IdentityService(IVaultRepository repository, IOtpSender? sender = null)
+public sealed class IdentityService(IVaultRepository repository, IOtpSender? sender = null, TimeProvider? time = null)
 {
+    private DateTime UtcNow => (time ?? TimeProvider.System).GetUtcNow().UtcDateTime;
+
     private sealed record PasswordChangeChallenge(
         int UserId,
         string HashedNewPassword,
@@ -19,9 +21,9 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         DateTime Expires
     ) { public int Attempts { get; set; } }
 
-    private readonly ConcurrentDictionary<string, PasswordChangeChallenge> _passwordChallenges = new();
-    private readonly ConcurrentDictionary<int, DateTime> _passwordOtpSent = new();
-    private readonly SemaphoreSlim _passwordLock = new(1, 1);
+    private static readonly ConcurrentDictionary<string, PasswordChangeChallenge> _passwordChallenges = new();
+    private static readonly ConcurrentDictionary<int, DateTime> _passwordOtpSent = new();
+    private static readonly SemaphoreSlim _passwordLock = new(1, 1);
 
     private sealed record PendingRegistration(
         RegisterInput Input,
@@ -29,9 +31,24 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         DateTime Expires
     ) { public int Attempts { get; set; } }
 
-    private readonly ConcurrentDictionary<string, PendingRegistration> _pendingRegistrations = new();
-    private readonly ConcurrentDictionary<string, DateTime> _registerOtpSent = new(StringComparer.OrdinalIgnoreCase);
-    private readonly SemaphoreSlim _registerLock = new(1, 1);
+    private static readonly ConcurrentDictionary<string, PendingRegistration> _pendingRegistrations = new();
+    private static readonly ConcurrentDictionary<string, DateTime> _registerOtpSent = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly SemaphoreSlim _registerLock = new(1, 1);
+
+    private sealed record ForgotPasswordChallenge(
+        int UserId,
+        string Email,
+        DateTime Expires
+    )
+    {
+        public byte[] CodeHash { get; set; } = Array.Empty<byte>();
+        public int Attempts { get; set; }
+        public byte[]? ResetTokenHash { get; set; }
+    }
+
+    private static readonly ConcurrentDictionary<string, ForgotPasswordChallenge> _forgotPasswordChallenges = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, DateTime> _forgotPasswordOtpSent = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly SemaphoreSlim _forgotPasswordLock = new(1, 1);
     /// <summary>
     /// Phát hành cả AccessToken và RefreshToken (lưu vào DB) cho người dùng sau khi xác thực thành công.
     /// </summary>
@@ -227,7 +244,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         await _registerLock.WaitAsync(ct);
         try
         {
-            var now = DateTime.UtcNow;
+            var now = UtcNow;
             foreach (var entry in _pendingRegistrations.Where(x => x.Value.Expires <= now).ToArray())
                 _pendingRegistrations.TryRemove(entry.Key, out _);
             foreach (var entry in _registerOtpSent.Where(x => x.Value <= now.AddMinutes(-1)).ToArray())
@@ -270,7 +287,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
 
         lock (state)
         {
-            if (state.Expires <= DateTime.UtcNow || state.Attempts >= 5)
+            if (state.Expires <= UtcNow || state.Attempts >= 5)
                 throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
 
             state.Attempts++;
@@ -453,7 +470,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
         await _passwordLock.WaitAsync(ct);
         try
         {
-            var now = DateTime.UtcNow;
+            var now = UtcNow;
             foreach (var entry in _passwordChallenges.Where(x => x.Value.Expires <= now).ToArray())
                 _passwordChallenges.TryRemove(entry.Key, out _);
             foreach (var entry in _passwordOtpSent.Where(x => x.Value <= now.AddMinutes(-1)).ToArray())
@@ -496,7 +513,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
 
         lock (state)
         {
-            if (state.UserId != userId || state.Expires <= DateTime.UtcNow || state.Attempts >= 5)
+            if (state.UserId != userId || state.Expires <= UtcNow || state.Attempts >= 5)
                 throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
 
             state.Attempts++;
@@ -513,7 +530,7 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
             throw new WorkflowException(404, "Không tìm thấy người dùng.");
 
         var auth = user.Authentications.OrderByDescending(x => x.CreatedAt).FirstOrDefault();
-        var now = DateTime.UtcNow;
+        var now = UtcNow;
         if (auth is null)
         {
             auth = new Authentication
@@ -540,6 +557,184 @@ public sealed class IdentityService(IVaultRepository repository, IOtpSender? sen
             Action = "ChangePassword",
             EntityType = "User",
             EntityId = userId,
+            Result = "Success",
+            Timestamp = now
+        });
+        await repository.Save(ct);
+    }
+
+    public async Task<ForgotPasswordResponseDto> ForgotPassword(ForgotPasswordInput input, CancellationToken ct)
+    {
+        var errors = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), errors, true))
+            throw new WorkflowException(400, "Email không hợp lệ.");
+
+        var email = NormalizeAndValidateEmail(input.Email);
+
+        if (sender is null)
+            throw new WorkflowException(503, "Dịch vụ gửi email OTP chưa được cấu hình.");
+
+        await _forgotPasswordLock.WaitAsync(ct);
+        try
+        {
+            var now = UtcNow;
+            foreach (var entry in _forgotPasswordChallenges.Where(x => x.Value.Expires <= now).ToArray())
+                _forgotPasswordChallenges.TryRemove(entry.Key, out _);
+            foreach (var entry in _forgotPasswordOtpSent.Where(x => x.Value <= now.AddMinutes(-1)).ToArray())
+                _forgotPasswordOtpSent.TryRemove(entry.Key, out _);
+
+            if (_forgotPasswordOtpSent.ContainsKey(email))
+                throw new WorkflowException(429, "Vui lòng đợi 60 giây trước khi yêu cầu mã OTP mới.");
+
+            var user = await repository.LoginUser(email, ct);
+            if (user is not null && user.Status == "Active")
+            {
+                var code = RandomNumberGenerator.GetInt32(1000000).ToString("D6");
+                var expires = now.AddMinutes(5);
+
+                var subject = "LegacyVault - Mã xác nhận đặt lại mật khẩu";
+                var body = $"Xin chào {user.FullName},\n\nMã OTP đặt lại mật khẩu tài khoản LegacyVault của bạn là: {code}\n\nMã có hiệu lực trong 5 phút. Vui lòng không chia sẻ mã này cho bất kỳ ai.\n\nTrân trọng,\nĐội ngũ LegacyVault";
+
+                await sender.SendEmail(email, subject, body, ct);
+
+                var codeHash = SHA256.HashData(Encoding.UTF8.GetBytes(email + ":" + code));
+                _forgotPasswordChallenges[email] = new ForgotPasswordChallenge(user.UserId, email, expires)
+                {
+                    CodeHash = codeHash
+                };
+            }
+
+            _forgotPasswordOtpSent[email] = now;
+            return new ForgotPasswordResponseDto(300, "Nếu email tồn tại trong hệ thống, mã OTP đặt lại mật khẩu đã được gửi.");
+        }
+        finally
+        {
+            _forgotPasswordLock.Release();
+        }
+    }
+
+    public VerifyForgotPasswordOtpResponseDto VerifyForgotPasswordOtp(VerifyForgotPasswordOtpInput input)
+    {
+        var errors = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), errors, true))
+            throw new WorkflowException(400, "Thông tin xác thực OTP không hợp lệ.");
+
+        var email = NormalizeAndValidateEmail(input.Email);
+        var code = input.Code?.Trim() ?? "";
+
+        if (code.Length != 6 || !_forgotPasswordChallenges.TryGetValue(email, out var state))
+            throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+
+        lock (state)
+        {
+            if (state.Expires <= UtcNow || state.Attempts >= 5)
+            {
+                _forgotPasswordChallenges.TryRemove(email, out _);
+                throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+            }
+
+            state.Attempts++;
+            var computedHash = SHA256.HashData(Encoding.UTF8.GetBytes(email + ":" + code));
+            if (!CryptographicOperations.FixedTimeEquals(state.CodeHash, computedHash))
+                throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+
+            var resetToken = Guid.NewGuid().ToString("N");
+            state.CodeHash = RandomNumberGenerator.GetBytes(32);
+            state.ResetTokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(email + ":token:" + resetToken));
+            state.Attempts = 0;
+
+            return new VerifyForgotPasswordOtpResponseDto(resetToken, 300, "Xác thực mã OTP thành công.");
+        }
+    }
+
+    public async Task ResetPassword(ResetPasswordInput input, CancellationToken ct)
+    {
+        var errors = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(input, new ValidationContext(input), errors, true))
+            throw new WorkflowException(400, "Thông tin đặt lại mật khẩu không hợp lệ.");
+
+        var email = NormalizeAndValidateEmail(input.Email);
+
+        if (string.IsNullOrEmpty(input.NewPassword) || input.NewPassword.Length < 12 || input.NewPassword.Length > 1024)
+            throw new WorkflowException(400, "Mật khẩu mới phải có độ dài từ 12 đến 1024 ký tự.");
+
+        if (input.NewPassword != input.ConfirmPassword)
+            throw new WorkflowException(400, "Mật khẩu mới và mật khẩu xác nhận không khớp.");
+
+        var code = input.Code?.Trim() ?? "";
+        var resetToken = input.ResetToken?.Trim() ?? "";
+
+        if (string.IsNullOrEmpty(code) && string.IsNullOrEmpty(resetToken))
+            throw new WorkflowException(400, "Vui lòng nhập mã OTP 6 số hoặc mã đặt lại mật khẩu.");
+
+        if (!_forgotPasswordChallenges.TryGetValue(email, out var state))
+            throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+
+        lock (state)
+        {
+            if (state.Expires <= UtcNow || state.Attempts >= 5)
+            {
+                _forgotPasswordChallenges.TryRemove(email, out _);
+                throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+            }
+
+            state.Attempts++;
+
+            var isSixDigitOtp = code.Length == 6 && System.Text.RegularExpressions.Regex.IsMatch(code, "^[0-9]{6}$");
+            if (isSixDigitOtp && string.IsNullOrEmpty(resetToken))
+            {
+                var computedHash = SHA256.HashData(Encoding.UTF8.GetBytes(email + ":" + code));
+                if (!CryptographicOperations.FixedTimeEquals(state.CodeHash, computedHash))
+                    throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+            }
+            else
+            {
+                var tokenCandidate = !string.IsNullOrEmpty(resetToken) ? resetToken : code;
+                if (state.ResetTokenHash is null || tokenCandidate.Length != 32)
+                    throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+
+                var computedTokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(email + ":token:" + tokenCandidate));
+                if (!CryptographicOperations.FixedTimeEquals(state.ResetTokenHash, computedTokenHash))
+                    throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+            }
+
+            if (!_forgotPasswordChallenges.TryRemove(email, out _))
+                throw new WorkflowException(400, "Mã OTP đã được sử dụng.");
+        }
+
+        var user = await repository.User(state.UserId, ct);
+        if (user is null || user.Status != "Active")
+            throw new WorkflowException(400, "Mã OTP không hợp lệ hoặc đã hết hạn.");
+
+        var hashedNewPassword = HashPassword(input.NewPassword);
+        var auth = user.Authentications.OrderByDescending(x => x.CreatedAt).FirstOrDefault();
+        var now = UtcNow;
+        if (auth is null)
+        {
+            auth = new Authentication
+            {
+                UserId = user.UserId,
+                PasswordHash = hashedNewPassword,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            user.Authentications.Add(auth);
+        }
+        else
+        {
+            auth.PasswordHash = hashedNewPassword;
+            auth.FailedLoginCount = 0;
+            auth.LockedUntil = null;
+            auth.UpdatedAt = RecordVersion.Next(auth.UpdatedAt);
+        }
+
+        user.UpdatedAt = now;
+        repository.Add(new AuditLog
+        {
+            UserId = user.UserId,
+            Action = "ResetPassword",
+            EntityType = "User",
+            EntityId = user.UserId,
             Result = "Success",
             Timestamp = now
         });

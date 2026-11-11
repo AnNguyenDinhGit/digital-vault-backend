@@ -74,6 +74,9 @@ Workflow thường trả `{ "status": 409, "detail": "..." }`; lỗi model bindi
 | --- | --- | --- |
 | POST | `/api/auth/register` | JSON đăng ký bên dưới → 201 RegistrationDto, không tự login |
 | POST | `/api/auth/login` | `{ "email": "owner.a@example.test", "password": "Registration123!" }` → 200 TokenDto hoặc 202 challenge |
+| POST | `/api/auth/forgot-password` | `{ "email": "owner.a@example.test" }` → 200 `{ expiresInSeconds: 300, message }` (gửi OTP 6 số về email; luôn trả kết quả giống nhau dù email tồn tại hay không) |
+| POST | `/api/auth/forgot-password/verify-otp` | `{ "email": "owner.a@example.test", "code": "<6 chữ số>" }` → 200 `{ resetToken, expiresInSeconds: 300, message }` (tùy chọn cho luồng 2 bước) |
+| POST | `/api/auth/reset-password` | `{ "email": "owner.a@example.test", "code": "<6 chữ số>", "newPassword": "...", "confirmPassword": "..." }` (hoặc truyền `resetToken`) → 200 đặt lại mật khẩu mới (giới hạn 5 lần thử OTP) |
 | POST | `/api/auth/2fa/verify` | `{ "challengeId": "<32 ký tự>", "code": "<6 chữ số>" }` → 200 TokenDto |
 | POST | `/api/auth/2fa/resend` | `{ "challengeId": "..." }` → 200 challenge mới; chỉ Email, không resend TOTP |
 | GET | `/api/auth/me` | Bearer → 200 `{ userId, fullName, email, roles, status }` |

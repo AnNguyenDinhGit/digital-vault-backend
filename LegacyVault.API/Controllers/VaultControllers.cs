@@ -238,6 +238,29 @@ public sealed class AuthController(
         return result is LoginChallengeDto ? Accepted(result) : Ok(result);
     }
 
+    [AllowAnonymous, HttpPost("forgot-password"), EnableRateLimiting("otp")]
+    [ProducesResponseType(typeof(ForgotPasswordResponseDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ForgotPasswordResponseDto>> ForgotPassword([FromBody] ForgotPasswordInput input, CancellationToken ct)
+    {
+        var result = await identity.ForgotPassword(input, ct);
+        return Ok(result);
+    }
+
+    [AllowAnonymous, HttpPost("forgot-password/verify-otp"), EnableRateLimiting("otp")]
+    [ProducesResponseType(typeof(VerifyForgotPasswordOtpResponseDto), StatusCodes.Status200OK)]
+    public ActionResult<VerifyForgotPasswordOtpResponseDto> VerifyForgotPasswordOtp([FromBody] VerifyForgotPasswordOtpInput input)
+    {
+        var result = identity.VerifyForgotPasswordOtp(input);
+        return Ok(result);
+    }
+
+    [AllowAnonymous, HttpPost("reset-password"), EnableRateLimiting("otp")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordInput input, CancellationToken ct)
+    {
+        await identity.ResetPassword(input, ct);
+        return Ok(new { message = "Đặt lại mật khẩu thành công." });
+    }
+
     [HttpPost("refresh-token"), EnableRateLimiting("login")]
     [ProducesResponseType(typeof(TokenDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<TokenDto>> RefreshToken([FromBody] RefreshTokenInput input, CancellationToken ct)

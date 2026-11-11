@@ -73,3 +73,51 @@ public sealed class ConfirmChangePasswordInput
     public string Code { get; init; } = null!;
 }
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class ForgotPasswordInput
+{
+    [Required, EmailAddress, StringLength(150)]
+    public string Email { get; init; } = null!;
+}
+
+public sealed record ForgotPasswordResponseDto(
+    int ExpiresInSeconds,
+    string Message
+);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class VerifyForgotPasswordOtpInput
+{
+    [Required, EmailAddress, StringLength(150)]
+    public string Email { get; init; } = null!;
+
+    [Required, RegularExpression("^[0-9]{6}$")]
+    public string Code { get; init; } = null!;
+}
+
+public sealed record VerifyForgotPasswordOtpResponseDto(
+    string ResetToken,
+    int ExpiresInSeconds,
+    string Message
+);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class ResetPasswordInput
+{
+    [Required, EmailAddress, StringLength(150)]
+    public string Email { get; init; } = null!;
+
+    [StringLength(64)]
+    public string? Code { get; init; }
+
+    [StringLength(64)]
+    public string? ResetToken { get; init; }
+
+    [Required, StringLength(1024, MinimumLength = 12)]
+    public string NewPassword { get; init; } = null!;
+
+    [Required, StringLength(1024)]
+    public string ConfirmPassword { get; init; } = null!;
+}
+
+

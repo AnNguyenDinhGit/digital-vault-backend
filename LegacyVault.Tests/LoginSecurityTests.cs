@@ -168,6 +168,114 @@ internal static class LoginSecurityTests
             check(auth.LockedUntil > DateTime.UtcNow && auth.FailedLoginCount == 0, "five wrong passwords persist a temporary account lock");
             await Reject(() => Service(db).Login("login@example.test", "Registration123!", default), 401, "correct password cannot bypass a persisted lock");
         }
+
+        // Forgot-password & reset-password security tests
+        var resetClock = new LoginClock();
+        var resetSender = new LoginSender();
+        IdentityService ResetIdentity(LegacyVaultDbContext db) => new(new VaultRepository(db), resetSender, resetClock);
+
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            var nonExistentResp = await ResetIdentity(db).ForgotPassword(new ForgotPasswordInput { Email = "unknown-user@example.test" }, default);
+            var existingResp = await ResetIdentity(db).ForgotPassword(new ForgotPasswordInput { Email = " LOGIN@EXAMPLE.TEST " }, default);
+            check(
+                nonExistentResp.ExpiresInSeconds == existingResp.ExpiresInSeconds &&
+                nonExistentResp.Message == existingResp.Message &&
+                resetSender.SentCount == 1 &&
+                resetSender.Code.Length == 6,
+                "forgot-password returns identical response whether email exists or not while sending 6-digit OTP only to existing account");
+
+            await Reject(() => ResetIdentity(db).ForgotPassword(new ForgotPasswordInput { Email = "unknown-user@example.test" }, default), 429, "forgot-password enforces 60s cooldown equally on non-existent email");
+            await Reject(() => ResetIdentity(db).ForgotPassword(new ForgotPasswordInput { Email = "login@example.test" }, default), 429, "forgot-password enforces 60s cooldown on existing email");
+
+            var firstOtp = resetSender.Code;
+            var wrongOtp = firstOtp == "000000" ? "000001" : "000000";
+            for (var attempt = 1; attempt <= 5; attempt++)
+            {
+                await Reject(
+                    () => ResetIdentity(db).ResetPassword(new ResetPasswordInput
+                    {
+                        Email = "login@example.test",
+                        Code = wrongOtp,
+                        NewPassword = "NewPassword123!",
+                        ConfirmPassword = "NewPassword123!"
+                    }, default),
+                    400,
+                    "reset-password rejects wrong OTP attempt " + attempt);
+            }
+
+            await Reject(
+                () => ResetIdentity(db).ResetPassword(new ResetPasswordInput
+                {
+                    Email = "login@example.test",
+                    Code = firstOtp,
+                    NewPassword = "NewPassword123!",
+                    ConfirmPassword = "NewPassword123!"
+                }, default),
+                400,
+                "reset-password attempt limit blocks a subsequently correct OTP code");
+        }
+
+        resetClock.Advance(TimeSpan.FromSeconds(61));
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            await ResetIdentity(db).ForgotPassword(new ForgotPasswordInput { Email = "login@example.test" }, default);
+            var validOtp = resetSender.Code;
+
+            // 1-step reset-password flow
+            await ResetIdentity(db).ResetPassword(new ResetPasswordInput
+            {
+                Email = "login@example.test",
+                Code = validOtp,
+                NewPassword = "ResetPassword123!",
+                ConfirmPassword = "ResetPassword123!"
+            }, default);
+
+            await Reject(
+                () => ResetIdentity(db).ResetPassword(new ResetPasswordInput
+                {
+                    Email = "login@example.test",
+                    Code = validOtp,
+                    NewPassword = "AnotherPassword123!",
+                    ConfirmPassword = "AnotherPassword123!"
+                }, default),
+                400,
+                "consumed reset-password OTP cannot be reused");
+        }
+
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            var token = (TokenDto)await Service(db).Login("login@example.test", "ResetPassword123!", default);
+            check(token.UserId == userId, "reset-password updates password hash and clears temporary account lock");
+        }
+
+        // 2-step verify-otp + reset-password flow
+        resetClock.Advance(TimeSpan.FromSeconds(61));
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            await ResetIdentity(db).ForgotPassword(new ForgotPasswordInput { Email = "login@example.test" }, default);
+            var stepOtp = resetSender.Code;
+            var verifyResp = ResetIdentity(db).VerifyForgotPasswordOtp(new VerifyForgotPasswordOtpInput
+            {
+                Email = "login@example.test",
+                Code = stepOtp
+            });
+            check(!string.IsNullOrEmpty(verifyResp.ResetToken) && verifyResp.ResetToken.Length == 32, "verify-otp issues a 32-char reset token");
+
+            await ResetIdentity(db).ResetPassword(new ResetPasswordInput
+            {
+                Email = "login@example.test",
+                ResetToken = verifyResp.ResetToken,
+                NewPassword = "TwoStepPassword123!",
+                ConfirmPassword = "TwoStepPassword123!"
+            }, default);
+        }
+
+        await using (var db = new LegacyVaultDbContext(options))
+        {
+            var token = (TokenDto)await Service(db).Login("login@example.test", "TwoStepPassword123!", default);
+            check(token.UserId == userId, "2-step reset-password updates password using resetToken");
+        }
     }
 
     private sealed class LoginClock : TimeProvider
@@ -180,19 +288,23 @@ internal static class LoginSecurityTests
     private sealed class LoginSender : IOtpSender
     {
         public string Code { get; private set; } = "";
+        public int SentCount { get; private set; }
         public bool Fail { get; set; }
 
         public Task Send(string email, string code, CancellationToken ct)
         {
             if (Fail) throw new WorkflowException(503, "Test email unavailable.");
             Code = code;
+            SentCount++;
             return Task.CompletedTask;
         }
 
         public Task SendEmail(string email, string subject, string body, CancellationToken ct)
         {
             if (Fail) throw new WorkflowException(503, "Test email unavailable.");
-            Code = body;
+            var match = System.Text.RegularExpressions.Regex.Match(body, @"\b\d{6}\b");
+            Code = match.Success ? match.Value : body;
+            SentCount++;
             return Task.CompletedTask;
         }
     }
