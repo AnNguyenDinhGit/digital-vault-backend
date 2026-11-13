@@ -53,6 +53,7 @@ internal static class JwtWorkflowTests
         builder.Services.AddDbContext<LegacyVaultDbContext>(o => o.UseSqlite(connection));
         builder.Services.AddScoped<IVaultRepository, VaultRepository>(); builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
         builder.Services.AddScoped<IdentityService>(); builder.Services.AddScoped<VaultService>(); builder.Services.AddScoped<ManagementService>();
+        builder.Services.AddScoped<OwnerAccountService>();
         builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
         builder.Services.AddSingleton(security);
         builder.Services.AddSingleton<DocumentProtection>(); builder.Services.AddSingleton<IDocumentStore, FakeStore>();
@@ -70,7 +71,7 @@ internal static class JwtWorkflowTests
             await db.Database.EnsureCreatedAsync();
             var roles = new[] { "Owner", "Beneficiary", "Executor", "Staff", "LegalVerifier", "Admin" }.ToDictionary(x => x, x => new Role { RoleName = x });
             var hash = IdentityService.HashPassword("Registration123!");
-            foreach (var (name, role) in new[] { ("owner", "Owner"), ("other", "Owner"), ("recipient", "Beneficiary"), ("executor", "Executor"), ("staff", "Staff"), ("staff2", "Staff"), ("legal", "LegalVerifier"), ("legal2", "LegalVerifier") })
+            foreach (var (name, role) in new[] { ("owner", "Owner"), ("owner2", "Owner"), ("other", "Owner"), ("recipient", "Beneficiary"), ("executor", "Executor"), ("staff", "Staff"), ("staff2", "Staff"), ("legal", "LegalVerifier"), ("legal2", "LegalVerifier") })
             {
                 var u = new User { FullName = name, Email = name + "@example.test", Status = "Active", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
                 u.Roles.Add(roles[role]); u.Authentications.Add(new() { PasswordHash = hash, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }); db.Users.Add(u);
@@ -79,6 +80,7 @@ internal static class JwtWorkflowTests
         }
         await app.StartAsync();
         security.SignerCertificates[ids["owner"]] = ownerCertificate.ExportCertificatePem();
+        security.SignerCertificates[ids["owner2"]] = ownerCertificate.ExportCertificatePem();
         security.SignerCertificates[ids["other"]] = ownerCertificate.ExportCertificatePem();
         // security.SignerCertificates[ids["executor"]] = executorCertificate.ExportCertificatePem();
         security.TrustedRootCertificates.Add(executorCertificate.ExportCertificatePem());
@@ -566,11 +568,19 @@ internal static class JwtWorkflowTests
         await Expect(await ConfirmReceiptRequest(caseId, null), HttpStatusCode.NotFound, "verified beneficiary cannot confirm another person's receipt");
         await Expect(await client.GetAsync($"/api/beneficiary/assets/{handover.Asset}/documents/{doc.DocumentId}/content"), HttpStatusCode.NotFound, "verified beneficiary cannot download another person's inheritance");
 
-        var eligibility = await CreateFixture("Executor eligibility"); await UploadAsset(eligibility.Asset);
+        As("owner");
+        await Expect(await client.PostAsJsonAsync("/api/owner/vaults", new { name = "Blocked vault" }), HttpStatusCode.Conflict, "deceased owner with completed death-certificate handover cannot create vault");
+        await Expect(await client.PostAsJsonAsync("/api/owner/assets", new { vaultId = handover.Vault, name = "Blocked asset", type = "Document" }), HttpStatusCode.Conflict, "deceased owner cannot create asset");
+        await Expect(await client.PostAsync("/api/owner/life-confirmation", null), HttpStatusCode.Conflict, "deceased owner cannot confirm alive");
+        await Expect(await client.PutAsJsonAsync("/api/owner/profile", new { fullName = "Blocked Name" }), HttpStatusCode.Conflict, "deceased owner cannot update profile");
+        await Expect(await client.PutAsJsonAsync("/api/owner/security/two-factor", new { enabled = false }), HttpStatusCode.Conflict, "deceased owner cannot toggle two-factor");
+        await Expect(await client.PostAsJsonAsync($"/api/owner/vaults/{handover.Vault}/handovers", new { }), HttpStatusCode.Conflict, "deceased owner cannot create handover");
+
+        var eligibility = await CreateFixture("Executor eligibility", "owner2"); await UploadAsset(eligibility.Asset);
         await using (var db = new LegacyVaultDbContext(dbOptions))
         {
             var role = await db.Roles.SingleAsync(r => r.RoleName == "Executor");
-            foreach (var name in new[] { "owner", "recipient" }) (await db.Users.SingleAsync(u => u.UserId == ids[name])).Roles.Add(role);
+            foreach (var name in new[] { "owner2", "recipient" }) (await db.Users.SingleAsync(u => u.UserId == ids[name])).Roles.Add(role);
             var executor = await db.Authentications.SingleAsync(a => a.UserId == ids["executor"]); executor.LockedUntil = DateTime.UtcNow.AddMinutes(10);
             var inactive = new User { FullName = "Inactive executor", Email = "inactive-executor@example.test", Status = "Inactive", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
             inactive.Roles.Add(role); db.Users.Add(inactive); await db.SaveChangesAsync();
@@ -591,10 +601,10 @@ internal static class JwtWorkflowTests
         await Expect(await client.PostAsJsonAsync($"/api/owner/vaults/{eligibility.Vault}/handovers", new { }), HttpStatusCode.Conflict, "retry cannot rerandomize or create a second assignment");
         await using (var db = new LegacyVaultDbContext(dbOptions))
         {
-            foreach (var name in new[] { "owner", "recipient" }) { var u = await db.Users.Include(u => u.Roles).SingleAsync(u => u.UserId == ids[name]); u.Roles.Remove(u.Roles.Single(r => r.RoleName == "Executor")); }
+            foreach (var name in new[] { "owner2", "recipient" }) { var u = await db.Users.Include(u => u.Roles).SingleAsync(u => u.UserId == ids[name]); u.Roles.Remove(u.Roles.Single(r => r.RoleName == "Executor")); }
             await db.SaveChangesAsync();
         }
-        var legacyStaff = await CreateFixture("Legacy Staff assignment"); await UploadAsset(legacyStaff.Asset);
+        var legacyStaff = await CreateFixture("Legacy Staff assignment", "owner2"); await UploadAsset(legacyStaff.Asset);
         await using (var db = new LegacyVaultDbContext(dbOptions))
         {
             db.ExecutorAssignments.Add(new() { VaultId = legacyStaff.Vault, ExecutorId = ids["staff"], Status = "Active", AssignedAt = DateTime.UtcNow }); await db.SaveChangesAsync();
@@ -602,12 +612,12 @@ internal static class JwtWorkflowTests
         await Expect(await client.PostAsJsonAsync($"/api/owner/vaults/{legacyStaff.Vault}/handovers", new { }), HttpStatusCode.Forbidden, "legacy Staff assignment is not silently treated as Executor or replaced by random selection");
         As("staff"); await Expect(await client.GetAsync("/api/executor/assignments"), HttpStatusCode.Forbidden, "legacy Staff DB role cannot discover Executor assignments");
         await Expect(await client.PostAsJsonAsync($"/api/executor/assignments/{legacyStaff.Vault}/handovers", new { }), HttpStatusCode.Forbidden, "legacy assigned Staff cannot initiate handover");
-        var executorInitiated = await CreateFixture("Executor initiated"); await UploadAsset(executorInitiated.Asset);
+        var executorInitiated = await CreateFixture("Executor initiated", "owner2"); await UploadAsset(executorInitiated.Asset);
         As("executor"); await Expect(await client.PostAsJsonAsync($"/api/executor/assignments/{executorInitiated.Vault}/handovers", new { }), HttpStatusCode.NotFound, "Executor cannot initiate an unassigned vault request");
-        As("owner"); await client.PutAsJsonAsync($"/api/owner/vaults/{executorInitiated.Vault}/executor", new { executorId = ids["executor"] });
+        As("owner2"); await client.PutAsJsonAsync($"/api/owner/vaults/{executorInitiated.Vault}/executor", new { executorId = ids["executor"] });
         As("executor"); await Expect(await client.PostAsJsonAsync($"/api/executor/assignments/{executorInitiated.Vault}/handovers", new { }), HttpStatusCode.Created, "previously assigned Executor can initiate a draft without needing Owner to return");
         await Expect(await client.PostAsJsonAsync($"/api/executor/assignments/{executorInitiated.Vault}/handovers", new { }), HttpStatusCode.Conflict, "Executor initiation retry cannot duplicate a protected handover");
-        var rollback = await CreateFixture("Rollback random assignment"); await UploadAsset(rollback.Asset);
+        var rollback = await CreateFixture("Rollback random assignment", "owner2"); await UploadAsset(rollback.Asset);
         await using (var db = new LegacyVaultDbContext(dbOptions)) await db.Database.ExecuteSqlRawAsync("CREATE TRIGGER fail_request BEFORE INSERT ON HANDOVER_REQUESTS BEGIN SELECT RAISE(ABORT, 'Injected failure'); END;");
         await Expect(await client.PostAsJsonAsync($"/api/owner/vaults/{rollback.Vault}/handovers", new { }), HttpStatusCode.InternalServerError, "request save failure is not reported as successful random assignment");
         await using (var db = new LegacyVaultDbContext(dbOptions))
@@ -615,17 +625,17 @@ internal static class JwtWorkflowTests
             check(!await db.ExecutorAssignments.AnyAsync(a => a.VaultId == rollback.Vault) && !await db.HandoverRequests.AnyAsync(r => r.VaultId == rollback.Vault), "failed request rolls back random assignment and cases on relational database");
             await db.Database.ExecuteSqlRawAsync("DROP TRIGGER fail_request;");
         }
-        var competing = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection).AddInterceptors(new AssignmentRace(dbOptions, rollback.Vault, ids["owner"], app.Services)).Options;
+        var competing = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection).AddInterceptors(new AssignmentRace(dbOptions, rollback.Vault, ids["owner2"], app.Services)).Options;
         await using (var db = new LegacyVaultDbContext(competing))
         {
-            try { await Service(db, app.Services).CreateRequest(ids["owner"], rollback.Vault, default); throw new Exception("Expected assignment concurrency conflict"); }
+            try { await Service(db, app.Services).CreateRequest(ids["owner2"], rollback.Vault, default); throw new Exception("Expected assignment concurrency conflict"); }
             catch (RepositoryConflictException) { check(true, "concurrent random assignment rejected by vault version after competing SQL commit"); }
         }
         await using (var db = new LegacyVaultDbContext(dbOptions)) check(await db.ExecutorAssignments.CountAsync(a => a.VaultId == rollback.Vault) == 1 && await db.HandoverRequests.CountAsync(r => r.VaultId == rollback.Vault) == 1, "concurrent creation leaves one persisted assignment and one request");
-        var revokeDocuments = await CreateFixture("Document revoke"); var revokeDoc = await UploadAsset(revokeDocuments.Asset);
+        var revokeDocuments = await CreateFixture("Document revoke", "owner2"); var revokeDoc = await UploadAsset(revokeDocuments.Asset);
         await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{revokeDocuments.Asset}/documents/{revokeDoc.DocumentId}/revoke", new { }), HttpStatusCode.NoContent, "owner revokes unprocessed document without deleting history");
         await Expect(await client.GetAsync($"/api/owner/assets/{revokeDocuments.Asset}/documents/{revokeDoc.DocumentId}/content"), HttpStatusCode.NotFound, "revoked document is not downloadable");
-        var rejectedFlow = await CreateFixture("Rejected flow"); await UploadAsset(rejectedFlow.Asset);
+        var rejectedFlow = await CreateFixture("Rejected flow", "owner2"); await UploadAsset(rejectedFlow.Asset);
         var existingAllocation = (await client.GetFromJsonAsync<PageDto<AssignmentDto>>($"/api/owner/assets/{rejectedFlow.Asset}/allocations"))!.Items.Single();
         await Expect(await client.PutAsJsonAsync($"/api/owner/assets/{rejectedFlow.Asset}/allocations/{existingAllocation.AssignmentId}", new { allocation = 50 }), HttpStatusCode.OK, "legal asset fixture splits allocation across beneficiaries");
         await Expect(await client.PostAsJsonAsync($"/api/owner/assets/{rejectedFlow.Asset}/beneficiaries", new { email = "other@example.test", allocation = 50 }), HttpStatusCode.Created, "legal asset fixture has multiple cases for one asset");
@@ -643,7 +653,7 @@ internal static class JwtWorkflowTests
         As("executor");
         check((await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Any(r => r.RequestId == rejectedRequest.RequestId), "AutoAssigned requests appear in executor list consistently with detail");
         var namedRequest = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers"))!.Items.Single(r => r.RequestId == rejectedRequest.RequestId);
-        check(namedRequest.OwnerName == "owner" && namedRequest.Cases.Count == 3 && namedRequest.Cases.All(c => c.AssetName == (c.AssetId == rejectedFlow.Asset ? "Rejected flow asset" : "Second legal asset")), "multi-asset and multi-beneficiary handover maps each case to its own asset name");
+        check(namedRequest.OwnerName == "owner2" && namedRequest.Cases.Count == 3 && namedRequest.Cases.All(c => c.AssetName == (c.AssetId == rejectedFlow.Asset ? "Rejected flow asset" : "Second legal asset")), "multi-asset and multi-beneficiary handover maps each case to its own asset name");
         var firstRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=1&pageSize=1"))!;
         var secondRequestPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/executor/handovers?page=2&pageSize=1"))!;
         check(firstRequestPage.Items.Count == 1 && secondRequestPage.Items.Count == 1 && firstRequestPage.Items[0].RequestId != secondRequestPage.Items[0].RequestId && secondRequestPage.Page == 2, "merged handover pagination returns distinct assigned records on consecutive pages");
@@ -673,7 +683,7 @@ internal static class JwtWorkflowTests
         check(assetPage1.Items.Count == 1 && assetPage2.Items.Count == 1 && assetPage1.Items[0].AssetId < assetPage2.Items[0].AssetId && assetPage2.Page == 2 && assetPage3.Items.Count == 0, "legal asset pagination has stable ordering, no duplicate cases and an empty trailing page");
         await Expect(await LegalDecisionRequest(rejectedRequest.RequestId, "reject", "Invalid signature", wrongKey: true), HttpStatusCode.BadRequest, "legal rejection rejects invalid digital signature");
         await Expect(await LegalDecisionRequest(rejectedRequest.RequestId, "reject", "Evidence insufficient"), HttpStatusCode.OK, "LegalVerifier persists independent rejection");
-        As("owner");
+        As("owner2");
         await Expect(await client.PostAsJsonAsync($"/api/owner/handovers/{rejectedRequest.RequestId}/cancel", new { }), HttpStatusCode.NoContent, "Owner can cancel rejected request to repair evidence without deleting history");
         await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{rejectedFlow.Vault}", new { name = "Corrected after rejection" }), HttpStatusCode.OK, "cancelled rejection releases mutation gate while completed records remain protected");
         async Task<HandoverDto> NewOtherOwnerRequest(string name)
@@ -719,7 +729,7 @@ internal static class JwtWorkflowTests
                 (await db.HandoverCases.SingleAsync(c => c.RequestId == raceRequest.RequestId)).Status == "Pending" &&
                 !await db.AuditLogs.AnyAsync(a => a.Action == "ConfirmOwnerDeceased" && a.EntityId == ids["other"]), "losing approval rolls back Owner death audit and case transitions");
         }
-        var intake = await CreateFixture("Executor intake"); await UploadAsset(intake.Asset);
+        var intake = await CreateFixture("Executor intake", "owner2"); await UploadAsset(intake.Asset);
         var intakeResponse = await client.PostAsJsonAsync($"/api/owner/vaults/{intake.Vault}/handovers", new { });
         var intakeRequest = (await intakeResponse.Content.ReadFromJsonAsync<HandoverDto>())!;
         check(intakeRequest.Status == "Pending_Executor", "new Owner handover has a distinct Executor decision state");
@@ -754,7 +764,7 @@ internal static class JwtWorkflowTests
         var declineResponse = await client.PostAsJsonAsync($"/api/executor/handovers/{intakeRequest.RequestId}/decline", new { reason = "No capacity" });
         await Expect(declineResponse, HttpStatusCode.OK, "assigned Executor declines pending handover with reason");
         check((await declineResponse.Content.ReadFromJsonAsync<HandoverDto>())!.Status == "Declined", "Executor decline is distinguishable from legal rejection");
-        As("owner");
+        As("owner2");
         var declinedOwnerDetail = (await client.GetFromJsonAsync<HandoverDto>($"/api/owner/handovers/{intakeRequest.RequestId}"))!;
         check(declinedOwnerDetail.ExecutorId == ids["executor"] && declinedOwnerDetail.ExecutorName == "executor" && declinedOwnerDetail.DeclineReason == "No capacity" && declinedOwnerDetail.DeclinedAt?.Kind == DateTimeKind.Utc, "Owner detail reads persisted decline reason and UTC audit time with Executor identity");
         var ownerDeclinedPage = (await client.GetFromJsonAsync<PageDto<HandoverDto>>("/api/owner/handovers?status=Declined"))!;
@@ -786,9 +796,9 @@ internal static class JwtWorkflowTests
         {
             check((await db.ExecutorAssignments.SingleAsync(a => a.VaultId == intake.Vault)).Status == "Revoked" &&
                 (await db.HandoverCases.Where(c => c.RequestId == intakeRequest.RequestId).ToListAsync()).All(c => c.Status == "Cancelled") &&
-                await db.Notifications.AnyAsync(n => n.UserId == ids["owner"] && n.Title == "Executor declined handover" && n.Message.Contains("No capacity")), "decline closes cases, revokes assignment and persists Owner reason notification");
+                await db.Notifications.AnyAsync(n => n.UserId == ids["owner2"] && n.Title == "Executor declined handover" && n.Message.Contains("No capacity")), "decline closes cases, revokes assignment and persists Owner reason notification");
         }
-        As("owner"); await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{intake.Vault}/executor", new { executorId = ids["other"] }), HttpStatusCode.NoContent, "Owner can choose a different Executor after decline");
+        As("owner2"); await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{intake.Vault}/executor", new { executorId = ids["other"] }), HttpStatusCode.NoContent, "Owner can choose a different Executor after decline");
         var replacement = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{intake.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
         check(replacement.RequestId != intakeRequest.RequestId && replacement.ExecutorId == ids["other"] && replacement.Status == "Pending_Executor", "replacement creates a new pending request and preserves declined history");
         check(replacement.ExecutorName == "other" && replacement.DeclineReason is null && replacement.DeclinedAt is null, "replacement Owner create response identifies new Executor without copying previous decline");
@@ -807,14 +817,14 @@ internal static class JwtWorkflowTests
             check((await db.HandoverRequests.SingleAsync(r => r.RequestId == replacement.RequestId)).Status == "Draft" &&
                 (await db.ExecutorAssignments.SingleAsync(a => a.VaultId == intake.Vault && a.ExecutorId == ids["other"])).Status == "Active" &&
                 !await db.AuditLogs.AnyAsync(a => a.Action == "DeclineHandover" && a.EntityId == replacement.RequestId), "losing decline rolls back revoked assignment, cases and audit after winning acceptance");
-        As("owner"); await Expect(await client.PostAsync($"/api/owner/vaults/{intake.Vault}/executor/revoke", null), HttpStatusCode.Conflict, "Owner cannot revoke an already accepted handover assignment");
-        var revokeFixture = await CreateFixture("Owner revokes assignment"); await UploadAsset(revokeFixture.Asset);
+        As("owner2"); await Expect(await client.PostAsync($"/api/owner/vaults/{intake.Vault}/executor/revoke", null), HttpStatusCode.Conflict, "Owner cannot revoke an already accepted handover assignment");
+        var revokeFixture = await CreateFixture("Owner revokes assignment", "owner2"); await UploadAsset(revokeFixture.Asset);
         await Expect(await client.GetAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor"), HttpStatusCode.NotFound, "vault with no assignment returns 404 instead of invented Executor");
         await Expect(await client.PutAsJsonAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor", new { executorId = ids["executor"] }), HttpStatusCode.NoContent, "Owner assigns Executor before revocation test");
         As("other"); await Expect(await client.GetAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor"), HttpStatusCode.NotFound, "another Owner cannot inspect assigned Executor");
         await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NotFound, "another Owner cannot revoke assignment");
         As("legal"); await Expect(await client.GetAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor"), HttpStatusCode.Forbidden, "LegalVerifier cannot use Owner vault Executor endpoint");
-        As("owner"); await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NoContent, "Owner revokes assignment and receives 204 only after persistence");
+        As("owner2"); await Expect(await client.PostAsync($"/api/owner/vaults/{revokeFixture.Vault}/executor/revoke", null), HttpStatusCode.NoContent, "Owner revokes assignment and receives 204 only after persistence");
         await using (var db = new LegacyVaultDbContext(dbOptions))
             check((await db.ExecutorAssignments.SingleAsync(a => a.VaultId == revokeFixture.Vault)).Status == "Revoked" &&
                 await db.AuditLogs.AnyAsync(a => a.Action == "RevokeExecutor" && a.EntityId == revokeFixture.Vault), "204 revoke persists exact Revoked status and audit in database");
@@ -836,14 +846,14 @@ internal static class JwtWorkflowTests
                 (await db.HandoverCases.Where(c => c.RequestId == revokePending.RequestId).ToListAsync()).All(c => c.Status == "Cancelled") &&
                 !await db.ExecutorAssignments.AnyAsync(a => a.VaultId == revokeFixture.Vault && a.Status == "Active"), "successful pending revoke closes cases and leaves no active assignment");
         As("executor"); await Expect(await client.PostAsync($"/api/executor/handovers/{revokePending.RequestId}/accept", null), HttpStatusCode.NotFound, "revoked Executor cannot accept cancelled pending handover");
-        var revokeRaceFixture = await CreateFixture("Concurrent revoke and acceptance"); await UploadAsset(revokeRaceFixture.Asset);
+        var revokeRaceFixture = await CreateFixture("Concurrent revoke and acceptance", "owner2"); await UploadAsset(revokeRaceFixture.Asset);
         await client.PutAsJsonAsync($"/api/owner/vaults/{revokeRaceFixture.Vault}/executor", new { executorId = ids["executor"] });
         var revokeRaceRequest = (await (await client.PostAsJsonAsync($"/api/owner/vaults/{revokeRaceFixture.Vault}/handovers", new { })).Content.ReadFromJsonAsync<HandoverDto>())!;
         var revokeRaceOptions = new DbContextOptionsBuilder<LegacyVaultDbContext>().UseSqlite(connection)
             .AddInterceptors(new IntakeRace(dbOptions, revokeRaceRequest.RequestId, ids["executor"], app.Services)).Options;
         await using (var db = new LegacyVaultDbContext(revokeRaceOptions))
         {
-            try { await Service(db, app.Services).RevokeExecutor(ids["owner"], revokeRaceFixture.Vault, default); throw new Exception("Expected revoke concurrency conflict"); }
+            try { await Service(db, app.Services).RevokeExecutor(ids["owner2"], revokeRaceFixture.Vault, default); throw new Exception("Expected revoke concurrency conflict"); }
             catch (RepositoryConflictException) { check(true, "concurrent Executor acceptance prevents stale Owner revocation from committing"); }
         }
         await using (var db = new LegacyVaultDbContext(dbOptions))
