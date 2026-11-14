@@ -7,6 +7,7 @@ using LegacyVault.BLL.DTOs;
 using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
 
 namespace LegacyVault.BLL.Services;
 
@@ -25,7 +26,12 @@ public sealed class VnPayOptions
     public string FeResearch { get; set; } = "";
 }
 
-public sealed class VnPayService(IPaymentRepository repository, VnPayOptions options)
+public sealed class VnPayService(
+    IPaymentRepository repository,
+    VnPayOptions options,
+    IWorkflowRepository? workflow = null,
+    IDocumentStore? store = null,
+    DocumentProtection? protection = null)
 {
     public async Task<IReadOnlyList<SubscriptionPlanDto>> Plans(CancellationToken ct) =>
         (await repository.ActivePlans(ct)).Select(x => new SubscriptionPlanDto(x.PlanId, x.PlanName, x.MaxVaults, x.MaxStorageBytes, x.Price, x.DurationDays)).ToArray();
@@ -446,6 +452,9 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 
     public async Task<PaymentCheckoutDto> CreateCheckout(int userId, int planId, string ipAddress, CancellationToken ct)
     {
+        if (workflow is not null && store is not null && protection is not null)
+            await HandoverEvidence.EnsureOwnerNotDeceased(userId, workflow, store, protection, ct);
+
         var quote = await GetQuote(userId, planId, ct);
         if (!quote.Allowed)
         {
@@ -498,6 +507,9 @@ public sealed class VnPayService(IPaymentRepository repository, VnPayOptions opt
 
     public async Task<CurrentSubscriptionDto> SelectFreePlan(int userId, int planId, CancellationToken ct)
     {
+        if (workflow is not null && store is not null && protection is not null)
+            await HandoverEvidence.EnsureOwnerNotDeceased(userId, workflow, store, protection, ct);
+
         // 1. Kiểm tra tồn tại của Plan
         var plan = await repository.Plan(planId, ct)
             ?? throw new WorkflowException(404, "Subscription plan not found.");

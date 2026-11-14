@@ -105,14 +105,14 @@ public sealed class WorkflowRepository(LegacyVaultDbContext db) : IWorkflowRepos
     public Task<bool> HasOwnerDeathRecord(int ownerId, CancellationToken ct) =>
         db.HandoverRequests.AsNoTracking().AnyAsync(r =>
             r.Vault.OwnerId == ownerId &&
-            r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Declined" && r.Status != "Completed" &&
+            r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Declined" &&
             db.AuditLogs.Any(a =>
                 a.Action == "UploadDeathCertificate" && a.EntityType == "HandoverRequest" && a.EntityId == r.RequestId),
             ct);
 
     public Task<List<HandoverRequest>> OwnerDeathReports(int ownerId, CancellationToken ct) => db.HandoverRequests.AsNoTracking()
         .Include(r => r.HandoverDocuments).AsSplitQuery()
-        .Where(r => r.Vault.OwnerId == ownerId && r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Completed" && r.HandoverDocuments.Any())
+        .Where(r => r.Vault.OwnerId == ownerId && r.Status != "Cancelled" && r.Status != "Rejected" && r.Status != "Declined" && r.HandoverDocuments.Any())
         .ToListAsync(ct);
 
     public Task<List<HandoverOverviewRow>> Overview(int executor, int page, int size, string? status, int? ownerId, bool assignedOnly, CancellationToken ct)

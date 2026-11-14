@@ -524,7 +524,9 @@ public sealed class ManagementService(IVaultRepository repository, IWorkflowRepo
     }
     public async Task Cancel(int user, int id, CancellationToken ct)
     {
-        await OwnerRequest(user, id, ct); var r = (await workflow.RequestGraph(id, ct))!;
+        await OwnerRequest(user, id, ct);
+        await HandoverEvidence.EnsureOwnerNotDeceased(user, workflow, store, protection, ct);
+        var r = (await workflow.RequestGraph(id, ct))!;
         if (r.Status is not ("Pending_Executor" or "Draft" or "Rejected")) throw new WorkflowException(409, "Only awaiting Executor, draft or rejected requests can be cancelled.");
         r.Status = "Cancelled"; foreach (var c in r.HandoverCases) c.Status = "Cancelled"; Touch(r.Vault);
         Audit(user, "CancelHandover", "HandoverRequest", id); await repository.Save(ct);

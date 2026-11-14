@@ -1,13 +1,19 @@
 using System.Security.Cryptography;
 using LegacyVault.BLL.DTOs;
+using LegacyVault.BLL.Security;
 using LegacyVault.DAL.Entities;
 using LegacyVault.DAL.Repositories;
+using LegacyVault.DAL.Storage;
 using Microsoft.EntityFrameworkCore;
 
 namespace LegacyVault.BLL.Services;
 
 // Tài khoản của chính người dùng đang đăng nhập: nhật ký hoạt động, hồ sơ cá nhân và bật/tắt 2FA qua email.
-public sealed class OwnerAccountService(IVaultRepository repository)
+public sealed class OwnerAccountService(
+    IVaultRepository repository,
+    IWorkflowRepository? workflow = null,
+    IDocumentStore? store = null,
+    DocumentProtection? protection = null)
 {
     public const int MaxActivityLogs = 500;
     private const string EmailFactor = "Email";
@@ -122,6 +128,7 @@ public sealed class OwnerAccountService(IVaultRepository repository)
             throw new WorkflowException(400, "Họ tên là bắt buộc (tối đa 100 ký tự).");
 
         var user = await ActiveUser(userId, ct);
+        await EnsureNotDeceasedIfAvailable(userId, ct);
         var phone = IdentityService.NormalizeAndValidatePhone(input.Phone);
         if (phone is not null)
             await IdentityService.EnsureUniqueUserFieldsAsync(repository, null, phone, null, userId, ct);
@@ -141,6 +148,7 @@ public sealed class OwnerAccountService(IVaultRepository repository)
             throw new WorkflowException(400, "Trường enabled phải là true hoặc false.");
 
         var user = await ActiveUser(userId, ct);
+        await EnsureNotDeceasedIfAvailable(userId, ct);
         var active = user.TwoFactorAuths.Where(x => x.IsEnabled).ToList();
         var now = DateTime.UtcNow;
 
@@ -181,6 +189,12 @@ public sealed class OwnerAccountService(IVaultRepository repository)
         user.UpdatedAt = now;
         await repository.Save(ct);
         return new(enabled);
+    }
+
+    private async Task EnsureNotDeceasedIfAvailable(int userId, CancellationToken ct)
+    {
+        if (workflow is not null && store is not null && protection is not null)
+            await HandoverEvidence.EnsureOwnerNotDeceased(userId, workflow, store, protection, ct);
     }
 
     private async Task<User> ActiveUser(int userId, CancellationToken ct)
